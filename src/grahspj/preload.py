@@ -75,6 +75,8 @@ class ModelContext:
     fluxes: np.ndarray
     errors: np.ndarray
     upper_limits: np.ndarray
+    data_mask: np.ndarray
+    positive_detected_mask: np.ndarray
     mw_ebv: float
 
 
@@ -475,9 +477,16 @@ def _prepare_loaded_filter(obs_wave: np.ndarray, response: speclite_filters.Filt
 def build_model_context(cfg: FitConfig) -> ModelContext:
     """Construct the static context consumed by the grahspj NumPyro model."""
     cfg.validate()
-    fluxes = np.asarray(cfg.photometry.fluxes, dtype=float)
-    errors = np.asarray(cfg.photometry.errors, dtype=float)
+    raw_fluxes = np.asarray(cfg.photometry.fluxes, dtype=float)
+    raw_errors = np.asarray(cfg.photometry.errors, dtype=float)
+    fluxes = np.asarray(raw_fluxes, dtype=float)
+    errors = np.asarray(raw_errors, dtype=float)
     upper_limits = np.asarray(cfg.photometry.is_upper_limit if cfg.photometry.is_upper_limit is not None else np.zeros_like(fluxes, dtype=bool), dtype=bool)
+    data_mask = (~upper_limits) & np.isfinite(raw_fluxes) & np.isfinite(raw_errors) & (raw_errors > 0.0)
+    positive_detected_mask = (~upper_limits) & np.isfinite(raw_fluxes) & (raw_fluxes > 0.0)
+    fluxes = np.nan_to_num(fluxes, nan=0.0, posinf=1.0e30, neginf=-1.0e30)
+    errors = np.nan_to_num(errors, nan=1.0e30, posinf=1.0e30, neginf=1.0e30)
+    errors = np.clip(np.abs(errors), 1.0e-30, 1.0e30)
 
     rest_wave = np.geomspace(cfg.galaxy.rest_wave_min, cfg.galaxy.rest_wave_max, cfg.galaxy.n_wave).astype(float)
     obs_wave = rest_wave * (1.0 + max(cfg.observation.redshift, 0.0))
@@ -519,5 +528,7 @@ def build_model_context(cfg: FitConfig) -> ModelContext:
         fluxes=fluxes,
         errors=errors,
         upper_limits=upper_limits,
+        data_mask=data_mask,
+        positive_detected_mask=positive_detected_mask,
         mw_ebv=mw_ebv,
     )

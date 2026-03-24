@@ -11,6 +11,7 @@ class Observation:
     """Observation-level metadata for one fitted source."""
     object_id: str
     redshift: float
+    fit_redshift: bool = False
     redshift_err: float = 0.0
     ra: float | None = None
     dec: float | None = None
@@ -107,6 +108,8 @@ class LikelihoodConfig:
     """Likelihood and extra model-mismatch configuration."""
     systematics_width: float = 0.05
     student_t_df: float = 5.0
+    fit_intrinsic_scatter: bool = True
+    intrinsic_scatter_default: float = 1.0e-4
     variability_uncertainty: bool = True
     agn_nev: float = 0.1
     attenuation_model_uncertainty: bool = False

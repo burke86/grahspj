@@ -7,10 +7,14 @@ from __future__ import annotations
 import csv
 import json
 import argparse
+import os
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from importlib import resources
+import multiprocessing as mp
 from pathlib import Path
 from typing import Any, Iterable
+import zlib
 
 import numpy as np
 from astropy import units as u
@@ -36,6 +40,12 @@ DEFAULT_RANDOM_SEED = 20231011
 DEFAULT_MAX_WEIGHTED_MAE = 3.0
 DEFAULT_MAX_ABS_WEIGHTED_BIAS = 2.0
 DEFAULT_MIN_FINITE_FRACTION = 0.95
+DEFAULT_BENCHMARK_OPTAX_STEPS = 600
+DEFAULT_BENCHMARK_OPTAX_LR = 1.0e-2
+DEFAULT_BENCHMARK_NUTS_WARMUP = 50
+DEFAULT_BENCHMARK_NUTS_SAMPLES = 50
+DEFAULT_BENCHMARK_NUTS_CHAINS = 1
+DEFAULT_BENCHMARK_FIT_METHOD = "optax+nuts"
 _C_LIGHT_ANG_PER_S = 2.99792458e18
 _CHIMERA_FILTER_FILE_MAP = {
     "IRAC1": "resources/filters/IRAC1.dat",
@@ -69,6 +79,16 @@ _C_MS = 2.99792458e8
 class ChimeraBenchmarkDataset:
     """Joined Chimera benchmark rows used by the stellar-mass benchmark."""
     rows: list[dict[str, Any]]
+
+
+@dataclass
+class _BenchmarkWorkerTask:
+    """One pickleable Chimera benchmark worker task."""
+    index: int
+    row: dict[str, Any]
+    dsps_ssp_fn: str
+    base_config: FitConfig | None
+    z_edges: np.ndarray
 
 
 def _package_root() -> Path:
@@ -265,6 +285,7 @@ def build_chimera_fit_config(row: dict[str, Any], dsps_ssp_fn: str = "tempdata.h
             observation=Observation(
                 object_id=str(row["id"]),
                 redshift=float(row["redshift"]),
+                fit_redshift=base_config.observation.fit_redshift,
                 redshift_err=base_config.observation.redshift_err,
                 ra=base_config.observation.ra,
                 dec=base_config.observation.dec,
@@ -290,11 +311,11 @@ def build_chimera_fit_config(row: dict[str, Any], dsps_ssp_fn: str = "tempdata.h
         raise FileNotFoundError(f"DSPS SSP file not found: {dsps_path}")
     cfg.galaxy.dsps_ssp_fn = str(dsps_path)
     cfg.inference = InferenceConfig(
-        learning_rate=cfg.inference.learning_rate,
-        map_steps=cfg.inference.map_steps,
-        num_warmup=cfg.inference.num_warmup,
-        num_samples=cfg.inference.num_samples,
-        num_chains=cfg.inference.num_chains,
+        learning_rate=DEFAULT_BENCHMARK_OPTAX_LR,
+        map_steps=DEFAULT_BENCHMARK_OPTAX_STEPS,
+        num_warmup=DEFAULT_BENCHMARK_NUTS_WARMUP,
+        num_samples=DEFAULT_BENCHMARK_NUTS_SAMPLES,
+        num_chains=DEFAULT_BENCHMARK_NUTS_CHAINS,
         target_accept_prob=cfg.inference.target_accept_prob,
         seed=DEFAULT_RANDOM_SEED,
     )
@@ -331,15 +352,11 @@ def _estimate_chimera_prior_config(row: dict[str, Any]) -> dict[str, Any]:
     else:
         nearest_band = min(candidate_bands, key=lambda name: abs(_CHIMERA_EFFECTIVE_WAVELENGTHS_A[name] - target_obs_wave))
         optical_flux_mjy = float(np.clip(float(row[nearest_band]), 1.0e-6, None))
-    fnu_w_m2_hz = optical_flux_mjy * 1.0e-29
-    rest_wave_m = 5100.0e-10
-    lnu_w_hz = 4.0 * np.pi * luminosity_distance_m * luminosity_distance_m * (1.0 + redshift) * fnu_w_m2_hz
-    lambda_l_lambda_w = (_C_MS / rest_wave_m) * lnu_w_hz
-    log_agn_amp_loc = float(np.log(np.clip(lambda_l_lambda_w, 1.0e20, 1.0e60)))
+    fracagn_loc = float(np.clip(optical_flux_mjy / max(optical_flux_mjy + host_flux_mjy, 1.0e-12), 0.02, 0.95))
 
     return {
-        "log_stellar_mass": {"loc": log_stellar_mass_loc, "scale": 0.7},
-        "log_agn_amp": {"loc": log_agn_amp_loc, "scale": 2.0},
+        "log_stellar_mass": {"loc": log_stellar_mass_loc, "scale": 1.2},
+        "fracAGN_5100": {"loc": fracagn_loc, "scale": 0.2},
     }
 
 
@@ -398,9 +415,95 @@ def _redshift_bin_label(z: float, edges: np.ndarray) -> str:
     return f"{edges[idx]:.3f}-{edges[idx+1]:.3f}"
 
 
+def _stable_row_seed(row_id: str) -> int:
+    """Derive a stable per-row seed from the benchmark base seed and row id."""
+    return int((DEFAULT_RANDOM_SEED + zlib.crc32(str(row_id).encode("utf-8"))) % (2**31 - 1))
+
+
+def _reduced_chi2_for_fit(fitter: Any) -> float:
+    """Compute a simple reduced chi-square from median predicted photometry."""
+    pred = fitter.predict()
+    pred_fluxes = np.median(np.asarray(pred["pred_fluxes"], dtype=float), axis=0)
+    obs_fluxes = np.asarray(fitter.context.fluxes, dtype=float)
+    obs_errors = np.asarray(fitter.context.errors, dtype=float)
+    upper_limits = np.asarray(fitter.context.upper_limits, dtype=bool)
+    valid = np.isfinite(pred_fluxes) & np.isfinite(obs_fluxes) & np.isfinite(obs_errors) & (obs_errors > 0.0) & (~upper_limits)
+    if not np.any(valid):
+        return float("nan")
+    chi2 = np.sum(((obs_fluxes[valid] - pred_fluxes[valid]) / obs_errors[valid]) ** 2)
+    n_params = len(fitter.samples or {})
+    dof = max(1, int(np.sum(valid)) - n_params)
+    return float(chi2 / dof)
+
+
+def _failed_benchmark_row(task: _BenchmarkWorkerTask, exc: Exception) -> dict[str, Any]:
+    """Build a NaN-filled benchmark row for one failed fit."""
+    enriched = dict(task.row)
+    enriched["log_stellar_mass_fit"] = float("nan")
+    enriched["log_stellar_mass_fit_p16"] = float("nan")
+    enriched["log_stellar_mass_fit_p84"] = float("nan")
+    enriched["log_stellar_mass_fit_err_lo"] = float("nan")
+    enriched["log_stellar_mass_fit_err_hi"] = float("nan")
+    enriched["reduced_chi2"] = float("nan")
+    enriched["residual"] = float("nan")
+    enriched["redshift_bin"] = _redshift_bin_label(float(task.row["redshift"]), task.z_edges)
+    enriched["fit_error"] = f"{type(exc).__name__}: {exc}"
+    return enriched
+
+
+def _run_single_chimera_fit(task: _BenchmarkWorkerTask, fitter_cls=None) -> tuple[int, dict[str, Any]]:
+    """Run one Chimera benchmark fit and return an ordered row payload."""
+    if fitter_cls is None:
+        from .core import GRAHSPJ
+
+        fitter_cls = GRAHSPJ
+    cfg = build_chimera_fit_config(row=task.row, dsps_ssp_fn=task.dsps_ssp_fn, base_config=task.base_config)
+    cfg.inference.seed = _stable_row_seed(str(task.row["id"]))
+    fitter = fitter_cls(cfg)
+    fitter.fit(
+        fit_method=DEFAULT_BENCHMARK_FIT_METHOD,
+        progress_bar=False,
+        optax_steps=cfg.inference.map_steps,
+        optax_lr=cfg.inference.learning_rate,
+        nuts_warmup=cfg.inference.num_warmup,
+        nuts_samples=cfg.inference.num_samples,
+        nuts_chains=cfg.inference.num_chains,
+    )
+    logm_samples = np.asarray(fitter.samples["log_stellar_mass"], dtype=float).reshape(-1)
+    logm16, logm50, logm84 = np.percentile(logm_samples, [16.0, 50.0, 84.0])
+    log_fit = float(logm50)
+    reduced_chi2 = _reduced_chi2_for_fit(fitter)
+    enriched = dict(task.row)
+    enriched["log_stellar_mass_fit"] = log_fit
+    enriched["log_stellar_mass_fit_p16"] = float(logm16)
+    enriched["log_stellar_mass_fit_p84"] = float(logm84)
+    enriched["log_stellar_mass_fit_err_lo"] = float(max(0.0, log_fit - logm16))
+    enriched["log_stellar_mass_fit_err_hi"] = float(max(0.0, logm84 - log_fit))
+    enriched["reduced_chi2"] = reduced_chi2
+    enriched["residual"] = log_fit - enriched["log_stellar_mass_truth"]
+    enriched["redshift_bin"] = _redshift_bin_label(float(task.row["redshift"]), task.z_edges)
+    enriched["fit_error"] = ""
+    return task.index, enriched
+
+
 def _write_artifact_table(path: Path, rows: list[dict[str, Any]]) -> None:
     """Write per-object benchmark results to a CSV artifact table."""
-    fieldnames = ["id", "ID_COSMOS", "redshift", "chimera_QSO_weight", "resample_weight", "log_stellar_mass_truth", "log_stellar_mass_fit", "residual"]
+    fieldnames = [
+        "id",
+        "ID_COSMOS",
+        "redshift",
+        "chimera_QSO_weight",
+        "resample_weight",
+        "log_stellar_mass_truth",
+        "log_stellar_mass_fit",
+        "log_stellar_mass_fit_p16",
+        "log_stellar_mass_fit_p84",
+        "log_stellar_mass_fit_err_lo",
+        "log_stellar_mass_fit_err_hi",
+        "reduced_chi2",
+        "residual",
+        "fit_error",
+    ]
     with open(path, "w", encoding="utf-8", newline="") as fh:
         writer = csv.DictWriter(fh, fieldnames=fieldnames)
         writer.writeheader()
@@ -414,12 +517,23 @@ def _write_plots(output_dir: Path, rows: list[dict[str, Any]]) -> None:
 
     truth = np.array([row["log_stellar_mass_truth"] for row in rows], dtype=float)
     fit = np.array([row["log_stellar_mass_fit"] for row in rows], dtype=float)
+    fit_err_lo = np.array([row["log_stellar_mass_fit_err_lo"] for row in rows], dtype=float)
+    fit_err_hi = np.array([row["log_stellar_mass_fit_err_hi"] for row in rows], dtype=float)
     qso_w = np.array([row["chimera_QSO_weight"] for row in rows], dtype=float)
-    finite = np.isfinite(fit)
+    finite = np.isfinite(fit) & np.isfinite(fit_err_lo) & np.isfinite(fit_err_hi)
 
     with use_style():
         fig, ax = plt.subplots(figsize=(5, 5))
-        ax.scatter(truth[finite], fit[finite], s=12, alpha=0.75)
+        ax.errorbar(
+            truth[finite],
+            fit[finite],
+            yerr=np.vstack([fit_err_lo[finite], fit_err_hi[finite]]),
+            fmt="o",
+            ms=4,
+            alpha=0.75,
+            lw=0.8,
+            capsize=2,
+        )
         lo = min(np.nanmin(truth[finite]), np.nanmin(fit[finite]))
         hi = max(np.nanmax(truth[finite]), np.nanmax(fit[finite]))
         ax.plot([lo, hi], [lo, hi], color="black", lw=1.0, ls="--")
@@ -450,6 +564,7 @@ def run_chimera_mass_benchmark(
     max_abs_weighted_bias: float = DEFAULT_MAX_ABS_WEIGHTED_BIAS,
     min_finite_fraction: float = DEFAULT_MIN_FINITE_FRACTION,
     limit: int | None = None,
+    num_workers: int | None = None,
 ) -> dict[str, Any]:
     """Run the Chimera stellar-mass recovery benchmark end to end."""
     if fitter_cls is None:
@@ -469,31 +584,68 @@ def run_chimera_mass_benchmark(
     z_edges = np.quantile(np.array([row["redshift"] for row in rows], dtype=float), np.linspace(0.0, 1.0, 6))
     z_edges[0] -= 1e-9
     z_edges[-1] += 1e-9
-    benchmark_rows: list[dict[str, Any]] = []
-    progress = tqdm(rows, desc="Chimera MAP fits", unit="obj")
-    for row in progress:
-        progress.set_postfix_str(str(row["id"]))
-        cfg = build_chimera_fit_config(row=row, dsps_ssp_fn=dsps_ssp_fn, base_config=base_config)
-        fitter = fitter_cls(cfg)
-        fitter.fit_map()
-        log_fit = float(fitter.recovered_log_stellar_mass())
-        enriched = dict(row)
-        enriched["log_stellar_mass_fit"] = log_fit
-        enriched["residual"] = log_fit - enriched["log_stellar_mass_truth"]
-        enriched["redshift_bin"] = _redshift_bin_label(float(row["redshift"]), z_edges)
-        benchmark_rows.append(enriched)
-    print("[benchmark] Finished MAP fitting")
+    if num_workers is None:
+        num_workers = max(1, os.cpu_count() or 1)
+    num_workers = max(1, min(int(num_workers), len(rows)))
+    print(f"[benchmark] Using {num_workers} worker(s)")
+    tasks = [
+        _BenchmarkWorkerTask(
+            index=i,
+            row=row,
+            dsps_ssp_fn=dsps_ssp_fn,
+            base_config=base_config,
+            z_edges=z_edges,
+        )
+        for i, row in enumerate(rows)
+    ]
+    benchmark_rows: list[dict[str, Any]] = [dict() for _ in tasks]
+    progress = tqdm(total=len(tasks), desc=f"Chimera {DEFAULT_BENCHMARK_FIT_METHOD} fits", unit="obj")
+    if num_workers == 1:
+        for task in tasks:
+            progress.set_postfix_str(str(task.row["id"]))
+            try:
+                idx, enriched = _run_single_chimera_fit(task, fitter_cls=fitter_cls)
+            except Exception as exc:
+                idx, enriched = task.index, _failed_benchmark_row(task, exc)
+            benchmark_rows[idx] = enriched
+            print(f"[benchmark] {task.row['id']} reduced chi2 = {enriched['reduced_chi2']:.3f}")
+            progress.update(1)
+    else:
+        ctx = mp.get_context("spawn")
+        with ProcessPoolExecutor(max_workers=num_workers, mp_context=ctx) as pool:
+            future_map = {pool.submit(_run_single_chimera_fit, task, fitter_cls): task for task in tasks}
+            for future in as_completed(future_map):
+                task = future_map[future]
+                progress.set_postfix_str(str(task.row["id"]))
+                try:
+                    idx, enriched = future.result()
+                except Exception as exc:
+                    idx, enriched = task.index, _failed_benchmark_row(task, exc)
+                benchmark_rows[idx] = enriched
+                print(f"[benchmark] {task.row['id']} reduced chi2 = {enriched['reduced_chi2']:.3f}")
+                progress.update(1)
+    progress.close()
+    print(f"[benchmark] Finished {DEFAULT_BENCHMARK_FIT_METHOD} fitting")
 
     fit = np.array([row["log_stellar_mass_fit"] for row in benchmark_rows], dtype=float)
     truth = np.array([row["log_stellar_mass_truth"] for row in benchmark_rows], dtype=float)
     weights = np.array([row["resample_weight"] for row in benchmark_rows], dtype=float)
     finite_fraction = float(np.isfinite(fit).mean())
     finite_rows = [row for row in benchmark_rows if np.isfinite(row["log_stellar_mass_fit"])]
-    metrics = compute_weighted_metrics(
-        np.array([row["log_stellar_mass_fit"] for row in finite_rows], dtype=float),
-        np.array([row["log_stellar_mass_truth"] for row in finite_rows], dtype=float),
-        np.array([row["resample_weight"] for row in finite_rows], dtype=float),
-    )
+    if finite_rows:
+        metrics = compute_weighted_metrics(
+            np.array([row["log_stellar_mass_fit"] for row in finite_rows], dtype=float),
+            np.array([row["log_stellar_mass_truth"] for row in finite_rows], dtype=float),
+            np.array([row["resample_weight"] for row in finite_rows], dtype=float),
+        )
+    else:
+        metrics = {
+            "weighted_bias": float("nan"),
+            "weighted_mae": float("nan"),
+            "weighted_rmse": float("nan"),
+            "weighted_medae": float("nan"),
+            "weighted_pearson": float("nan"),
+        }
     metrics["finite_fit_fraction"] = finite_fraction
     metrics["n_rows"] = len(benchmark_rows)
     metrics["n_finite_rows"] = len(finite_rows)
@@ -512,6 +664,7 @@ def run_chimera_mass_benchmark(
         "by_chimera_qso_weight": by_qso_weight,
         "rows": benchmark_rows,
         "passed": passed,
+        "num_workers": num_workers,
         "thresholds": {
             "max_weighted_mae": max_weighted_mae,
             "max_abs_weighted_bias": max_abs_weighted_bias,
@@ -529,6 +682,7 @@ def run_chimera_mass_benchmark(
                     "metrics": metrics,
                     "by_redshift_bin": by_redshift,
                     "by_chimera_qso_weight": by_qso_weight,
+                    "num_workers": num_workers,
                     "thresholds": out["thresholds"],
                     "passed": passed,
                 },
@@ -556,6 +710,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-abs-weighted-bias", type=float, default=DEFAULT_MAX_ABS_WEIGHTED_BIAS)
     parser.add_argument("--min-finite-fraction", type=float, default=DEFAULT_MIN_FINITE_FRACTION)
     parser.add_argument("--limit", type=int, default=None, help="Optional number of benchmark rows to run from the deterministic subset.")
+    parser.add_argument("--num-workers", type=int, default=None, help="Optional number of worker processes for parallel MAP fitting.")
     args = parser.parse_args(argv)
 
     result = run_chimera_mass_benchmark(
@@ -566,10 +721,12 @@ def main(argv: list[str] | None = None) -> int:
         max_abs_weighted_bias=args.max_abs_weighted_bias,
         min_finite_fraction=args.min_finite_fraction,
         limit=args.limit,
+        num_workers=args.num_workers,
     )
     summary = {
         "passed": result["passed"],
         "metrics": result["metrics"],
+        "num_workers": result["num_workers"],
         "thresholds": result["thresholds"],
         "output_dir": str(Path(args.output_dir).resolve()),
     }

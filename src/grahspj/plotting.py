@@ -47,6 +47,8 @@ def plot_fit_sed(fitter, output_path: str | Path | None = None, posterior: str =
     """Render a component SED plot for a fitted grahspj object."""
     pred = fitter.predict(posterior=posterior)
     obs_wave = _median_site(pred, "obs_wave")
+    x_min = min(1.0e2, float(np.nanmin(obs_wave)))
+    x_max = max(1.0e6, float(np.nanmax(obs_wave)))
     model_flux = _median_site(pred, "pred_fluxes")
     phot_wave = np.asarray([flt.effective_wavelength for flt in fitter.context.filters], dtype=float)
     obs_flux = np.asarray(fitter.config.photometry.fluxes, dtype=float)
@@ -156,8 +158,6 @@ def plot_fit_sed(fitter, output_path: str | Path | None = None, posterior: str =
             ymin = float(np.nanmin(visible_flux))
             ax_sed.set_ylim(ymin * 0.7, ymax * 1.8)
         ax_resid.set_xscale("log")
-        x_min = max(1.0e2, float(np.nanmin(obs_wave)))
-        x_max = max(1.0e6, float(np.nanmax(obs_wave)))
         ax_sed.set_xlim(x_min, x_max)
         ax_resid.set_xlim(x_min, x_max)
 

@@ -291,7 +291,7 @@ def _build_diffstar_host(context: ModelContext, prior_config: dict[str, Any]):
     gal_t_table = _np_to_jnp(context.gal_t_table)
     t_obs_gyr = jnp.asarray(context.t_obs_gyr, dtype=jnp.float64)
 
-    log_stellar_mass = numpyro.sample("log_stellar_mass", dist.Normal(*_cfg_mean_scale(prior_config, "log_stellar_mass", 10.5, 1.5)))
+    log_stellar_mass = numpyro.sample("log_stellar_mass", dist.Normal(*_cfg_mean_scale(prior_config, "log_stellar_mass", 10.5, 2.5)))
 
     u_params = {}
     for key in DEFAULT_DIFFSTAR_U_PARAMS._fields:
@@ -368,9 +368,8 @@ def _robust_flux_scale(fluxes, valid_mask):
     return jnp.where(jnp.isfinite(scale) & (scale > 0.0), scale, 1.0e-6)
 
 
-def _absolute_flux_scale_logprior(pred_fluxes, obs_fluxes, upper_limits, sigma_dex):
+def _absolute_flux_scale_logprior(pred_fluxes, obs_fluxes, valid_mask, sigma_dex):
     """Penalize solutions whose overall flux scale is far from the data."""
-    valid_mask = jnp.isfinite(obs_fluxes) & (obs_fluxes > 0.0) & (~upper_limits)
     n_valid = jnp.sum(valid_mask.astype(jnp.int32))
 
     def _compute():
@@ -382,14 +381,12 @@ def _absolute_flux_scale_logprior(pred_fluxes, obs_fluxes, upper_limits, sigma_d
     return jax.lax.cond(n_valid > 0, _compute, lambda: jnp.asarray(0.0, dtype=jnp.float64))
 
 
-def photometric_loglike(pred_fluxes, obs_fluxes, obs_errors, upper_limits, systematics_width, student_t_df, agn_component, agn_nev, variability_uncertainty, attenuation_model_uncertainty, transmitted_fraction, lyman_break_uncertainty, filter_wavelength, redshift):
+def photometric_loglike(pred_fluxes, obs_fluxes, obs_errors, upper_limits, data_mask, systematics_width, intrinsic_scatter, student_t_df, agn_component, agn_nev, variability_uncertainty, attenuation_model_uncertainty, transmitted_fraction, lyman_break_uncertainty, filter_wavelength, redshift):
     """Evaluate the broadband photometric log-likelihood for one model state."""
     pred_fluxes = jnp.nan_to_num(pred_fluxes, nan=0.0, posinf=1.0e30, neginf=-1.0e30)
-    obs_fluxes = jnp.nan_to_num(obs_fluxes, nan=0.0, posinf=1.0e30, neginf=-1.0e30)
-    obs_errors = jnp.nan_to_num(obs_errors, nan=1.0e30, posinf=1.0e30, neginf=1.0e30)
     agn_component = jnp.nan_to_num(agn_component, nan=0.0, posinf=1.0e30, neginf=-1.0e30)
     transmitted_fraction = jnp.nan_to_num(transmitted_fraction, nan=1.0e-4, posinf=1.0, neginf=1.0e-4)
-    obs_variance = obs_errors**2
+    obs_variance = obs_errors**2 + jnp.maximum(intrinsic_scatter, 0.0) ** 2
     var_variance = jnp.where(variability_uncertainty, agn_nev * agn_component**2, 0.0)
     sys_variance = (systematics_width * pred_fluxes) ** 2
     if attenuation_model_uncertainty:
@@ -403,9 +400,8 @@ def photometric_loglike(pred_fluxes, obs_fluxes, obs_errors, upper_limits, syste
         sys_variance = sys_variance + (ly_unc * pred_fluxes) ** 2
     total_variance = jnp.nan_to_num(obs_variance + sys_variance + var_variance, nan=1.0e30, posinf=1.0e30, neginf=1.0e30)
     scale = jnp.sqrt(jnp.clip(total_variance, 1e-30, 1.0e60))
-    mask_data = ~upper_limits
     student = dist.StudentT(df=student_t_df, loc=pred_fluxes, scale=scale)
-    logl_data = jnp.sum(jnp.where(mask_data, student.log_prob(obs_fluxes), 0.0))
+    logl_data = jnp.sum(jnp.where(data_mask, student.log_prob(obs_fluxes), 0.0))
     logl_lim = jnp.sum(jnp.where(upper_limits, -0.5 * _chi2_upper_limit(obs_fluxes, pred_fluxes, total_variance), 0.0))
     invalid = ~(jnp.isfinite(pred_fluxes) & jnp.isfinite(scale) & jnp.isfinite(obs_fluxes) & jnp.isfinite(obs_errors))
     penalty = -1.0e6 * jnp.sum(invalid.astype(jnp.float64))
@@ -426,15 +422,29 @@ def grahsp_photometric_model(context: ModelContext):
     line_sy2 = _np_to_jnp(context.templates.line_sy2)
     line_liner = _np_to_jnp(context.templates.line_liner)
     filter_wavelength = _np_to_jnp(np.array([f.effective_wavelength for f in context.filters], dtype=float))
+    obs_fluxes = _np_to_jnp(context.fluxes)
+    obs_errors = _np_to_jnp(context.errors)
+    upper_limits = _bool_to_jnp(context.upper_limits)
+    data_mask = _bool_to_jnp(context.data_mask)
+    positive_detected_mask = _bool_to_jnp(context.positive_detected_mask)
     dust_alpha_grid = np.asarray(context.templates.dust_alpha_grid, dtype=float)
 
-    log_agn_amp = numpyro.sample("log_agn_amp", dist.Normal(*_cfg_norm(prior_config, "log_agn_amp", -1.0, 1.5)))
-    agn_amp = jnp.exp(log_agn_amp)
     host_state = _build_diffstar_host(context, prior_config)
     host_rest = host_state["host_rest"]
     gal_v_kms = numpyro.sample("gal_v_kms", dist.Normal(*_cfg_norm(prior_config, "gal_v_kms", 0.0, 150.0)))
     gal_sigma_kms = numpyro.sample("gal_sigma_kms", dist.HalfNormal(_cfg_halfnorm(prior_config, "gal_sigma_kms", 150.0)))
     host_rest = _shift_and_broaden_single_spectrum_lnlam(jnp.log(rest_wave), host_rest, gal_v_kms, gal_sigma_kms)
+    fracagn_5100 = numpyro.sample(
+        "fracAGN_5100",
+        dist.TruncatedNormal(
+            *_cfg_norm(prior_config, "fracAGN_5100", 0.3, 0.25),
+            low=1.0e-4,
+            high=0.999,
+        ),
+    )
+    host_llambda_5100 = jnp.interp(5100.0, rest_wave, host_rest, left=0.0, right=0.0)
+    agn_amp = jnp.clip(host_llambda_5100, 0.0, 1.0e60) * (1.0 / (1.0 - fracagn_5100) - 1.0) * 5100.0
+    log_agn_amp = jnp.log(jnp.clip(agn_amp, 1.0e-30, 1.0e80))
 
     uv_slope = numpyro.sample("uv_slope", dist.Normal(*_cfg_norm(prior_config, "uv_slope", 0.0, 0.5)))
     pl_slope = numpyro.sample("pl_slope", dist.Normal(*_cfg_norm(prior_config, "pl_slope", -1.0, 0.5)))
@@ -518,7 +528,32 @@ def grahsp_photometric_model(context: ModelContext):
         )
     else:
         dust_alpha = jnp.asarray(float(cfg.galaxy.dust_alpha), dtype=jnp.float64)
-    redshift = numpyro.sample("redshift", dist.TruncatedNormal(cfg.observation.redshift, max(cfg.observation.redshift_err, 1e-3), low=0.0))
+    if cfg.likelihood.fit_intrinsic_scatter:
+        log_intrinsic_scatter = numpyro.sample(
+            "log_intrinsic_scatter",
+            dist.Normal(
+                *_cfg_norm(
+                    prior_config,
+                    "log_intrinsic_scatter",
+                    np.log(max(cfg.likelihood.intrinsic_scatter_default, 1.0e-8)),
+                    1.0,
+                ),
+            ),
+        )
+        intrinsic_scatter = jnp.exp(log_intrinsic_scatter)
+    else:
+        intrinsic_scatter = jnp.asarray(float(cfg.likelihood.intrinsic_scatter_default), dtype=jnp.float64)
+    if cfg.observation.fit_redshift:
+        redshift = numpyro.sample(
+            "redshift",
+            dist.TruncatedNormal(
+                cfg.observation.redshift,
+                max(cfg.observation.redshift_err, 1e-3),
+                low=0.0,
+            ),
+        )
+    else:
+        redshift = jnp.asarray(float(cfg.observation.redshift), dtype=jnp.float64)
     gal_att_rest, agn_att_rest, host_absorbed_rest, dust_luminosity = _apply_biattenuation(
         rest_wave,
         host_rest,
@@ -569,10 +604,12 @@ def grahsp_photometric_model(context: ModelContext):
 
     logl = photometric_loglike(
         pred_fluxes=pred_fluxes,
-        obs_fluxes=_np_to_jnp(context.fluxes),
-        obs_errors=_np_to_jnp(context.errors),
-        upper_limits=_bool_to_jnp(context.upper_limits),
+        obs_fluxes=obs_fluxes,
+        obs_errors=obs_errors,
+        upper_limits=upper_limits,
+        data_mask=data_mask,
         systematics_width=cfg.likelihood.systematics_width,
+        intrinsic_scatter=intrinsic_scatter,
         student_t_df=cfg.likelihood.student_t_df,
         agn_component=agn_fluxes,
         agn_nev=cfg.likelihood.agn_nev,
@@ -588,13 +625,15 @@ def grahsp_photometric_model(context: ModelContext):
     if cfg.likelihood.use_absolute_flux_scale_prior:
         abs_flux_scale_logprior = _absolute_flux_scale_logprior(
             pred_fluxes=pred_fluxes,
-            obs_fluxes=_np_to_jnp(context.fluxes),
-            upper_limits=_bool_to_jnp(context.upper_limits),
+            obs_fluxes=obs_fluxes,
+            valid_mask=positive_detected_mask,
             sigma_dex=cfg.likelihood.absolute_flux_scale_prior_sigma_dex,
         )
         numpyro.factor("absolute_flux_scale_prior", abs_flux_scale_logprior)
 
     numpyro.deterministic("pred_fluxes", pred_fluxes)
+    numpyro.deterministic("intrinsic_scatter_fit", intrinsic_scatter)
+    numpyro.deterministic("log_agn_amp_fit", log_agn_amp)
     numpyro.deterministic("agn_fluxes", agn_fluxes)
     numpyro.deterministic("host_fluxes", host_fluxes)
     numpyro.deterministic("dust_fluxes", dust_fluxes)

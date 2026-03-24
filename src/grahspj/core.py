@@ -24,6 +24,7 @@ class GRAHSPJ:
         self.nuts_result: dict[str, Any] | None = None
         self.samples: dict[str, Any] | None = None
         self.predictive: dict[str, Any] | None = None
+        self._plot_cache: dict[str, Any] | None = None
 
     def _reset_fit_state(self) -> None:
         """Clear cached inference and predictive state."""
@@ -31,6 +32,7 @@ class GRAHSPJ:
         self.nuts_result = None
         self.samples = None
         self.predictive = None
+        self._plot_cache = None
 
     def _apply_runtime_overrides(
         self,
@@ -108,6 +110,7 @@ class GRAHSPJ:
                 "balmer_obs_sed",
                 "dust_luminosity",
                 "dust_alpha_fit",
+                "intrinsic_scatter_fit",
                 "absolute_flux_scale_logprior",
             ],
         )(rng_key)
@@ -321,6 +324,8 @@ class GRAHSPJ:
             out["pred_fluxes_median"] = np.median(np.asarray(self.predictive["pred_fluxes"]), axis=0).tolist()
             if "dust_luminosity" in self.predictive:
                 out["dust_luminosity_fit"] = float(np.median(np.asarray(self.predictive["dust_luminosity"], dtype=float)))
+            if "intrinsic_scatter_fit" in self.predictive:
+                out["intrinsic_scatter_fit"] = float(np.median(np.asarray(self.predictive["intrinsic_scatter_fit"], dtype=float)))
             if "absolute_flux_scale_logprior" in self.predictive:
                 out["absolute_flux_scale_logprior"] = float(np.median(np.asarray(self.predictive["absolute_flux_scale_logprior"], dtype=float)))
         return out

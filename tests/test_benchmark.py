@@ -14,6 +14,54 @@ from grahspj.benchmark import (
 )
 
 
+class _FakeFitter:
+    def __init__(self, config):
+        self.config = config
+        self._mass = np.nan
+        self.context = type(
+            "_Ctx",
+            (),
+            {
+                "fluxes": np.asarray(config.photometry.fluxes, dtype=float),
+                "errors": np.asarray(config.photometry.errors, dtype=float),
+                "upper_limits": np.asarray(config.photometry.is_upper_limit, dtype=bool),
+            },
+        )()
+        self._predictive = None
+        self.samples = None
+
+    def fit_map(self):
+        row_id = str(self.config.observation.object_id)
+        token = sum(ord(ch) for ch in row_id) % 11
+        self._mass = 9.5 + 0.05 * token
+        draws = np.array([self._mass - 0.1, self._mass, self._mass + 0.1], dtype=float)
+        self.samples = {"log_stellar_mass": draws}
+        pred = np.asarray(self.config.photometry.fluxes, dtype=float) * (1.0 + 0.01 * token)
+        self._predictive = {"pred_fluxes": pred[None, :]}
+        return {"median": {"log_stellar_mass": self._mass}}
+
+    def fit(self, fit_method="optax+nuts", **kwargs):
+        assert fit_method == "optax+nuts"
+        return {"fit": self.fit_map()}
+
+    def recovered_log_stellar_mass(self):
+        return float(self._mass)
+
+    def predict(self):
+        return self._predictive
+
+
+class _FailingFakeFitter(_FakeFitter):
+    def fit_map(self):
+        if str(self.config.observation.object_id).endswith("_0.03"):
+            raise RuntimeError("intentional benchmark failure")
+        return super().fit_map()
+
+    def fit(self, fit_method="optax+nuts", **kwargs):
+        assert fit_method == "optax+nuts"
+        return {"fit": self.fit_map()}
+
+
 def test_chimera_dataset_adapter_and_subset():
     dataset = load_chimera_benchmark_dataset()
     assert len(dataset.rows) > 1000
@@ -33,7 +81,7 @@ def test_build_chimera_fit_config(tmp_path):
     assert cfg.photometry.filter_names[0] == "u_sdss"
     assert cfg.galaxy.dsps_ssp_fn == str(ssp_path)
     assert "log_stellar_mass" in cfg.prior_config
-    assert "log_agn_amp" in cfg.prior_config
+    assert "fracAGN_5100" in cfg.prior_config
 
 
 def test_build_chimera_fit_config_preserves_user_prior_overrides(tmp_path):
@@ -44,24 +92,10 @@ def test_build_chimera_fit_config_preserves_user_prior_overrides(tmp_path):
     base.prior_config["log_stellar_mass"] = {"loc": 9.9, "scale": 0.1}
     cfg = build_chimera_fit_config(row, dsps_ssp_fn=str(ssp_path), base_config=base)
     assert cfg.prior_config["log_stellar_mass"] == {"loc": 9.9, "scale": 0.1}
-    assert "log_agn_amp" in cfg.prior_config
+    assert "fracAGN_5100" in cfg.prior_config
 
 
 def test_chimera_mass_benchmark_with_surrogate_fitter(tmp_path):
-    class _FakeFitter:
-        def __init__(self, config):
-            self.config = config
-            self._mass = np.nan
-
-        def fit_map(self):
-            row_id = str(self.config.observation.object_id)
-            token = sum(ord(ch) for ch in row_id) % 11
-            self._mass = 9.5 + 0.05 * token
-            return {"median": {"log_stellar_mass": self._mass}}
-
-        def recovered_log_stellar_mass(self):
-            return float(self._mass)
-
     ssp_path = tmp_path / "fake.h5"
     ssp_path.write_bytes(b"")
     benchmark = run_chimera_mass_benchmark(
@@ -71,6 +105,7 @@ def test_chimera_mass_benchmark_with_surrogate_fitter(tmp_path):
         max_weighted_mae=10.0,
         max_abs_weighted_bias=10.0,
         min_finite_fraction=0.99,
+        num_workers=1,
     )
     assert benchmark["passed"] is True
     assert benchmark["metrics"]["n_rows"] > 200
@@ -81,3 +116,46 @@ def test_chimera_mass_benchmark_with_surrogate_fitter(tmp_path):
     assert (tmp_path / "chimera_mass_residual_vs_qso_weight.png").exists()
     metrics = json.loads((tmp_path / "chimera_mass_recovery_metrics.json").read_text(encoding="utf-8"))
     assert "weighted_mae" in metrics["metrics"]
+    assert metrics["num_workers"] == 1
+
+
+def test_chimera_mass_benchmark_parallel_matches_serial(tmp_path):
+    ssp_path = tmp_path / "fake.h5"
+    ssp_path.write_bytes(b"")
+    serial = run_chimera_mass_benchmark(
+        dsps_ssp_fn=str(ssp_path),
+        fitter_cls=_FakeFitter,
+        max_weighted_mae=10.0,
+        max_abs_weighted_bias=10.0,
+        min_finite_fraction=0.99,
+        limit=5,
+        num_workers=1,
+    )
+    parallel = run_chimera_mass_benchmark(
+        dsps_ssp_fn=str(ssp_path),
+        fitter_cls=_FakeFitter,
+        max_weighted_mae=10.0,
+        max_abs_weighted_bias=10.0,
+        min_finite_fraction=0.99,
+        limit=5,
+        num_workers=2,
+    )
+    assert [row["id"] for row in serial["rows"]] == [row["id"] for row in parallel["rows"]]
+    assert [row["log_stellar_mass_fit"] for row in serial["rows"]] == [row["log_stellar_mass_fit"] for row in parallel["rows"]]
+
+
+def test_chimera_mass_benchmark_worker_failure_returns_nan(tmp_path):
+    ssp_path = tmp_path / "fake.h5"
+    ssp_path.write_bytes(b"")
+    benchmark = run_chimera_mass_benchmark(
+        dsps_ssp_fn=str(ssp_path),
+        fitter_cls=_FailingFakeFitter,
+        max_weighted_mae=10.0,
+        max_abs_weighted_bias=10.0,
+        min_finite_fraction=0.0,
+        limit=5,
+        num_workers=2,
+    )
+    failed = [row for row in benchmark["rows"] if not np.isfinite(row["log_stellar_mass_fit"])]
+    assert failed
+    assert failed[0]["fit_error"]
