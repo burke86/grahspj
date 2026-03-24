@@ -97,6 +97,7 @@ class ModelContext:
     upper_limits: np.ndarray
     data_mask: np.ndarray
     positive_detected_mask: np.ndarray
+    effective_spatial_scale_arcsec: np.ndarray
     mw_ebv: float
 
 
@@ -117,6 +118,8 @@ _DEFAULT_SPECLITE_NAME_MAP = {
     "Ks_2mass": "twomass-Ks",
     "W1": "wise2010-W1",
     "W2": "wise2010-W2",
+    "W3": "wise2010-W3",
+    "W4": "wise2010-W4",
 }
 _VENDORED_FILTER_FILES = {
     "IRAC1": "resources/filters/IRAC1.dat",
@@ -586,6 +589,19 @@ def build_model_context(cfg: FitConfig) -> ModelContext:
     upper_limits = np.asarray(cfg.photometry.is_upper_limit if cfg.photometry.is_upper_limit is not None else np.zeros_like(fluxes, dtype=bool), dtype=bool)
     data_mask = (~upper_limits) & np.isfinite(raw_fluxes) & np.isfinite(raw_errors) & (raw_errors > 0.0)
     positive_detected_mask = (~upper_limits) & np.isfinite(raw_fluxes) & (raw_fluxes > 0.0)
+    psf_fwhm_arcsec = np.asarray(
+        cfg.photometry.psf_fwhm_arcsec if cfg.photometry.psf_fwhm_arcsec is not None else np.full_like(fluxes, np.nan, dtype=float),
+        dtype=float,
+    )
+    aperture_diameter_arcsec = np.asarray(
+        cfg.photometry.aperture_diameter_arcsec if cfg.photometry.aperture_diameter_arcsec is not None else np.full_like(fluxes, np.nan, dtype=float),
+        dtype=float,
+    )
+    effective_spatial_scale_arcsec = np.where(
+        np.isfinite(aperture_diameter_arcsec) & (aperture_diameter_arcsec > 0.0),
+        aperture_diameter_arcsec,
+        psf_fwhm_arcsec,
+    )
     fluxes = np.nan_to_num(fluxes, nan=0.0, posinf=1.0e30, neginf=-1.0e30)
     errors = np.nan_to_num(errors, nan=1.0e30, posinf=1.0e30, neginf=1.0e30)
     errors = np.clip(np.abs(errors), 1.0e-30, 1.0e30)
@@ -636,5 +652,6 @@ def build_model_context(cfg: FitConfig) -> ModelContext:
         upper_limits=upper_limits,
         data_mask=data_mask,
         positive_detected_mask=positive_detected_mask,
+        effective_spatial_scale_arcsec=np.asarray(effective_spatial_scale_arcsec, dtype=float),
         mw_ebv=mw_ebv,
     )

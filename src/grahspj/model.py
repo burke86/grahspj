@@ -396,6 +396,17 @@ def _agn_variability_nev(agn_bol_lum_w, max_nev):
     return jnp.minimum(max_nev, simm_nev)
 
 
+def _host_capture_fraction(spatial_scale_arcsec, turnover_arcsec, slope):
+    """Map a band's effective spatial scale to the captured host-light fraction."""
+    spatial_scale_arcsec = jnp.asarray(spatial_scale_arcsec, dtype=jnp.float64)
+    valid = jnp.isfinite(spatial_scale_arcsec) & (spatial_scale_arcsec > 0.0)
+    turnover_arcsec = jnp.maximum(jnp.asarray(turnover_arcsec, dtype=jnp.float64), 1.0e-3)
+    slope = jnp.maximum(jnp.asarray(slope, dtype=jnp.float64), 1.0e-3)
+    safe_scale = jnp.where(valid, jnp.clip(spatial_scale_arcsec, 1.0e-3, 1.0e6), turnover_arcsec)
+    frac = jax.nn.sigmoid(slope * (jnp.log(safe_scale) - jnp.log(turnover_arcsec)))
+    return jnp.where(valid, frac, 1.0)
+
+
 def photometric_loglike(pred_fluxes, obs_fluxes, obs_errors, upper_limits, data_mask, systematics_width, intrinsic_scatter, student_t_df, agn_component, agn_bol_lum_w, agn_nev, variability_uncertainty, attenuation_model_uncertainty, transmitted_fraction, lyman_break_uncertainty, filter_wavelength, redshift):
     """Evaluate the broadband photometric log-likelihood for one model state."""
     pred_fluxes = jnp.nan_to_num(pred_fluxes, nan=0.0, posinf=1.0e30, neginf=-1.0e30)
@@ -444,6 +455,11 @@ def grahsp_photometric_model(context: ModelContext, include_components: bool = F
     data_mask = _bool_to_jnp(context.data_mask)
     positive_detected_mask = _bool_to_jnp(context.positive_detected_mask)
     dust_alpha_grid = np.asarray(context.templates.dust_alpha_grid, dtype=float)
+    spatial_scale_arcsec = _np_to_jnp(context.effective_spatial_scale_arcsec)
+    host_capture_enabled = bool(
+        cfg.likelihood.use_host_capture_model
+        and np.any(np.isfinite(context.effective_spatial_scale_arcsec) & (np.asarray(context.effective_spatial_scale_arcsec, dtype=float) > 0.0))
+    )
 
     host_state = _build_diffstar_host(context, prior_config)
     host_rest = host_state["host_rest"]
@@ -591,14 +607,35 @@ def grahsp_photometric_model(context: ModelContext, include_components: bool = F
     agn_rest = agn_att_rest
     igm = _igm_transmission(rest_wave, redshift)
     total_obs = _redshift_to_obs(rest_wave, total_rest * igm, obs_wave, redshift, luminosity_distance_m)
+    host_obs = _redshift_to_obs(rest_wave, gal_att_rest * igm, obs_wave, redshift, luminosity_distance_m)
     transmitted_fraction = jnp.clip(total_rest / jnp.maximum(host_rest + disk_rest + torus_rest + feii_rest + line_rest + balmer_rest, 1e-30), 1e-4, 1.0)
 
-    pred_fluxes = _project_filters(total_obs, context.packed_filters)
+    pred_fluxes_raw = _project_filters(total_obs, context.packed_filters)
+    host_fluxes_total = _project_filters(host_obs, context.packed_filters)
+    if host_capture_enabled:
+        log_host_capture_scale_arcsec = numpyro.sample(
+            "log_host_capture_scale_arcsec",
+            dist.Normal(*_cfg_norm(prior_config, "log_host_capture_scale_arcsec", np.log(3.0), 1.0)),
+        )
+        host_capture_slope = numpyro.sample(
+            "host_capture_slope",
+            dist.LogNormal(*_cfg_norm(prior_config, "log_host_capture_slope", np.log(2.0), 0.5)),
+        )
+        host_capture_fraction = _host_capture_fraction(
+            spatial_scale_arcsec,
+            jnp.exp(log_host_capture_scale_arcsec),
+            host_capture_slope,
+        )
+    else:
+        log_host_capture_scale_arcsec = jnp.asarray(np.log(3.0), dtype=jnp.float64)
+        host_capture_slope = jnp.asarray(2.0, dtype=jnp.float64)
+        host_capture_fraction = jnp.ones_like(pred_fluxes_raw)
+    host_fluxes = host_fluxes_total * host_capture_fraction
+    pred_fluxes = pred_fluxes_raw - host_fluxes_total + host_fluxes
     need_agn_fluxes = include_components or cfg.likelihood.variability_uncertainty
     need_trans_fluxes = include_components or cfg.likelihood.attenuation_model_uncertainty
     if include_components:
         agn_obs = _redshift_to_obs(rest_wave, agn_rest * igm, obs_wave, redshift, luminosity_distance_m)
-        host_obs = _redshift_to_obs(rest_wave, gal_att_rest * igm, obs_wave, redshift, luminosity_distance_m)
         dust_obs = _redshift_to_obs(rest_wave, dust_rest * igm, obs_wave, redshift, luminosity_distance_m)
         disk_obs = _redshift_to_obs(rest_wave, disk_rest * igm, obs_wave, redshift, luminosity_distance_m)
         torus_obs = _redshift_to_obs(rest_wave, torus_rest * igm, obs_wave, redshift, luminosity_distance_m)
@@ -610,7 +647,6 @@ def grahsp_photometric_model(context: ModelContext, include_components: bool = F
         balmer_obs = _redshift_to_obs(rest_wave, balmer_rest * igm, obs_wave, redshift, luminosity_distance_m)
         transmitted_fraction_obs = _redshift_scalar_to_obs(rest_wave, transmitted_fraction, obs_wave, redshift)
         agn_fluxes = _project_filters(agn_obs, context.packed_filters)
-        host_fluxes = _project_filters(host_obs, context.packed_filters)
         dust_fluxes = _project_filters(dust_obs, context.packed_filters)
         disk_fluxes = _project_filters(disk_obs, context.packed_filters)
         torus_fluxes = _project_filters(torus_obs, context.packed_filters)
@@ -669,6 +705,10 @@ def grahsp_photometric_model(context: ModelContext, include_components: bool = F
     numpyro.deterministic("agn_bol_luminosity", agn_bol_luminosity)
     numpyro.deterministic("agn_variability_nev", _agn_variability_nev(agn_bol_luminosity, cfg.likelihood.agn_nev))
     numpyro.deterministic("transmitted_fraction_fluxes", trans_fluxes)
+    numpyro.deterministic("host_total_fluxes", host_fluxes_total)
+    numpyro.deterministic("host_capture_fraction_fluxes", host_capture_fraction)
+    numpyro.deterministic("log_host_capture_scale_arcsec_fit", log_host_capture_scale_arcsec)
+    numpyro.deterministic("host_capture_slope_fit", host_capture_slope)
     numpyro.deterministic("host_age_weights", host_state["host_age_weights"])
     numpyro.deterministic("host_lgmet_weights", host_state["host_lgmet_weights"])
     numpyro.deterministic("host_ssp_weights", host_state["host_ssp_weights"])

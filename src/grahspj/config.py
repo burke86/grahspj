@@ -25,6 +25,9 @@ class PhotometryData:
     fluxes: Sequence[float]
     errors: Sequence[float]
     is_upper_limit: Sequence[bool] | None = None
+    psf_fwhm_arcsec: Sequence[float | None] | None = None
+    aperture_diameter_arcsec: Sequence[float | None] | None = None
+    photometry_method: Sequence[str | None] | None = None
 
     def validate(self) -> None:
         """Validate array lengths for one photometry payload."""
@@ -33,6 +36,12 @@ class PhotometryData:
             raise ValueError("Photometry arrays must have the same length as filter_names.")
         if self.is_upper_limit is not None and len(self.is_upper_limit) != n:
             raise ValueError("is_upper_limit must match filter_names length.")
+        if self.psf_fwhm_arcsec is not None and len(self.psf_fwhm_arcsec) != n:
+            raise ValueError("psf_fwhm_arcsec must match filter_names length.")
+        if self.aperture_diameter_arcsec is not None and len(self.aperture_diameter_arcsec) != n:
+            raise ValueError("aperture_diameter_arcsec must match filter_names length.")
+        if self.photometry_method is not None and len(self.photometry_method) != n:
+            raise ValueError("photometry_method must match filter_names length.")
 
 
 @dataclass
@@ -116,6 +125,7 @@ class LikelihoodConfig:
     lyman_break_uncertainty: bool = False
     use_absolute_flux_scale_prior: bool = True
     absolute_flux_scale_prior_sigma_dex: float = 0.5
+    use_host_capture_model: bool = False
 
 
 @dataclass
