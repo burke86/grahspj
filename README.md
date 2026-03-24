@@ -35,6 +35,7 @@ After fetching, make sure `dustmaps` is configured to use the directory containi
 A worked single-object tutorial is available in:
 
 - [notebooks/01_example.ipynb](notebooks/01_example.ipynb)
+- [notebooks/02_vizier_fairall9.ipynb](notebooks/02_vizier_fairall9.ipynb)
 
 It shows how to:
 
@@ -43,6 +44,13 @@ It shows how to:
 - run `GRAHSPJ.fit(...)`
 - inspect summary outputs
 - make the component SED plot
+
+The Fairall 9 notebook shows how to:
+
+- query broadband photometry from the VizieR SED service
+- map supported survey filters into `grahspj`
+- build a manual `FitConfig`
+- fit and plot the resulting AGN SED
 
 
 ## Usage
