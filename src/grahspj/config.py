@@ -78,8 +78,8 @@ class GalaxyConfig:
     imf_type: int = 1
     zcontinuous: int = 1
     sfh: int = 0
-    rest_wave_min: float = 900.0
-    rest_wave_max: float = 3.0e5
+    rest_wave_min: float = 100.0
+    rest_wave_max: float = 3.0e6
     n_wave: int = 1024
     tau_host_prior_scale: float = 1.0
     sfh_n_steps: int = 64

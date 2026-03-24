@@ -15,9 +15,9 @@ _COMPONENT_STYLE = [
     ("disk_obs_sed", "AGN disk", "#c05621", 1.2),
     ("torus_obs_sed", "Torus", "#805ad5", 1.2),
     ("feii_obs_sed", "Fe II", "#2f855a", 1.0),
-    ("line_bl_obs_sed", "Broad lines", "#d53f8c", 1.0),
-    ("line_nl_obs_sed", "Narrow lines", "#b83280", 1.0),
-    ("line_liner_obs_sed", "LINER lines", "#97266d", 1.0),
+    ("line_bl_obs_sed", "AGN lines", "#d53f8c", 1.0),
+    ("line_nl_obs_sed", "AGN lines", "#b83280", 1.0),
+    ("line_liner_obs_sed", "AGN lines", "#97266d", 1.0),
     ("balmer_obs_sed", "Balmer cont.", "#dd6b20", 1.0),
     ("agn_obs_sed", "AGN total", "#718096", 1.4),
     ("total_obs_sed", "Model total", "#000000", 2.0),
@@ -43,7 +43,52 @@ def _to_display_flux_density(obs_wave: np.ndarray, sed: np.ndarray) -> np.ndarra
     return 1.0e-10 / 299792458.0 * 1.0e29 * obs_wave * obs_wave * sed
 
 
-def plot_fit_sed(fitter, output_path: str | Path | None = None, posterior: str = "latest", show: bool = False):
+def _median_effective_variance(fitter, pred: dict[str, Any]) -> np.ndarray:
+    """Rebuild the model's effective variance from predictive median sites."""
+    pred_fluxes = np.asarray(_median_site(pred, "pred_fluxes"), dtype=float)
+    agn_fluxes = np.asarray(_median_site(pred, "agn_fluxes"), dtype=float) if "agn_fluxes" in pred else np.zeros_like(pred_fluxes)
+    intrinsic_scatter = float(np.median(np.asarray(pred["intrinsic_scatter_fit"], dtype=float))) if "intrinsic_scatter_fit" in pred else 0.0
+    agn_variability_nev = float(np.median(np.asarray(pred["agn_variability_nev"], dtype=float))) if "agn_variability_nev" in pred else 0.0
+    transmitted_fraction = (
+        np.asarray(_median_site(pred, "transmitted_fraction_fluxes"), dtype=float)
+        if "transmitted_fraction_fluxes" in pred
+        else np.ones_like(pred_fluxes)
+    )
+    filter_wavelength = np.asarray([flt.effective_wavelength for flt in fitter.context.filters], dtype=float)
+    redshift = float(np.median(np.asarray(pred["redshift_fit"], dtype=float))) if "redshift_fit" in pred else 0.0
+    obs_errors = np.asarray(getattr(fitter.context, "errors", fitter.config.photometry.errors), dtype=float)
+    cfg = getattr(fitter.config, "likelihood", None)
+    if cfg is None:
+        class _FallbackLikelihood:
+            systematics_width = 0.0
+            variability_uncertainty = False
+            attenuation_model_uncertainty = False
+            lyman_break_uncertainty = False
+
+        cfg = _FallbackLikelihood()
+
+    obs_variance = obs_errors**2 + np.maximum(intrinsic_scatter, 0.0) ** 2
+    sys_variance = (float(cfg.systematics_width) * pred_fluxes) ** 2
+    var_variance = np.where(bool(cfg.variability_uncertainty), agn_variability_nev * agn_fluxes**2, 0.0)
+    if cfg.attenuation_model_uncertainty:
+        tf = np.clip(transmitted_fraction, 1e-4, 1.0)
+        neg_log = -np.log10(tf + 1e-4)
+        log_unc_frac = np.minimum(-4.0 + 2.0 * neg_log, -1.0)
+        att_unc = 10 ** log_unc_frac / tf
+        sys_variance = sys_variance + (att_unc * pred_fluxes) ** 2
+    if cfg.lyman_break_uncertainty:
+        ly_unc = np.where(filter_wavelength / (1.0 + redshift) < 150.0, 1.0e8, 0.0)
+        sys_variance = sys_variance + (ly_unc * pred_fluxes) ** 2
+    return np.nan_to_num(obs_variance + sys_variance + var_variance, nan=1.0e30, posinf=1.0e30, neginf=1.0e30)
+
+
+def plot_fit_sed(
+    fitter,
+    output_path: str | Path | None = None,
+    posterior: str = "latest",
+    show: bool = False,
+    annotate_band_names: bool = True,
+):
     """Render a component SED plot for a fitted grahspj object."""
     pred = fitter.predict(posterior=posterior)
     obs_wave = _median_site(pred, "obs_wave")
@@ -55,6 +100,7 @@ def plot_fit_sed(fitter, output_path: str | Path | None = None, posterior: str =
     obs_err = np.asarray(fitter.config.photometry.errors, dtype=float)
     labels = list(fitter.config.photometry.filter_names)
     plotted_components: list[np.ndarray] = []
+    legend_labels_seen: set[str] = set()
 
     with use_style():
         fig, (ax_sed, ax_resid) = plt.subplots(
@@ -92,16 +138,19 @@ def plot_fit_sed(fitter, output_path: str | Path | None = None, posterior: str =
                     linewidth=0.0,
                     zorder=0,
                 )
+            plot_label = label if label not in legend_labels_seen else "_nolegend_"
+            if plot_label != "_nolegend_":
+                legend_labels_seen.add(label)
             if key == "total_obs_sed":
-                ax_sed.plot(obs_wave, component, color=color, lw=max(lw - 0.2, 1.4), alpha=0.65, label=label, zorder=1)
+                ax_sed.plot(obs_wave, component, color=color, lw=max(lw - 0.2, 1.4), alpha=0.65, label=plot_label, zorder=1)
             elif key == "host_obs_sed":
-                ax_sed.plot(obs_wave, component, color=color, lw=max(lw, 2.3), ls="--", alpha=0.95, label=label, zorder=4)
+                ax_sed.plot(obs_wave, component, color=color, lw=max(lw, 2.3), ls="--", alpha=0.95, label=plot_label, zorder=4)
             elif key == "dust_obs_sed":
-                ax_sed.plot(obs_wave, component, color=color, lw=max(lw, 2.1), ls=(0, (4, 2)), alpha=0.95, label=label, zorder=4)
+                ax_sed.plot(obs_wave, component, color=color, lw=max(lw, 2.1), ls=(0, (4, 2)), alpha=0.95, label=plot_label, zorder=4)
             elif key == "agn_obs_sed":
-                ax_sed.plot(obs_wave, component, color=color, lw=max(lw, 2.2), ls="-.", alpha=0.95, label=label, zorder=4)
+                ax_sed.plot(obs_wave, component, color=color, lw=max(lw, 2.2), ls="-.", alpha=0.95, label=plot_label, zorder=4)
             else:
-                ax_sed.plot(obs_wave, component, color=color, lw=max(lw, 2.0), ls=":", alpha=0.95, label=label, zorder=3)
+                ax_sed.plot(obs_wave, component, color=color, lw=max(lw, 2.0), ls=":", alpha=0.95, label=plot_label, zorder=3)
 
         ax_sed.errorbar(
             phot_wave,
@@ -115,35 +164,40 @@ def plot_fit_sed(fitter, output_path: str | Path | None = None, posterior: str =
             zorder=5,
         )
         ax_sed.scatter(phot_wave, model_flux, color="#111111", marker="s", s=28, label="Model photometry", zorder=6)
-        for x, y, label in zip(phot_wave, obs_flux, labels):
-            ax_sed.annotate(label, (x, y), xytext=(4, 5), textcoords="offset points", fontsize=8)
+        if annotate_band_names:
+            for x, y, label in zip(phot_wave, obs_flux, labels):
+                ax_sed.annotate(label, (x, y), xytext=(4, 5), textcoords="offset points", fontsize=8)
 
         resid = obs_flux - model_flux
-        ax_resid.errorbar(phot_wave, resid, yerr=obs_err, fmt="o", color="black", ms=4, capsize=2)
+        eff_variance = _median_effective_variance(fitter, pred)
+        eff_sigma = np.sqrt(np.clip(eff_variance, 1e-30, 1.0e60))
+        ax_resid.errorbar(phot_wave, resid, yerr=eff_sigma, fmt="o", color="black", ms=4, capsize=2)
         ax_resid.axhline(0.0, color="black", lw=1.0, ls="--")
+        upper_limits = np.asarray(getattr(fitter.context, "upper_limits", np.zeros_like(obs_flux, dtype=bool)), dtype=bool)
+        finite_chi2 = np.isfinite(obs_flux) & np.isfinite(model_flux) & np.isfinite(eff_sigma) & (eff_sigma > 0.0) & (~upper_limits)
+        if np.any(finite_chi2):
+            chi2 = float(np.sum(((obs_flux[finite_chi2] - model_flux[finite_chi2]) / eff_sigma[finite_chi2]) ** 2))
+            # For this Bayesian SED fit, counting sampled variables as "free parameters"
+            # makes the usual dof estimate meaningless and often collapses the denominator
+            # to 1. Use chi2 per valid band as a stable visual diagnostic instead.
+            reduced_chi2 = chi2 / max(1, int(np.sum(finite_chi2)))
+            ax_resid.text(
+                0.98,
+                0.05,
+                rf"$\chi^2_\nu = {reduced_chi2:.2f}$",
+                transform=ax_resid.transAxes,
+                va="bottom",
+                ha="right",
+                color="#c53030",
+                fontsize=10,
+            )
 
         ax_sed.set_xscale("log")
         ax_sed.set_yscale("log")
-        ax_sed.set_ylabel("Flux density [mJy]")
-        ax_resid.set_ylabel("Obs - Model [mJy]")
-        ax_resid.set_xlabel("Observed-frame wavelength [Angstrom]")
-        ax_sed.set_title(f"SED Fit: {fitter.config.observation.object_id}")
+        ax_sed.set_ylabel("Flux density (mJy)")
+        ax_resid.set_ylabel("Obs - Model (mJy)")
+        ax_resid.set_xlabel("Observed-frame wavelength (Å)")
         ax_sed.legend(loc="best", fontsize=9, ncol=2)
-
-        total_sum = max(component_sums.get("Model total", 0.0), 1e-30)
-        host_frac = component_sums.get("Host stellar", 0.0) / total_sum
-        dust_frac = component_sums.get("Host dust", 0.0) / total_sum
-        agn_frac = component_sums.get("AGN total", 0.0) / total_sum
-        ax_sed.text(
-            0.02,
-            0.04,
-            f"stellar/total={host_frac:.3f}\ndust/total={dust_frac:.3f}\nagn/total={agn_frac:.3e}",
-            transform=ax_sed.transAxes,
-            va="bottom",
-            ha="left",
-            fontsize=10,
-            bbox={"facecolor": "white", "alpha": 0.8, "edgecolor": "0.7"},
-        )
 
         finite_flux_parts = [np.asarray(obs_flux, dtype=float), np.asarray(model_flux, dtype=float)]
         finite_flux_parts.extend(np.asarray(comp, dtype=float) for comp in plotted_components)

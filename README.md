@@ -20,6 +20,16 @@ curl -o tempdata.h5 https://portal.nersc.gov/project/hacc/aphearin/DSPS_data/ssp
 ```
 You will also need a DSPS SSP template file such as `ssp_data_fsps_v3.2_lgmet_age.h5`, downloaded above, and then referenced from your configuration via `cfg.galaxy.dsps_ssp_fn` or passed directly to `fit(...)` via `dsps_ssp_fn`.
 
+This repo assumes `dustmaps` is already configured and SFD maps are available.
+
+Typical one-time setup:
+
+```
+python setup.py fetch --map-name=sfd
+```
+
+After fetching, make sure `dustmaps` is configured to use the directory containing the SFD maps.
+
 ## Example notebook
 
 A worked single-object tutorial is available in:

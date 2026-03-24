@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from grahspj.benchmark import (
     build_chimera_fit_config,
@@ -12,6 +13,18 @@ from grahspj.benchmark import (
     run_chimera_mass_benchmark,
     select_chimera_subset,
 )
+
+
+def _require_chimera_data():
+    data_dir = chimera_data_dir()
+    needed = [
+        data_dir / "chimeras-grahsp.fits",
+        data_dir / "chimeras-fullinfo.fits",
+        data_dir / "benchmark_subset_ids.txt",
+    ]
+    missing = [path for path in needed if not path.exists()]
+    if missing:
+        pytest.skip(f"Chimera benchmark fixtures not available: {missing[0]}")
 
 
 class _FakeFitter:
@@ -63,6 +76,7 @@ class _FailingFakeFitter(_FakeFitter):
 
 
 def test_chimera_dataset_adapter_and_subset():
+    _require_chimera_data()
     dataset = load_chimera_benchmark_dataset()
     assert len(dataset.rows) > 1000
     subset = select_chimera_subset(dataset)
@@ -73,6 +87,7 @@ def test_chimera_dataset_adapter_and_subset():
 
 
 def test_build_chimera_fit_config(tmp_path):
+    _require_chimera_data()
     row = select_chimera_subset(load_chimera_benchmark_dataset())[0]
     ssp_path = tmp_path / "fake.h5"
     ssp_path.write_bytes(b"")
@@ -85,6 +100,7 @@ def test_build_chimera_fit_config(tmp_path):
 
 
 def test_build_chimera_fit_config_preserves_user_prior_overrides(tmp_path):
+    _require_chimera_data()
     row = select_chimera_subset(load_chimera_benchmark_dataset())[0]
     ssp_path = tmp_path / "fake.h5"
     ssp_path.write_bytes(b"")
@@ -96,6 +112,7 @@ def test_build_chimera_fit_config_preserves_user_prior_overrides(tmp_path):
 
 
 def test_chimera_mass_benchmark_with_surrogate_fitter(tmp_path):
+    _require_chimera_data()
     ssp_path = tmp_path / "fake.h5"
     ssp_path.write_bytes(b"")
     benchmark = run_chimera_mass_benchmark(
@@ -120,6 +137,7 @@ def test_chimera_mass_benchmark_with_surrogate_fitter(tmp_path):
 
 
 def test_chimera_mass_benchmark_parallel_matches_serial(tmp_path):
+    _require_chimera_data()
     ssp_path = tmp_path / "fake.h5"
     ssp_path.write_bytes(b"")
     serial = run_chimera_mass_benchmark(
@@ -145,6 +163,7 @@ def test_chimera_mass_benchmark_parallel_matches_serial(tmp_path):
 
 
 def test_chimera_mass_benchmark_worker_failure_returns_nan(tmp_path):
+    _require_chimera_data()
     ssp_path = tmp_path / "fake.h5"
     ssp_path.write_bytes(b"")
     benchmark = run_chimera_mass_benchmark(

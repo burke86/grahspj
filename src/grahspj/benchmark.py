@@ -416,19 +416,56 @@ def _stable_row_seed(row_id: str) -> int:
 
 
 def _reduced_chi2_for_fit(fitter: Any) -> float:
-    """Compute a simple reduced chi-square from median predicted photometry."""
+    """Compute reduced chi-square using the model's effective median variance."""
     pred = fitter.predict()
     pred_fluxes = np.median(np.asarray(pred["pred_fluxes"], dtype=float), axis=0)
+    agn_fluxes = np.median(np.asarray(pred["agn_fluxes"], dtype=float), axis=0) if "agn_fluxes" in pred else np.zeros_like(pred_fluxes)
+    intrinsic_scatter = float(np.median(np.asarray(pred["intrinsic_scatter_fit"], dtype=float))) if "intrinsic_scatter_fit" in pred else 0.0
+    agn_variability_nev = float(np.median(np.asarray(pred["agn_variability_nev"], dtype=float))) if "agn_variability_nev" in pred else 0.0
+    transmitted_fraction = (
+        np.median(np.asarray(pred["transmitted_fraction_fluxes"], dtype=float), axis=0)
+        if "transmitted_fraction_fluxes" in pred
+        else np.ones_like(pred_fluxes)
+    )
+    redshift = float(np.median(np.asarray(pred["redshift_fit"], dtype=float))) if "redshift_fit" in pred else 0.0
     obs_fluxes = np.asarray(fitter.context.fluxes, dtype=float)
     obs_errors = np.asarray(fitter.context.errors, dtype=float)
+    filter_wavelength = (
+        np.asarray([flt.effective_wavelength for flt in fitter.context.filters], dtype=float)
+        if hasattr(fitter.context, "filters")
+        else np.zeros_like(pred_fluxes, dtype=float)
+    )
     upper_limits = np.asarray(fitter.context.upper_limits, dtype=bool)
-    valid = np.isfinite(pred_fluxes) & np.isfinite(obs_fluxes) & np.isfinite(obs_errors) & (obs_errors > 0.0) & (~upper_limits)
+    cfg = getattr(fitter.config, "likelihood", None)
+    if cfg is None:
+        class _FallbackLikelihood:
+            systematics_width = 0.0
+            variability_uncertainty = False
+            attenuation_model_uncertainty = False
+            lyman_break_uncertainty = False
+
+        cfg = _FallbackLikelihood()
+    obs_variance = obs_errors**2 + np.maximum(intrinsic_scatter, 0.0) ** 2
+    sys_variance = (float(cfg.systematics_width) * pred_fluxes) ** 2
+    var_variance = np.where(bool(cfg.variability_uncertainty), agn_variability_nev * agn_fluxes**2, 0.0)
+    if cfg.attenuation_model_uncertainty:
+        tf = np.clip(transmitted_fraction, 1e-4, 1.0)
+        neg_log = -np.log10(tf + 1e-4)
+        log_unc_frac = np.minimum(-4.0 + 2.0 * neg_log, -1.0)
+        att_unc = 10 ** log_unc_frac / tf
+        sys_variance = sys_variance + (att_unc * pred_fluxes) ** 2
+    if cfg.lyman_break_uncertainty:
+        ly_unc = np.where(filter_wavelength / (1.0 + redshift) < 150.0, 1.0e8, 0.0)
+        sys_variance = sys_variance + (ly_unc * pred_fluxes) ** 2
+    total_variance = np.nan_to_num(obs_variance + sys_variance + var_variance, nan=1.0e30, posinf=1.0e30, neginf=1.0e30)
+    sigma = np.sqrt(np.clip(total_variance, 1e-30, 1.0e60))
+    valid = np.isfinite(pred_fluxes) & np.isfinite(obs_fluxes) & np.isfinite(sigma) & (sigma > 0.0) & (~upper_limits)
     if not np.any(valid):
         return float("nan")
-    chi2 = np.sum(((obs_fluxes[valid] - pred_fluxes[valid]) / obs_errors[valid]) ** 2)
-    n_params = len(fitter.samples or {})
-    dof = max(1, int(np.sum(valid)) - n_params)
-    return float(chi2 / dof)
+    chi2 = np.sum(((obs_fluxes[valid] - pred_fluxes[valid]) / sigma[valid]) ** 2)
+    # As in plotting.py, report chi2 per valid band rather than subtracting the
+    # number of sampled variables, which is not a meaningful dof estimate here.
+    return float(chi2 / max(1, int(np.sum(valid))))
 
 
 def _failed_benchmark_row(task: _BenchmarkWorkerTask, exc: Exception) -> dict[str, Any]:
@@ -467,8 +504,12 @@ def _run_single_chimera_fit(task: _BenchmarkWorkerTask, fitter_cls=None) -> tupl
     )
     logm_samples = np.asarray(fitter.samples["log_stellar_mass"], dtype=float).reshape(-1)
     logm16, logm50, logm84 = np.percentile(logm_samples, [16.0, 50.0, 84.0])
-    fracagn_samples = np.asarray(fitter.samples["fracAGN_5100"], dtype=float).reshape(-1)
-    fracagn50 = float(np.percentile(fracagn_samples, 50.0))
+    fracagn_raw = (fitter.samples or {}).get("fracAGN_5100", None)
+    if fracagn_raw is None:
+        fracagn50 = float("nan")
+    else:
+        fracagn_samples = np.asarray(fracagn_raw, dtype=float).reshape(-1)
+        fracagn50 = float(np.percentile(fracagn_samples, 50.0))
     log_fit = float(logm50)
     reduced_chi2 = _reduced_chi2_for_fit(fitter)
     enriched = dict(task.row)
@@ -639,14 +680,26 @@ def run_chimera_mass_benchmark(
             print(f"[benchmark] {task.row['id']} reduced chi2 = {enriched['reduced_chi2']:.3f}")
             progress.update(1)
     else:
-        ctx = mp.get_context("spawn")
-        with ProcessPoolExecutor(max_workers=num_workers, mp_context=ctx) as pool:
-            future_map = {pool.submit(_run_single_chimera_fit, task, fitter_cls): task for task in tasks}
-            for future in as_completed(future_map):
-                task = future_map[future]
+        try:
+            ctx = mp.get_context("spawn")
+            with ProcessPoolExecutor(max_workers=num_workers, mp_context=ctx) as pool:
+                future_map = {pool.submit(_run_single_chimera_fit, task, fitter_cls): task for task in tasks}
+                for future in as_completed(future_map):
+                    task = future_map[future]
+                    progress.set_postfix_str(str(task.row["id"]))
+                    try:
+                        idx, enriched = future.result()
+                    except Exception as exc:
+                        idx, enriched = task.index, _failed_benchmark_row(task, exc)
+                    benchmark_rows[idx] = enriched
+                    print(f"[benchmark] {task.row['id']} reduced chi2 = {enriched['reduced_chi2']:.3f}")
+                    progress.update(1)
+        except (PermissionError, NotImplementedError, OSError) as exc:
+            print(f"[benchmark] Parallel execution unavailable ({type(exc).__name__}: {exc}); falling back to serial execution")
+            for task in tasks:
                 progress.set_postfix_str(str(task.row["id"]))
                 try:
-                    idx, enriched = future.result()
+                    idx, enriched = _run_single_chimera_fit(task, fitter_cls=fitter_cls)
                 except Exception as exc:
                     idx, enriched = task.index, _failed_benchmark_row(task, exc)
                 benchmark_rows[idx] = enriched
