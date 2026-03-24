@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "grahspj"
+version = "0.1.0"
+description = "Single-source GRAHSP-style photometric fitting with JAX + NumPyro"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+  { name = "grahspj contributors" }
+]
+dependencies = [
+  "numpy",
+  "scipy",
+  "astropy",
+  "tqdm",
+  "speclite",
+  "extinction",
+  "matplotlib",
+  "jax",
+  "jaxlib",
+  "numpyro",
+  "optax",
+  "dsps",
+  "diffstar",
+  "dustmaps",
+]
+
+[project.scripts]
+grahspj = "grahspj.run:main"
+grahspj-benchmark = "grahspj.benchmark:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+grahspj = ["resources/filters/*.dat", "resources/templates/*", "resources/templates/dale2014/*", "resources/styles/*.mplstyle"]

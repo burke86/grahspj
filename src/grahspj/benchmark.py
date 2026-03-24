@@ -1,0 +1,581 @@
+from __future__ import annotations
+
+# The Chimera benchmark path vendors selected filter and template files that
+# originate from GRAHSP resources. Those assets are documented under
+# src/grahspj/resources/ and are redistributed here with provenance notes.
+
+import csv
+import json
+import argparse
+from dataclasses import dataclass
+from importlib import resources
+from pathlib import Path
+from typing import Any, Iterable
+
+import numpy as np
+from astropy import units as u
+from astropy.cosmology import FlatLambdaCDM
+from astropy.io import fits
+from tqdm.auto import tqdm
+
+from .config import AGNConfig, EmissionLineTemplate, FeIITemplate, FilterCurve, FilterSet, FitConfig, InferenceConfig, Observation, PhotometryData
+from .mplstyle import use_style
+
+CHIMERA_FILTER_NAMES = (
+    "u_sdss",
+    "r_sdss",
+    "i_sdss",
+    "z_sdss",
+    "J_2mass",
+    "H_2mass",
+    "Ks_2mass",
+    "IRAC1",
+    "IRAC2",
+)
+DEFAULT_RANDOM_SEED = 20231011
+DEFAULT_MAX_WEIGHTED_MAE = 3.0
+DEFAULT_MAX_ABS_WEIGHTED_BIAS = 2.0
+DEFAULT_MIN_FINITE_FRACTION = 0.95
+_C_LIGHT_ANG_PER_S = 2.99792458e18
+_CHIMERA_FILTER_FILE_MAP = {
+    "IRAC1": "resources/filters/IRAC1.dat",
+    "IRAC2": "resources/filters/IRAC2.dat",
+}
+_CHIMERA_SPECLITE_NAME_MAP = {
+    "u_sdss": "sdss2010-u",
+    "r_sdss": "sdss2010-r",
+    "i_sdss": "sdss2010-i",
+    "z_sdss": "sdss2010-z",
+    "J_2mass": "twomass-J",
+    "H_2mass": "twomass-H",
+    "Ks_2mass": "twomass-Ks",
+}
+_BENCHMARK_RESOURCE_CACHE: dict[str, Any] = {}
+_CHIMERA_EFFECTIVE_WAVELENGTHS_A = {
+    "u_sdss": 3543.0,
+    "r_sdss": 6231.0,
+    "i_sdss": 7625.0,
+    "z_sdss": 9134.0,
+    "J_2mass": 12350.0,
+    "H_2mass": 16620.0,
+    "Ks_2mass": 21590.0,
+    "IRAC1": 35500.0,
+    "IRAC2": 44930.0,
+}
+_C_MS = 2.99792458e8
+
+
+@dataclass
+class ChimeraBenchmarkDataset:
+    """Joined Chimera benchmark rows used by the stellar-mass benchmark."""
+    rows: list[dict[str, Any]]
+
+
+def _package_root() -> Path:
+    """Return the grahspj project root from the installed package layout."""
+    return Path(__file__).resolve().parents[2]
+
+
+def _package_resource_path(relpath: str) -> Path:
+    """Return an absolute path to a packaged benchmark resource."""
+    return Path(str(resources.files("grahspj").joinpath(relpath)))
+
+
+def chimera_data_dir(root: str | Path | None = None) -> Path:
+    """Return the Chimera benchmark data directory."""
+    base = Path(root) if root is not None else _package_root()
+    return base / "data" / "chimeras-2023-10-11"
+
+
+def subset_ids_path(root: str | Path | None = None) -> Path:
+    """Return the deterministic Chimera subset fixture path."""
+    return chimera_data_dir(root) / "benchmark_subset_ids.txt"
+
+
+def _load_filter_curve_from_text(path: Path, name: str) -> FilterCurve:
+    """Load a two-column transmission curve from plain text."""
+    data = np.loadtxt(path, comments="#")
+    if data.ndim != 2 or data.shape[1] < 2:
+        raise ValueError(f"Filter file {path} does not contain two-column transmission data.")
+    wave = np.asarray(data[:, 0], dtype=float)
+    trans = np.asarray(data[:, 1], dtype=float)
+    if trans[0] != 0.0 or trans[-1] != 0.0:
+        wave = wave.copy()
+        trans = trans.copy()
+        trans[0] = 0.0
+        trans[-1] = 0.0
+    return FilterCurve(name=name, wave=wave, transmission=trans)
+
+
+def _build_chimera_filter_set() -> FilterSet:
+    """Build the fixed filter set used by the Chimera benchmark."""
+    curves = [
+        _load_filter_curve_from_text(_package_resource_path(relpath), name)
+        for name, relpath in _CHIMERA_FILTER_FILE_MAP.items()
+    ]
+    return FilterSet(
+        curves=curves,
+        speclite_names=dict(_CHIMERA_SPECLITE_NAME_MAP),
+        use_grahsp_database=False,
+    )
+
+
+def _load_bruhweiler_feii_template() -> FeIITemplate:
+    """Load and normalize the vendored Bruhweiler-Verner Fe II template."""
+    cache_key = "feii::vendored"
+    cached = _BENCHMARK_RESOURCE_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+    path = _package_resource_path("resources/templates/Fe_d11-m20-20.5.txt")
+    data = np.loadtxt(path)
+    wave_observed = np.asarray(data[:, 0], dtype=float)
+    lnu = np.asarray(data[:, 1], dtype=float)
+    z_shift = 4593.4 / 4575.0 - 1.0
+    wave_rest = wave_observed / (1.0 + z_shift)
+    llam = lnu * _C_LIGHT_ANG_PER_S / np.clip(wave_observed * wave_observed, 1e-30, None)
+    norm_idx = int(np.argmin(np.abs(wave_rest - 4575.0)))
+    norm = float(llam[norm_idx])
+    if not np.isfinite(norm) or norm <= 0.0:
+        raise ValueError(f"Invalid FeII normalization derived from {path}.")
+    tmpl = FeIITemplate(
+        name="BruhweilerVerner08",
+        wave=(wave_rest * 0.1).tolist(),
+        lumin=(llam / norm).tolist(),
+    )
+    _BENCHMARK_RESOURCE_CACHE[cache_key] = tmpl
+    return tmpl
+
+
+def _load_mor_netzer_emission_lines() -> EmissionLineTemplate:
+    """Load the vendored Mor and Netzer emission-line template table."""
+    cache_key = "emlines::vendored"
+    cached = _BENCHMARK_RESOURCE_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+    path = _package_resource_path("resources/templates/emission_line_table.formatted")
+    data = np.loadtxt(
+        path,
+        comments="#",
+        dtype=[
+            ("name", "U32"),
+            ("wave", "f8"),
+            ("broad", "f8"),
+            ("S2", "f8"),
+            ("LINER", "f8"),
+        ],
+    )
+    tmpl = EmissionLineTemplate(
+        wave=(np.asarray(data["wave"], dtype=float) * 0.1).tolist(),
+        lumin_blagn=np.asarray(data["broad"], dtype=float).tolist(),
+        lumin_sy2=np.asarray(data["S2"], dtype=float).tolist(),
+        lumin_liner=np.asarray(data["LINER"], dtype=float).tolist(),
+    )
+    _BENCHMARK_RESOURCE_CACHE[cache_key] = tmpl
+    return tmpl
+
+
+def _build_chimera_agn_config() -> AGNConfig:
+    """Build the AGN template configuration used by the Chimera benchmark."""
+    return AGNConfig(
+        feii_template=_load_bruhweiler_feii_template(),
+        emission_line_template=_load_mor_netzer_emission_lines(),
+    )
+
+
+def _fits_rows_by_id(path: Path, columns: Iterable[str]) -> dict[str, dict[str, Any]]:
+    """Read selected FITS columns and index rows by object id."""
+    with fits.open(path, memmap=True) as hdul:
+        data = hdul[1].data
+        out: dict[str, dict[str, Any]] = {}
+        for i in range(len(data)):
+            row_id = str(data["id"][i])
+            row = {}
+            for col in columns:
+                value = data[col][i]
+                if np.ndim(value) == 0 and hasattr(value, "item"):
+                    value = value.item()
+                row[col] = value
+            out[row_id] = row
+        return out
+
+
+def load_chimera_benchmark_dataset(root: str | Path | None = None) -> ChimeraBenchmarkDataset:
+    """Load and join the Chimera photometry and truth tables."""
+    data_dir = chimera_data_dir(root)
+    phot_path = data_dir / "chimeras-grahsp.fits"
+    truth_path = data_dir / "chimeras-fullinfo.fits"
+    print(f"[benchmark] Loading Chimera photometry from {phot_path}")
+    print(f"[benchmark] Loading Chimera truth table from {truth_path}")
+    phot_cols = ["id", "ID_COSMOS", "redshift", "chimera_QSO_weight", "resample_weight", *CHIMERA_FILTER_NAMES, *[f"{name}_err" for name in CHIMERA_FILTER_NAMES]]
+    truth_cols = ["id", "MASS_MED_GAL", "resample_weight", "chimera_QSO_weight", "ID_COSMOS", "redshift"]
+    phot = _fits_rows_by_id(phot_path, phot_cols)
+    truth = _fits_rows_by_id(truth_path, truth_cols)
+    ids = sorted(set(phot).intersection(truth))
+    rows = []
+    for row_id in ids:
+        prow = phot[row_id]
+        trow = truth[row_id]
+        row = {
+            "id": row_id,
+            "ID_COSMOS": str(prow["ID_COSMOS"]),
+            "redshift": float(prow["redshift"]),
+            "chimera_QSO_weight": float(prow["chimera_QSO_weight"]),
+            "resample_weight": float(trow["resample_weight"]),
+            "log_stellar_mass_truth": float(trow["MASS_MED_GAL"]),
+            "MASS_MED_GAL": float(trow["MASS_MED_GAL"]),
+        }
+        for name in CHIMERA_FILTER_NAMES:
+            row[name] = float(prow[name])
+            row[f"{name}_err"] = float(prow[f"{name}_err"])
+        rows.append(row)
+    print(f"[benchmark] Joined {len(rows)} Chimera rows")
+    return ChimeraBenchmarkDataset(rows=rows)
+
+
+def select_chimera_subset(dataset: ChimeraBenchmarkDataset, root: str | Path | None = None) -> list[dict[str, Any]]:
+    """Select the deterministic benchmark subset from the full Chimera table."""
+    fixture = subset_ids_path(root)
+    print(f"[benchmark] Loading deterministic subset from {fixture}")
+    subset_ids = [line.strip() for line in fixture.read_text(encoding="utf-8").splitlines() if line.strip()]
+    lookup = {row["id"]: row for row in dataset.rows}
+    missing = [row_id for row_id in subset_ids if row_id not in lookup]
+    if missing:
+        raise RuntimeError(f"Subset fixture contains IDs missing from dataset: {missing[:5]}")
+    rows = [lookup[row_id] for row_id in subset_ids]
+    print(f"[benchmark] Selected {len(rows)} benchmark rows")
+    return rows
+
+
+def build_chimera_fit_config(row: dict[str, Any], dsps_ssp_fn: str = "tempdata.h5", base_config: FitConfig | None = None) -> FitConfig:
+    """Build a grahspj FitConfig for one Chimera benchmark row."""
+    if base_config is None:
+        cfg = FitConfig(
+            observation=Observation(object_id=str(row["id"]), redshift=float(row["redshift"])),
+            photometry=PhotometryData(
+                filter_names=list(CHIMERA_FILTER_NAMES),
+                fluxes=[float(row[name]) for name in CHIMERA_FILTER_NAMES],
+                errors=[float(row[f"{name}_err"]) for name in CHIMERA_FILTER_NAMES],
+                is_upper_limit=[False] * len(CHIMERA_FILTER_NAMES),
+            ),
+            filters=_build_chimera_filter_set(),
+            agn=_build_chimera_agn_config(),
+        )
+    else:
+        cfg = FitConfig(
+            observation=Observation(
+                object_id=str(row["id"]),
+                redshift=float(row["redshift"]),
+                redshift_err=base_config.observation.redshift_err,
+                ra=base_config.observation.ra,
+                dec=base_config.observation.dec,
+                apply_mw_deredden=base_config.observation.apply_mw_deredden,
+            ),
+            photometry=PhotometryData(
+                filter_names=list(CHIMERA_FILTER_NAMES),
+                fluxes=[float(row[name]) for name in CHIMERA_FILTER_NAMES],
+                errors=[float(row[f"{name}_err"]) for name in CHIMERA_FILTER_NAMES],
+                is_upper_limit=[False] * len(CHIMERA_FILTER_NAMES),
+            ),
+            filters=base_config.filters,
+            galaxy=base_config.galaxy,
+            agn=base_config.agn,
+            likelihood=base_config.likelihood,
+            inference=base_config.inference,
+            prior_config=dict(base_config.prior_config),
+        )
+        if cfg.agn.feii_template.wave is None or cfg.agn.emission_line_template.wave is None:
+            cfg.agn = _build_chimera_agn_config()
+    dsps_path = Path(dsps_ssp_fn).expanduser()
+    if not dsps_path.is_file():
+        raise FileNotFoundError(f"DSPS SSP file not found: {dsps_path}")
+    cfg.galaxy.dsps_ssp_fn = str(dsps_path)
+    cfg.inference = InferenceConfig(
+        learning_rate=cfg.inference.learning_rate,
+        map_steps=cfg.inference.map_steps,
+        num_warmup=cfg.inference.num_warmup,
+        num_samples=cfg.inference.num_samples,
+        num_chains=cfg.inference.num_chains,
+        target_accept_prob=cfg.inference.target_accept_prob,
+        seed=DEFAULT_RANDOM_SEED,
+    )
+    inferred_priors = _estimate_chimera_prior_config(row)
+    for key, value in inferred_priors.items():
+        cfg.prior_config.setdefault(key, value)
+    return cfg
+
+
+def _estimate_chimera_prior_config(row: dict[str, Any]) -> dict[str, Any]:
+    """Seed a simple prior configuration from one Chimera photometric row."""
+    cosmology = FlatLambdaCDM(H0=70.0, Om0=0.3)
+    redshift = float(row["redshift"])
+    luminosity_distance_m = float(cosmology.luminosity_distance(redshift).to_value(u.m))
+    luminosity_distance_mpc = float(cosmology.luminosity_distance(redshift).to_value(u.Mpc))
+
+    nir_fluxes = np.array([float(row[name]) for name in ("J_2mass", "H_2mass", "Ks_2mass", "IRAC1", "IRAC2")], dtype=float)
+    nir_fluxes = nir_fluxes[np.isfinite(nir_fluxes) & (nir_fluxes > 0.0)]
+    if nir_fluxes.size == 0:
+        host_flux_mjy = 0.01
+    else:
+        host_flux_mjy = float(np.median(np.clip(nir_fluxes, 1.0e-6, None)))
+    log_stellar_mass_loc = 8.5 + np.log10(host_flux_mjy / 0.01) + 2.0 * np.log10(max(luminosity_distance_mpc, 1.0) / 100.0)
+    log_stellar_mass_loc = float(np.clip(log_stellar_mass_loc, 7.0, 12.0))
+
+    target_obs_wave = 5100.0 * (1.0 + redshift)
+    candidate_bands = [
+        name
+        for name in CHIMERA_FILTER_NAMES
+        if np.isfinite(float(row[name])) and float(row[name]) > 0.0
+    ]
+    if not candidate_bands:
+        optical_flux_mjy = 0.01
+    else:
+        nearest_band = min(candidate_bands, key=lambda name: abs(_CHIMERA_EFFECTIVE_WAVELENGTHS_A[name] - target_obs_wave))
+        optical_flux_mjy = float(np.clip(float(row[nearest_band]), 1.0e-6, None))
+    fnu_w_m2_hz = optical_flux_mjy * 1.0e-29
+    rest_wave_m = 5100.0e-10
+    lnu_w_hz = 4.0 * np.pi * luminosity_distance_m * luminosity_distance_m * (1.0 + redshift) * fnu_w_m2_hz
+    lambda_l_lambda_w = (_C_MS / rest_wave_m) * lnu_w_hz
+    log_agn_amp_loc = float(np.log(np.clip(lambda_l_lambda_w, 1.0e20, 1.0e60)))
+
+    return {
+        "log_stellar_mass": {"loc": log_stellar_mass_loc, "scale": 0.7},
+        "log_agn_amp": {"loc": log_agn_amp_loc, "scale": 2.0},
+    }
+
+
+def _weighted_quantile(values: np.ndarray, weights: np.ndarray, q: float) -> float:
+    """Compute one weighted quantile for finite values and weights."""
+    order = np.argsort(values)
+    values = values[order]
+    weights = weights[order]
+    cdf = np.cumsum(weights) / np.sum(weights)
+    return float(np.interp(q, cdf, values))
+
+
+def compute_weighted_metrics(log_mass_fit: np.ndarray, log_mass_truth: np.ndarray, weights: np.ndarray) -> dict[str, float]:
+    """Compute weighted stellar-mass recovery metrics for benchmark reporting."""
+    resid = log_mass_fit - log_mass_truth
+    w = np.asarray(weights, dtype=float)
+    w = w / np.sum(w)
+    bias = float(np.sum(w * resid))
+    mae = float(np.sum(w * np.abs(resid)))
+    rmse = float(np.sqrt(np.sum(w * resid**2)))
+    medae = _weighted_quantile(np.abs(resid), np.asarray(weights, dtype=float), 0.5)
+    mx = float(np.sum(w * log_mass_fit))
+    my = float(np.sum(w * log_mass_truth))
+    cov = float(np.sum(w * (log_mass_fit - mx) * (log_mass_truth - my)))
+    vx = float(np.sum(w * (log_mass_fit - mx) ** 2))
+    vy = float(np.sum(w * (log_mass_truth - my) ** 2))
+    pearson = cov / np.sqrt(max(vx * vy, 1e-30))
+    return {
+        "weighted_bias": bias,
+        "weighted_mae": mae,
+        "weighted_rmse": rmse,
+        "weighted_medae": medae,
+        "weighted_pearson": float(pearson),
+    }
+
+
+def _group_metrics(rows: list[dict[str, Any]], group_key: str) -> dict[str, dict[str, float]]:
+    """Compute weighted metrics separately for each value of a grouping key."""
+    out: dict[str, dict[str, float]] = {}
+    groups = sorted(set(row[group_key] for row in rows))
+    for key in groups:
+        chunk = [row for row in rows if row[group_key] == key and np.isfinite(row["log_stellar_mass_fit"])]
+        if not chunk:
+            continue
+        out[str(key)] = compute_weighted_metrics(
+            np.array([row["log_stellar_mass_fit"] for row in chunk], dtype=float),
+            np.array([row["log_stellar_mass_truth"] for row in chunk], dtype=float),
+            np.array([row["resample_weight"] for row in chunk], dtype=float),
+        )
+    return out
+
+
+def _redshift_bin_label(z: float, edges: np.ndarray) -> str:
+    """Return a readable redshift-bin label for one value and edge array."""
+    idx = min(len(edges) - 2, max(0, int(np.searchsorted(edges, z, side="right") - 1)))
+    return f"{edges[idx]:.3f}-{edges[idx+1]:.3f}"
+
+
+def _write_artifact_table(path: Path, rows: list[dict[str, Any]]) -> None:
+    """Write per-object benchmark results to a CSV artifact table."""
+    fieldnames = ["id", "ID_COSMOS", "redshift", "chimera_QSO_weight", "resample_weight", "log_stellar_mass_truth", "log_stellar_mass_fit", "residual"]
+    with open(path, "w", encoding="utf-8", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({k: row[k] for k in fieldnames})
+
+
+def _write_plots(output_dir: Path, rows: list[dict[str, Any]]) -> None:
+    """Write the benchmark scatter and residual diagnostic plots."""
+    import matplotlib.pyplot as plt
+
+    truth = np.array([row["log_stellar_mass_truth"] for row in rows], dtype=float)
+    fit = np.array([row["log_stellar_mass_fit"] for row in rows], dtype=float)
+    qso_w = np.array([row["chimera_QSO_weight"] for row in rows], dtype=float)
+    finite = np.isfinite(fit)
+
+    with use_style():
+        fig, ax = plt.subplots(figsize=(5, 5))
+        ax.scatter(truth[finite], fit[finite], s=12, alpha=0.75)
+        lo = min(np.nanmin(truth[finite]), np.nanmin(fit[finite]))
+        hi = max(np.nanmax(truth[finite]), np.nanmax(fit[finite]))
+        ax.plot([lo, hi], [lo, hi], color="black", lw=1.0, ls="--")
+        ax.set_xlabel("Chimera log stellar mass")
+        ax.set_ylabel("Recovered log stellar mass")
+        fig.tight_layout()
+        fig.savefig(output_dir / "chimera_mass_scatter.png")
+        plt.close(fig)
+
+        fig, ax = plt.subplots(figsize=(6, 4))
+        ax.scatter(qso_w[finite], (fit - truth)[finite], s=12, alpha=0.75)
+        ax.set_xscale("log")
+        ax.axhline(0.0, color="black", lw=1.0, ls="--")
+        ax.set_xlabel("chimera_QSO_weight")
+        ax.set_ylabel("Residual logM_fit - logM_truth")
+        fig.tight_layout()
+        fig.savefig(output_dir / "chimera_mass_residual_vs_qso_weight.png")
+        plt.close(fig)
+
+
+def run_chimera_mass_benchmark(
+    root: str | Path | None = None,
+    output_dir: str | Path | None = None,
+    dsps_ssp_fn: str = "tempdata.h5",
+    fitter_cls=None,
+    base_config: FitConfig | None = None,
+    max_weighted_mae: float = DEFAULT_MAX_WEIGHTED_MAE,
+    max_abs_weighted_bias: float = DEFAULT_MAX_ABS_WEIGHTED_BIAS,
+    min_finite_fraction: float = DEFAULT_MIN_FINITE_FRACTION,
+    limit: int | None = None,
+) -> dict[str, Any]:
+    """Run the Chimera stellar-mass recovery benchmark end to end."""
+    if fitter_cls is None:
+        from .core import GRAHSPJ
+
+        fitter_cls = GRAHSPJ
+    print("[benchmark] Preparing Chimera stellar-mass recovery benchmark")
+    print(f"[benchmark] Using DSPS SSP file: {Path(dsps_ssp_fn).expanduser()}")
+    dataset = load_chimera_benchmark_dataset(root=root)
+    rows = select_chimera_subset(dataset, root=root)
+    if limit is not None:
+        limit = max(0, int(limit))
+        rows = rows[:limit]
+        print(f"[benchmark] Applying row limit: {len(rows)} rows")
+    if not rows:
+        raise ValueError("Benchmark row selection is empty after applying limit.")
+    z_edges = np.quantile(np.array([row["redshift"] for row in rows], dtype=float), np.linspace(0.0, 1.0, 6))
+    z_edges[0] -= 1e-9
+    z_edges[-1] += 1e-9
+    benchmark_rows: list[dict[str, Any]] = []
+    progress = tqdm(rows, desc="Chimera MAP fits", unit="obj")
+    for row in progress:
+        progress.set_postfix_str(str(row["id"]))
+        cfg = build_chimera_fit_config(row=row, dsps_ssp_fn=dsps_ssp_fn, base_config=base_config)
+        fitter = fitter_cls(cfg)
+        fitter.fit_map()
+        log_fit = float(fitter.recovered_log_stellar_mass())
+        enriched = dict(row)
+        enriched["log_stellar_mass_fit"] = log_fit
+        enriched["residual"] = log_fit - enriched["log_stellar_mass_truth"]
+        enriched["redshift_bin"] = _redshift_bin_label(float(row["redshift"]), z_edges)
+        benchmark_rows.append(enriched)
+    print("[benchmark] Finished MAP fitting")
+
+    fit = np.array([row["log_stellar_mass_fit"] for row in benchmark_rows], dtype=float)
+    truth = np.array([row["log_stellar_mass_truth"] for row in benchmark_rows], dtype=float)
+    weights = np.array([row["resample_weight"] for row in benchmark_rows], dtype=float)
+    finite_fraction = float(np.isfinite(fit).mean())
+    finite_rows = [row for row in benchmark_rows if np.isfinite(row["log_stellar_mass_fit"])]
+    metrics = compute_weighted_metrics(
+        np.array([row["log_stellar_mass_fit"] for row in finite_rows], dtype=float),
+        np.array([row["log_stellar_mass_truth"] for row in finite_rows], dtype=float),
+        np.array([row["resample_weight"] for row in finite_rows], dtype=float),
+    )
+    metrics["finite_fit_fraction"] = finite_fraction
+    metrics["n_rows"] = len(benchmark_rows)
+    metrics["n_finite_rows"] = len(finite_rows)
+    by_redshift = _group_metrics(finite_rows, "redshift_bin")
+    by_qso_weight = _group_metrics(finite_rows, "chimera_QSO_weight")
+
+    passed = (
+        metrics["weighted_mae"] <= max_weighted_mae
+        and abs(metrics["weighted_bias"]) <= max_abs_weighted_bias
+        and metrics["finite_fit_fraction"] >= min_finite_fraction
+    )
+
+    out: dict[str, Any] = {
+        "metrics": metrics,
+        "by_redshift_bin": by_redshift,
+        "by_chimera_qso_weight": by_qso_weight,
+        "rows": benchmark_rows,
+        "passed": passed,
+        "thresholds": {
+            "max_weighted_mae": max_weighted_mae,
+            "max_abs_weighted_bias": max_abs_weighted_bias,
+            "min_finite_fraction": min_finite_fraction,
+        },
+    }
+    if output_dir is not None:
+        outdir = Path(output_dir)
+        outdir.mkdir(parents=True, exist_ok=True)
+        print(f"[benchmark] Writing benchmark artifacts to {outdir.resolve()}")
+        _write_artifact_table(outdir / "chimera_mass_recovery_rows.csv", benchmark_rows)
+        with open(outdir / "chimera_mass_recovery_metrics.json", "w", encoding="utf-8") as fh:
+            json.dump(
+                {
+                    "metrics": metrics,
+                    "by_redshift_bin": by_redshift,
+                    "by_chimera_qso_weight": by_qso_weight,
+                    "thresholds": out["thresholds"],
+                    "passed": passed,
+                },
+                fh,
+                indent=2,
+            )
+        _write_plots(outdir, benchmark_rows)
+        print("[benchmark] Wrote CSV, JSON, and plot artifacts")
+    print(
+        "[benchmark] Metrics: "
+        f"weighted_mae={metrics['weighted_mae']:.4f}, "
+        f"weighted_bias={metrics['weighted_bias']:.4f}, "
+        f"finite_fit_fraction={metrics['finite_fit_fraction']:.4f}"
+    )
+    return out
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Run the Chimera benchmark CLI entrypoint."""
+    parser = argparse.ArgumentParser(description="Run the Chimera stellar-mass recovery benchmark.")
+    parser.add_argument("--output-dir", default="benchmark_outputs", help="Directory for benchmark artifacts.")
+    parser.add_argument("--dsps-ssp-fn", default="tempdata.h5", help="Path to the DSPS SSP HDF5 file.")
+    parser.add_argument("--root", default=None, help="Optional grahspj project root override.")
+    parser.add_argument("--max-weighted-mae", type=float, default=DEFAULT_MAX_WEIGHTED_MAE)
+    parser.add_argument("--max-abs-weighted-bias", type=float, default=DEFAULT_MAX_ABS_WEIGHTED_BIAS)
+    parser.add_argument("--min-finite-fraction", type=float, default=DEFAULT_MIN_FINITE_FRACTION)
+    parser.add_argument("--limit", type=int, default=None, help="Optional number of benchmark rows to run from the deterministic subset.")
+    args = parser.parse_args(argv)
+
+    result = run_chimera_mass_benchmark(
+        root=args.root,
+        output_dir=args.output_dir,
+        dsps_ssp_fn=args.dsps_ssp_fn,
+        max_weighted_mae=args.max_weighted_mae,
+        max_abs_weighted_bias=args.max_abs_weighted_bias,
+        min_finite_fraction=args.min_finite_fraction,
+        limit=args.limit,
+    )
+    summary = {
+        "passed": result["passed"],
+        "metrics": result["metrics"],
+        "thresholds": result["thresholds"],
+        "output_dir": str(Path(args.output_dir).resolve()),
+    }
+    print(json.dumps(summary, indent=2))
+    return 0 if result["passed"] else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
