@@ -34,7 +34,7 @@ After fetching, make sure `dustmaps` is configured to use the directory containi
 
 A worked single-object tutorial is available in:
 
-- [notebooks/01_example.ipynb](/Users/colinburke/research/grahspj/notebooks/01_example.ipynb)
+- [notebooks/01_example.ipynb](notebooks/01_example.ipynb)
 
 It shows how to:
 

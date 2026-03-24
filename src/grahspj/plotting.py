@@ -197,7 +197,7 @@ def plot_fit_sed(
         ax_sed.set_ylabel("Flux density (mJy)")
         ax_resid.set_ylabel("Obs - Model (mJy)")
         ax_resid.set_xlabel("Observed-frame wavelength (Å)")
-        ax_sed.legend(loc="best", fontsize=9, ncol=2)
+        ax_sed.legend(loc="lower right", fontsize=9, ncol=2)
 
         finite_flux_parts = [np.asarray(obs_flux, dtype=float), np.asarray(model_flux, dtype=float)]
         finite_flux_parts.extend(np.asarray(comp, dtype=float) for comp in plotted_components)
