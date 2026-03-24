@@ -144,16 +144,16 @@ def _feii_component(wave, template_wave, template_flux, norm, fwhm_kms, shift_fr
 def _line_gaussians(wave, line_wave, line_lumin, width_kms):
     """Evaluate a summed Gaussian emission-line template with one shared width."""
     fwhm_to_sigma_conversion = 1 / (2 * jnp.sqrt(2 * jnp.log(2)))
-    width_nm = line_wave * (width_kms * 1000.0) / 299792458.0
-    sigma = width_nm * fwhm_to_sigma_conversion
+    width_wave = line_wave * (width_kms * 1000.0) / 299792458.0
+    sigma = width_wave * fwhm_to_sigma_conversion
     z = (wave[:, None] - line_wave[None, :]) / jnp.maximum(sigma[None, :], 1e-12)
-    norm = 510.0 / jnp.sqrt(jnp.pi * sigma**2)
+    norm = 5100.0 / jnp.sqrt(jnp.pi * sigma**2)
     return jnp.sum(line_lumin[None, :] * jnp.exp(-0.5 * z * z) * norm[None, :], axis=1)
 
 
 def _balmer_continuum_jax(wave, balmer_norm, balmer_te, balmer_tau, balmer_vel):
     """Evaluate the broadened Balmer continuum template."""
-    lam_be = 364.6
+    lam_be = 3646.0
     h_c_per_k_B = 1.439e7
     bb = (wave**-5) / jnp.expm1(jnp.clip(h_c_per_k_B / (balmer_te * wave), 1e-9, 700.0))
     bb0 = (lam_be**-5) / jnp.expm1(jnp.clip(h_c_per_k_B / (balmer_te * lam_be), 1e-9, 700.0))
@@ -356,6 +356,46 @@ def _build_diffstar_host(context: ModelContext, prior_config: dict[str, Any]):
     }
 
 
+def _empty_host_state(context: ModelContext):
+    """Return zero-valued host placeholders for AGN-only fits."""
+    rest_wave = _np_to_jnp(context.rest_wave)
+    ssp_lgmet = _np_to_jnp(context.ssp_data.ssp_lgmet)
+    ssp_lg_age_gyr = _np_to_jnp(context.ssp_data.ssp_lg_age_gyr)
+    gal_t_table = _np_to_jnp(context.gal_t_table)
+    zero_host_weights = jnp.zeros((ssp_lgmet.shape[0], ssp_lg_age_gyr.shape[0]), dtype=jnp.float64)
+    return {
+        "host_rest": jnp.zeros_like(rest_wave),
+        "host_age_weights": jnp.zeros_like(ssp_lg_age_gyr),
+        "host_lgmet_weights": jnp.zeros_like(ssp_lgmet),
+        "host_ssp_weights": zero_host_weights,
+        "surviving_mass_fraction": jnp.asarray(0.0, dtype=jnp.float64),
+        "formed_mass": jnp.asarray(0.0, dtype=jnp.float64),
+        "sfh_scale": jnp.asarray(0.0, dtype=jnp.float64),
+        "gal_lgmet": jnp.asarray(0.0, dtype=jnp.float64),
+        "gal_lgmet_scatter": jnp.asarray(0.0, dtype=jnp.float64),
+        "gal_sfr_table": jnp.zeros_like(gal_t_table),
+        "gal_smh_table": jnp.zeros_like(gal_t_table),
+        "ssp_lg_age_gyr": ssp_lg_age_gyr,
+        "ssp_lgmet": ssp_lgmet,
+    }
+
+
+def _estimate_log_agn_amp_prior_loc(context: ModelContext, redshift: float) -> float:
+    """Estimate a rough log(lambda L_lambda, 5100 A) prior center from the photometry."""
+    obs_fluxes_mjy = np.asarray(context.fluxes, dtype=float)
+    mask = np.asarray(context.positive_detected_mask, dtype=bool) & np.isfinite(obs_fluxes_mjy) & (obs_fluxes_mjy > 0.0)
+    if not np.any(mask):
+        return float(np.log(1.0e36))
+    filter_wavelength = np.array([f.effective_wavelength for f in context.filters], dtype=float)
+    target_obs_wave = 5100.0 * (1.0 + max(float(redshift), 0.0))
+    valid_indices = np.flatnonzero(mask)
+    best_index = valid_indices[int(np.argmin(np.abs(filter_wavelength[valid_indices] - target_obs_wave)))]
+    flux_w_m2_hz = obs_fluxes_mjy[best_index] * 1.0e-29
+    nu_obs_hz = C_MS / max(filter_wavelength[best_index] * 1.0e-10, 1.0e-30)
+    agn_amp_w = 4.0 * np.pi * float(context.luminosity_distance_m) ** 2 * nu_obs_hz * flux_w_m2_hz
+    return float(np.log(np.clip(agn_amp_w, 1.0e30, 1.0e50)))
+
+
 def _chi2_upper_limit(obs_fluxes, model_fluxes, total_variance):
     """Return the one-sided chi-square contribution for upper limits."""
     z = (obs_fluxes - model_fluxes) / (jnp.sqrt(2.0) * jnp.maximum(total_variance, 1e-30))
@@ -455,102 +495,160 @@ def grahsp_photometric_model(context: ModelContext, include_components: bool = F
     data_mask = _bool_to_jnp(context.data_mask)
     positive_detected_mask = _bool_to_jnp(context.positive_detected_mask)
     dust_alpha_grid = np.asarray(context.templates.dust_alpha_grid, dtype=float)
+    fit_host = bool(cfg.galaxy.fit_host)
+    fit_agn = bool(cfg.agn.fit_agn)
     spatial_scale_arcsec = _np_to_jnp(context.effective_spatial_scale_arcsec)
     host_capture_enabled = bool(
-        cfg.likelihood.use_host_capture_model
+        fit_host
+        and cfg.likelihood.use_host_capture_model
         and np.any(np.isfinite(context.effective_spatial_scale_arcsec) & (np.asarray(context.effective_spatial_scale_arcsec, dtype=float) > 0.0))
     )
-
-    host_state = _build_diffstar_host(context, prior_config)
+    host_state = _build_diffstar_host(context, prior_config) if fit_host else _empty_host_state(context)
     host_rest = host_state["host_rest"]
-    gal_v_kms = numpyro.sample("gal_v_kms", dist.Normal(*_cfg_norm(prior_config, "gal_v_kms", 0.0, 150.0)))
-    gal_sigma_kms = numpyro.sample("gal_sigma_kms", dist.HalfNormal(_cfg_halfnorm(prior_config, "gal_sigma_kms", 150.0)))
-    host_rest = _shift_and_broaden_single_spectrum_lnlam(jnp.log(rest_wave), host_rest, gal_v_kms, gal_sigma_kms)
-    fracagn_5100 = numpyro.sample(
-        "fracAGN_5100",
-        dist.TruncatedNormal(
-            *_cfg_norm(prior_config, "fracAGN_5100", 0.3, 0.25),
-            low=1.0e-4,
-            high=0.999,
-        ),
-    )
-    host_llambda_5100 = jnp.interp(5100.0, rest_wave, host_rest, left=0.0, right=0.0)
-    agn_amp = jnp.clip(host_llambda_5100, 0.0, 1.0e60) * (1.0 / (1.0 - fracagn_5100) - 1.0) * 5100.0
-    log_agn_amp = jnp.log(jnp.clip(agn_amp, 1.0e-30, 1.0e80))
-
-    uv_slope = numpyro.sample("uv_slope", dist.Normal(*_cfg_norm(prior_config, "uv_slope", 0.0, 0.5)))
-    pl_slope = numpyro.sample("pl_slope", dist.Normal(*_cfg_norm(prior_config, "pl_slope", -1.0, 0.5)))
-    pl_bend_loc = numpyro.sample("pl_bend_loc", dist.LogNormal(*_cfg_norm(prior_config, "log_pl_bend_loc", np.log(100.0), 0.3)))
-    pl_bend_width = numpyro.sample("pl_bend_width", dist.LogNormal(*_cfg_norm(prior_config, "log_pl_bend_width", np.log(10.0), 0.4)))
-    pl_cutoff = numpyro.sample("pl_cutoff", dist.LogNormal(*_cfg_norm(prior_config, "log_pl_cutoff", np.log(10000.0), 0.6)))
-    disk_rest = _powerlaw_jax(rest_wave, agn_amp / 5100.0, uv_slope, pl_slope, 5100.0, pl_bend_loc, pl_bend_width, pl_cutoff)
-
-    fcov = numpyro.sample("fcov", dist.Beta(2.0, 8.0))
-    si = numpyro.sample("si", dist.Normal(*_cfg_norm(prior_config, "si", 0.0, 1.0)))
-    cool_lam = numpyro.sample("cool_lam", dist.LogNormal(*_cfg_norm(prior_config, "log_cool_lam", np.log(17.0), 0.2)))
-    cool_width = numpyro.sample("cool_width", dist.LogNormal(*_cfg_norm(prior_config, "log_cool_width", np.log(0.45), 0.2)))
-    hot_lam = numpyro.sample("hot_lam", dist.LogNormal(*_cfg_norm(prior_config, "log_hot_lam", np.log(2.0), 0.3)))
-    hot_width = numpyro.sample("hot_width", dist.LogNormal(*_cfg_norm(prior_config, "log_hot_width", np.log(0.5), 0.2)))
-    hot_fcov = numpyro.sample("hot_fcov", dist.LogNormal(*_cfg_norm(prior_config, "log_hot_fcov", np.log(0.1), 0.8)))
-    torus_rest = _torus_component(rest_wave, fcov, si, cool_lam, cool_width, hot_lam, hot_width, hot_fcov, 0.29, 9841.0, 14224.0, 1025.3, 1163.5, agn_amp)
-
-    lines_strength = numpyro.sample("lines_strength", dist.LogNormal(*_cfg_norm(prior_config, "log_lines_strength", np.log(max(cfg.agn.lines_strength_default, 1e-3)), 0.5)))
-    line_width = numpyro.sample("line_width_kms", dist.LogNormal(*_cfg_norm(prior_config, "log_line_width_kms", np.log(cfg.agn.line_width_kms_default), 0.4)))
-    agn_type = int(cfg.agn.agn_type)
-    balmer_enabled = agn_type == 1 and (
-        cfg.agn.balmer_continuum_default > 0.0
-        or "log_balmer_norm" in prior_config
-        or "balmer_norm" in prior_config
-    )
-    if balmer_enabled:
-        balmer_norm = numpyro.sample(
-            "balmer_norm",
-            dist.LogNormal(*_cfg_norm(prior_config, "log_balmer_norm", np.log(max(cfg.agn.balmer_continuum_default, 1e-3)), 1.0)),
-        )
-        balmer_tau = numpyro.sample("balmer_tau", dist.LogNormal(*_cfg_norm(prior_config, "log_balmer_tau", np.log(1.0), 0.5)))
-        balmer_vel = numpyro.sample("balmer_vel", dist.LogNormal(*_cfg_norm(prior_config, "log_balmer_vel", np.log(cfg.agn.line_width_kms_default), 0.4)))
+    if fit_host:
+        gal_v_kms = numpyro.sample("gal_v_kms", dist.Normal(*_cfg_norm(prior_config, "gal_v_kms", 0.0, 150.0)))
+        gal_sigma_kms = numpyro.sample("gal_sigma_kms", dist.HalfNormal(_cfg_halfnorm(prior_config, "gal_sigma_kms", 150.0)))
+        host_rest = _shift_and_broaden_single_spectrum_lnlam(jnp.log(rest_wave), host_rest, gal_v_kms, gal_sigma_kms)
     else:
+        gal_v_kms = jnp.asarray(0.0, dtype=jnp.float64)
+        gal_sigma_kms = jnp.asarray(1.0, dtype=jnp.float64)
+
+    if fit_agn and fit_host:
+        fracagn_5100 = numpyro.sample(
+            "fracAGN_5100",
+            dist.TruncatedNormal(
+                *_cfg_norm(prior_config, "fracAGN_5100", 0.3, 0.25),
+                low=1.0e-4,
+                high=0.999,
+            ),
+        )
+        host_llambda_5100 = jnp.interp(5100.0, rest_wave, host_rest, left=0.0, right=0.0)
+        agn_amp = jnp.clip(host_llambda_5100, 0.0, 1.0e60) * (1.0 / (1.0 - fracagn_5100) - 1.0) * 5100.0
+        log_agn_amp = jnp.log(jnp.clip(agn_amp, 1.0e-30, 1.0e80))
+    elif fit_agn:
+        fracagn_5100 = jnp.asarray(0.999, dtype=jnp.float64)
+        log_agn_amp = numpyro.sample(
+            "log_agn_amp",
+            dist.Normal(
+                *_cfg_norm(
+                    prior_config,
+                    "log_agn_amp",
+                    _estimate_log_agn_amp_prior_loc(context, cfg.observation.redshift),
+                    2.0,
+                ),
+            ),
+        )
+        agn_amp = jnp.exp(log_agn_amp)
+    else:
+        fracagn_5100 = jnp.asarray(1.0e-4, dtype=jnp.float64)
+        agn_amp = jnp.asarray(0.0, dtype=jnp.float64)
+        log_agn_amp = jnp.log(jnp.clip(agn_amp, 1.0e-30, 1.0e80))
+
+    agn_type = int(cfg.agn.agn_type)
+    if fit_agn:
+        uv_slope = numpyro.sample("uv_slope", dist.Normal(*_cfg_norm(prior_config, "uv_slope", 0.0, 0.5)))
+        pl_slope = numpyro.sample("pl_slope", dist.Normal(*_cfg_norm(prior_config, "pl_slope", -1.0, 0.5)))
+        pl_bend_loc = numpyro.sample("pl_bend_loc", dist.LogNormal(*_cfg_norm(prior_config, "log_pl_bend_loc", np.log(100.0), 0.3)))
+        pl_bend_width = numpyro.sample("pl_bend_width", dist.LogNormal(*_cfg_norm(prior_config, "log_pl_bend_width", np.log(10.0), 0.4)))
+        pl_cutoff = numpyro.sample("pl_cutoff", dist.LogNormal(*_cfg_norm(prior_config, "log_pl_cutoff", np.log(10000.0), 0.6)))
+        disk_rest = _powerlaw_jax(rest_wave, agn_amp / 5100.0, uv_slope, pl_slope, 5100.0, pl_bend_loc, pl_bend_width, pl_cutoff)
+
+        fcov = numpyro.sample("fcov", dist.Beta(2.0, 8.0))
+        si = numpyro.sample("si", dist.Normal(*_cfg_norm(prior_config, "si", 0.0, 1.0)))
+        cool_lam = numpyro.sample("cool_lam", dist.LogNormal(*_cfg_norm(prior_config, "log_cool_lam", np.log(17.0), 0.2)))
+        cool_width = numpyro.sample("cool_width", dist.LogNormal(*_cfg_norm(prior_config, "log_cool_width", np.log(0.45), 0.2)))
+        hot_lam = numpyro.sample("hot_lam", dist.LogNormal(*_cfg_norm(prior_config, "log_hot_lam", np.log(2.0), 0.3)))
+        hot_width = numpyro.sample("hot_width", dist.LogNormal(*_cfg_norm(prior_config, "log_hot_width", np.log(0.5), 0.2)))
+        hot_fcov = numpyro.sample("hot_fcov", dist.LogNormal(*_cfg_norm(prior_config, "log_hot_fcov", np.log(0.1), 0.8)))
+        torus_rest = _torus_component(rest_wave, fcov, si, cool_lam, cool_width, hot_lam, hot_width, hot_fcov, 0.29, 9841.0, 14224.0, 1025.3, 1163.5, agn_amp)
+
+        lines_strength = numpyro.sample("lines_strength", dist.LogNormal(*_cfg_norm(prior_config, "log_lines_strength", np.log(max(cfg.agn.lines_strength_default, 1e-3)), 0.5)))
+        line_width = numpyro.sample("line_width_kms", dist.LogNormal(*_cfg_norm(prior_config, "log_line_width_kms", np.log(cfg.agn.line_width_kms_default), 0.4)))
+        balmer_enabled = agn_type == 1 and (
+            cfg.agn.balmer_continuum_default > 0.0
+            or "log_balmer_norm" in prior_config
+            or "balmer_norm" in prior_config
+        )
+        if balmer_enabled:
+            balmer_norm = numpyro.sample(
+                "balmer_norm",
+                dist.LogNormal(*_cfg_norm(prior_config, "log_balmer_norm", np.log(max(cfg.agn.balmer_continuum_default, 1e-3)), 1.0)),
+            )
+            balmer_tau = numpyro.sample("balmer_tau", dist.LogNormal(*_cfg_norm(prior_config, "log_balmer_tau", np.log(1.0), 0.5)))
+            balmer_vel = numpyro.sample("balmer_vel", dist.LogNormal(*_cfg_norm(prior_config, "log_balmer_vel", np.log(cfg.agn.line_width_kms_default), 0.4)))
+        else:
+            balmer_norm = jnp.asarray(0.0, dtype=jnp.float64)
+            balmer_tau = jnp.asarray(1.0, dtype=jnp.float64)
+            balmer_vel = jnp.asarray(float(cfg.agn.line_width_kms_default), dtype=jnp.float64)
+        l_agn_lambda_5100 = agn_amp / 5100.0
+        agn_bol_luminosity = agn_amp * AGN_BOLOMETRIC_CORRECTION_5100
+        l_broadlines = 0.02 * l_agn_lambda_5100 * lines_strength
+        l_narrowlines = 0.002 * l_agn_lambda_5100 * lines_strength
+
+        line_bl_rest = jnp.where(
+            agn_type == 1,
+            _line_gaussians(rest_wave, line_wave, l_broadlines * line_blagn, line_width),
+            jnp.zeros_like(rest_wave),
+        )
+        line_nl_rest = jnp.where(
+            agn_type in (1, 2),
+            _line_gaussians(rest_wave, line_wave, l_narrowlines * line_sy2, line_width),
+            jnp.zeros_like(rest_wave),
+        )
+        line_liner_rest = jnp.where(
+            agn_type == 3,
+            _line_gaussians(rest_wave, line_wave, l_narrowlines * line_liner, line_width),
+            jnp.zeros_like(rest_wave),
+        )
+        line_rest = line_bl_rest + line_nl_rest + line_liner_rest
+
+        if agn_type == 1:
+            feii_norm = numpyro.sample("feii_norm", dist.LogNormal(*_cfg_norm(prior_config, "log_feii_norm", np.log(max(cfg.agn.feii_strength_default, 1e-3)), 0.8)))
+            feii_fwhm = numpyro.sample("feii_fwhm", dist.LogNormal(*_cfg_norm(prior_config, "log_feii_fwhm", np.log(cfg.agn.line_width_kms_default), 0.3)))
+            feii_shift = numpyro.sample("feii_shift", dist.Normal(*_cfg_norm(prior_config, "feii_shift", 0.0, 0.01)))
+            l_feii = feii_norm * l_broadlines
+            feii_rest = _feii_component(rest_wave, feii_wave, feii_lumin, l_feii, feii_fwhm, feii_shift)
+        else:
+            feii_norm = jnp.asarray(0.0, dtype=jnp.float64)
+            feii_fwhm = jnp.asarray(float(cfg.agn.line_width_kms_default), dtype=jnp.float64)
+            feii_shift = jnp.asarray(0.0, dtype=jnp.float64)
+            feii_rest = jnp.zeros_like(rest_wave)
+        balmer_rest = _balmer_continuum_jax(rest_wave, balmer_norm, 15000.0, balmer_tau, balmer_vel)
+    else:
+        uv_slope = jnp.asarray(0.0, dtype=jnp.float64)
+        pl_slope = jnp.asarray(-1.0, dtype=jnp.float64)
+        pl_bend_loc = jnp.asarray(100.0, dtype=jnp.float64)
+        pl_bend_width = jnp.asarray(10.0, dtype=jnp.float64)
+        pl_cutoff = jnp.asarray(10000.0, dtype=jnp.float64)
+        disk_rest = jnp.zeros_like(rest_wave)
+        fcov = jnp.asarray(0.0, dtype=jnp.float64)
+        si = jnp.asarray(0.0, dtype=jnp.float64)
+        cool_lam = jnp.asarray(17.0, dtype=jnp.float64)
+        cool_width = jnp.asarray(0.45, dtype=jnp.float64)
+        hot_lam = jnp.asarray(2.0, dtype=jnp.float64)
+        hot_width = jnp.asarray(0.5, dtype=jnp.float64)
+        hot_fcov = jnp.asarray(0.0, dtype=jnp.float64)
+        torus_rest = jnp.zeros_like(rest_wave)
+        lines_strength = jnp.asarray(0.0, dtype=jnp.float64)
+        line_width = jnp.asarray(float(cfg.agn.line_width_kms_default), dtype=jnp.float64)
         balmer_norm = jnp.asarray(0.0, dtype=jnp.float64)
         balmer_tau = jnp.asarray(1.0, dtype=jnp.float64)
         balmer_vel = jnp.asarray(float(cfg.agn.line_width_kms_default), dtype=jnp.float64)
-    l_agn_lambda_5100 = agn_amp / 5100.0
-    agn_bol_luminosity = agn_amp * AGN_BOLOMETRIC_CORRECTION_5100
-    l_broadlines = 0.02 * l_agn_lambda_5100 * lines_strength
-    l_narrowlines = 0.002 * l_agn_lambda_5100 * lines_strength
-
-    line_bl_rest = jnp.where(
-        agn_type == 1,
-        _line_gaussians(rest_wave, line_wave, l_broadlines * line_blagn, line_width),
-        jnp.zeros_like(rest_wave),
-    )
-    line_nl_rest = jnp.where(
-        agn_type in (1, 2),
-        _line_gaussians(rest_wave, line_wave, l_narrowlines * line_sy2, line_width),
-        jnp.zeros_like(rest_wave),
-    )
-    line_liner_rest = jnp.where(
-        agn_type == 3,
-        _line_gaussians(rest_wave, line_wave, l_narrowlines * line_liner, line_width),
-        jnp.zeros_like(rest_wave),
-    )
-    line_rest = line_bl_rest + line_nl_rest + line_liner_rest
-
-    if agn_type == 1:
-        feii_norm = numpyro.sample("feii_norm", dist.LogNormal(*_cfg_norm(prior_config, "log_feii_norm", np.log(max(cfg.agn.feii_strength_default, 1e-3)), 0.8)))
-        feii_fwhm = numpyro.sample("feii_fwhm", dist.LogNormal(*_cfg_norm(prior_config, "log_feii_fwhm", np.log(cfg.agn.line_width_kms_default), 0.3)))
-        feii_shift = numpyro.sample("feii_shift", dist.Normal(*_cfg_norm(prior_config, "feii_shift", 0.0, 0.01)))
-        l_feii = feii_norm * l_broadlines
-        feii_rest = _feii_component(rest_wave, feii_wave, feii_lumin, l_feii, feii_fwhm, feii_shift)
-    else:
+        l_agn_lambda_5100 = jnp.asarray(0.0, dtype=jnp.float64)
+        agn_bol_luminosity = jnp.asarray(0.0, dtype=jnp.float64)
+        line_bl_rest = jnp.zeros_like(rest_wave)
+        line_nl_rest = jnp.zeros_like(rest_wave)
+        line_liner_rest = jnp.zeros_like(rest_wave)
+        line_rest = jnp.zeros_like(rest_wave)
         feii_norm = jnp.asarray(0.0, dtype=jnp.float64)
         feii_fwhm = jnp.asarray(float(cfg.agn.line_width_kms_default), dtype=jnp.float64)
         feii_shift = jnp.asarray(0.0, dtype=jnp.float64)
         feii_rest = jnp.zeros_like(rest_wave)
-    balmer_rest = _balmer_continuum_jax(rest_wave, balmer_norm, 15000.0, balmer_tau, balmer_vel)
+        balmer_rest = jnp.zeros_like(rest_wave)
 
-    ebv_gal = numpyro.sample("ebv_gal", dist.HalfNormal(_cfg_halfnorm(prior_config, "ebv_gal", 0.4)))
-    ebv_agn = numpyro.sample("ebv_agn", dist.HalfNormal(_cfg_halfnorm(prior_config, "ebv_agn", 0.4)))
-    if cfg.galaxy.use_energy_balance:
+    ebv_gal = numpyro.sample("ebv_gal", dist.HalfNormal(_cfg_halfnorm(prior_config, "ebv_gal", 0.4))) if fit_host else jnp.asarray(0.0, dtype=jnp.float64)
+    ebv_agn = numpyro.sample("ebv_agn", dist.HalfNormal(_cfg_halfnorm(prior_config, "ebv_agn", 0.4))) if fit_agn else jnp.asarray(0.0, dtype=jnp.float64)
+    if cfg.galaxy.use_energy_balance and fit_host:
         dust_alpha = numpyro.sample(
             "dust_alpha",
             dist.TruncatedNormal(
@@ -599,7 +697,7 @@ def grahsp_photometric_model(context: ModelContext, include_components: bool = F
         1100.0,
     )
     dust_rest = jnp.where(
-        cfg.galaxy.use_energy_balance,
+        cfg.galaxy.use_energy_balance and fit_host,
         _host_dust_emission(context, dust_luminosity, dust_alpha),
         jnp.zeros_like(rest_wave),
     )

@@ -81,6 +81,7 @@ class EmissionLineTemplate:
 @dataclass
 class GalaxyConfig:
     """Host-galaxy model, cosmology, and wavelength-grid settings."""
+    fit_host: bool = True
     dsps_ssp_fn: str = "tempdata.h5"
     age_grid_gyr: Sequence[float] = (0.1, 0.3, 1.0, 3.0, 10.0)
     logzsol_grid: Sequence[float] = (-1.0, -0.5, 0.0, 0.2)
@@ -102,6 +103,7 @@ class GalaxyConfig:
 @dataclass
 class AGNConfig:
     """AGN component configuration, templates, and fixed branch settings."""
+    fit_agn: bool = True
     use_powerlaw_disk: bool = True
     feii_template: FeIITemplate = field(default_factory=FeIITemplate)
     emission_line_template: EmissionLineTemplate = field(default_factory=EmissionLineTemplate)
@@ -155,6 +157,8 @@ class FitConfig:
     def validate(self) -> None:
         """Validate nested config components that require runtime checks."""
         self.photometry.validate()
+        if not self.galaxy.fit_host and not self.agn.fit_agn:
+            raise ValueError("At least one of galaxy.fit_host or agn.fit_agn must be True.")
 
     def to_dict(self) -> dict[str, Any]:
         """Convert the dataclass tree into a plain Python dictionary."""
@@ -191,6 +195,7 @@ def fit_config_from_mapping(data: Mapping[str, Any]) -> FitConfig:
     agn_raw = data.get("agn", {})
     if isinstance(agn_raw, Mapping):
         agn_obj = AGNConfig(
+            fit_agn=bool(agn_raw.get("fit_agn", True)),
             use_powerlaw_disk=bool(agn_raw.get("use_powerlaw_disk", True)),
             feii_template=_coerce_dataclass(FeIITemplate, agn_raw.get("feii_template", {})),
             emission_line_template=_coerce_dataclass(EmissionLineTemplate, agn_raw.get("emission_line_template", {})),

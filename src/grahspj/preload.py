@@ -409,9 +409,9 @@ def _load_templates(cfg: FitConfig) -> LoadedTemplates:
             ],
         )
         loaded = LoadedTemplates(
-            feii_wave=np.asarray(wave_rest * 0.1, dtype=float),
+            feii_wave=np.asarray(wave_rest, dtype=float),
             feii_lumin=np.asarray(llam / max(norm, 1e-30), dtype=float),
-            line_wave=np.asarray(line_data["wave"] * 0.1, dtype=float),
+            line_wave=np.asarray(line_data["wave"], dtype=float),
             line_blagn=np.asarray(line_data["broad"], dtype=float),
             line_sy2=np.asarray(line_data["S2"], dtype=float),
             line_liner=np.asarray(line_data["LINER"], dtype=float),
