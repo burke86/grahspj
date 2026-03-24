@@ -439,6 +439,7 @@ def _failed_benchmark_row(task: _BenchmarkWorkerTask, exc: Exception) -> dict[st
     enriched["log_stellar_mass_fit_p84"] = float("nan")
     enriched["log_stellar_mass_fit_err_lo"] = float("nan")
     enriched["log_stellar_mass_fit_err_hi"] = float("nan")
+    enriched["fracAGN_5100_fit"] = float("nan")
     enriched["reduced_chi2"] = float("nan")
     enriched["residual"] = float("nan")
     enriched["redshift_bin"] = _redshift_bin_label(float(task.row["redshift"]), task.z_edges)
@@ -466,6 +467,8 @@ def _run_single_chimera_fit(task: _BenchmarkWorkerTask, fitter_cls=None) -> tupl
     )
     logm_samples = np.asarray(fitter.samples["log_stellar_mass"], dtype=float).reshape(-1)
     logm16, logm50, logm84 = np.percentile(logm_samples, [16.0, 50.0, 84.0])
+    fracagn_samples = np.asarray(fitter.samples["fracAGN_5100"], dtype=float).reshape(-1)
+    fracagn50 = float(np.percentile(fracagn_samples, 50.0))
     log_fit = float(logm50)
     reduced_chi2 = _reduced_chi2_for_fit(fitter)
     enriched = dict(task.row)
@@ -474,6 +477,7 @@ def _run_single_chimera_fit(task: _BenchmarkWorkerTask, fitter_cls=None) -> tupl
     enriched["log_stellar_mass_fit_p84"] = float(logm84)
     enriched["log_stellar_mass_fit_err_lo"] = float(max(0.0, log_fit - logm16))
     enriched["log_stellar_mass_fit_err_hi"] = float(max(0.0, logm84 - log_fit))
+    enriched["fracAGN_5100_fit"] = fracagn50
     enriched["reduced_chi2"] = reduced_chi2
     enriched["residual"] = log_fit - enriched["log_stellar_mass_truth"]
     enriched["redshift_bin"] = _redshift_bin_label(float(task.row["redshift"]), task.z_edges)
@@ -495,6 +499,7 @@ def _write_artifact_table(path: Path, rows: list[dict[str, Any]]) -> None:
         "log_stellar_mass_fit_p84",
         "log_stellar_mass_fit_err_lo",
         "log_stellar_mass_fit_err_hi",
+        "fracAGN_5100_fit",
         "reduced_chi2",
         "residual",
         "fit_error",
@@ -514,8 +519,10 @@ def _write_plots(output_dir: Path, rows: list[dict[str, Any]]) -> None:
     fit = np.array([row["log_stellar_mass_fit"] for row in rows], dtype=float)
     fit_err_lo = np.array([row["log_stellar_mass_fit_err_lo"] for row in rows], dtype=float)
     fit_err_hi = np.array([row["log_stellar_mass_fit_err_hi"] for row in rows], dtype=float)
+    fracagn = np.array([row.get("fracAGN_5100_fit", np.nan) for row in rows], dtype=float)
     qso_w = np.array([row["chimera_QSO_weight"] for row in rows], dtype=float)
     finite = np.isfinite(fit) & np.isfinite(fit_err_lo) & np.isfinite(fit_err_hi)
+    finite_color = finite & np.isfinite(fracagn)
 
     with use_style():
         fig, ax = plt.subplots(figsize=(5, 5))
@@ -528,22 +535,48 @@ def _write_plots(output_dir: Path, rows: list[dict[str, Any]]) -> None:
             alpha=0.75,
             lw=0.8,
             capsize=2,
+            color="0.7",
+            zorder=1,
+        )
+        sc = ax.scatter(
+            truth[finite_color],
+            fit[finite_color],
+            c=fracagn[finite_color],
+            s=18,
+            alpha=0.9,
+            cmap="viridis",
+            vmin=0.0,
+            vmax=1.0,
+            zorder=2,
         )
         lo = min(np.nanmin(truth[finite]), np.nanmin(fit[finite]))
         hi = max(np.nanmax(truth[finite]), np.nanmax(fit[finite]))
         ax.plot([lo, hi], [lo, hi], color="black", lw=1.0, ls="--")
         ax.set_xlabel("Chimera log stellar mass")
         ax.set_ylabel("Recovered log stellar mass")
+        if np.any(finite_color):
+            fig.colorbar(sc, ax=ax, label="Recovered fracAGN_5100")
         fig.tight_layout()
         fig.savefig(output_dir / "chimera_mass_scatter.png")
         plt.close(fig)
 
         fig, ax = plt.subplots(figsize=(6, 4))
-        ax.scatter(qso_w[finite], (fit - truth)[finite], s=12, alpha=0.75)
+        sc = ax.scatter(
+            qso_w[finite_color],
+            (fit - truth)[finite_color],
+            c=fracagn[finite_color],
+            s=16,
+            alpha=0.85,
+            cmap="viridis",
+            vmin=0.0,
+            vmax=1.0,
+        )
         ax.set_xscale("log")
         ax.axhline(0.0, color="black", lw=1.0, ls="--")
         ax.set_xlabel("chimera_QSO_weight")
         ax.set_ylabel("Residual logM_fit - logM_truth")
+        if np.any(finite_color):
+            fig.colorbar(sc, ax=ax, label="Recovered fracAGN_5100")
         fig.tight_layout()
         fig.savefig(output_dir / "chimera_mass_residual_vs_qso_weight.png")
         plt.close(fig)

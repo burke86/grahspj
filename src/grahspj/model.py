@@ -19,8 +19,7 @@ import jax.numpy as jnp
 import numpy as np
 from diffmah.diffmah_kernels import DEFAULT_MAH_PARAMS
 from diffstar import DEFAULT_DIFFSTAR_U_PARAMS, DiffstarUParams, calc_sfh_singlegal, get_bounded_diffstar_params
-from dsps.imf.surviving_mstar import surviving_mstar
-from dsps.sed.stellar_sed import calc_rest_sed_sfh_table_lognormal_mdf
+from dsps.sed.ssp_weights import calc_ssp_weights_sfh_table_lognormal_mdf
 import numpyro
 import numpyro.distributions as dist
 from scipy.special import factorial
@@ -297,11 +296,11 @@ def _lnu_lsun_per_hz_to_llambda_w_per_a(wave_a, lnu_lsun_per_hz):
 
 
 def _build_diffstar_host(context: ModelContext, prior_config: dict[str, Any]):
-    """Build the host-galaxy SED from Diffstar SFH and DSPS SSP grids."""
+    """Build the host-galaxy SED from Diffstar SFH and a precomputed SSP basis."""
     ssp_lgmet = _np_to_jnp(context.ssp_data.ssp_lgmet)
     ssp_lg_age_gyr = _np_to_jnp(context.ssp_data.ssp_lg_age_gyr)
-    ssp_wave = _np_to_jnp(context.ssp_data.ssp_wave)
-    ssp_flux = _np_to_jnp(context.ssp_data.ssp_flux)
+    host_basis_rest = _np_to_jnp(context.host_basis.rest_llambda)
+    surviving_frac_by_age = _np_to_jnp(context.host_basis.surviving_frac_by_age)
     gal_t_table = _np_to_jnp(context.gal_t_table)
     t_obs_gyr = jnp.asarray(context.t_obs_gyr, dtype=jnp.float64)
 
@@ -316,43 +315,33 @@ def _build_diffstar_host(context: ModelContext, prior_config: dict[str, Any]):
 
     gal_lgmet = numpyro.sample("gal_lgmet", dist.Normal(*_cfg_mean_scale(prior_config, "gal_lgmet", -0.3, 0.5)))
     gal_lgmet_scatter = numpyro.sample("gal_lgmet_scatter", dist.HalfNormal(_cfg_halfnorm(prior_config, "gal_lgmet_scatter", 0.2)))
-    base_rest = calc_rest_sed_sfh_table_lognormal_mdf(
+    host_weights_info = calc_ssp_weights_sfh_table_lognormal_mdf(
         gal_t_table,
         base_history.sfh,
         gal_lgmet,
         gal_lgmet_scatter,
         ssp_lgmet,
         ssp_lg_age_gyr,
-        ssp_flux,
         t_obs_gyr,
     )
-    surviving_frac_by_age = surviving_mstar(ssp_lg_age_gyr + 9.0)
-    surviving_mass_fraction = jnp.clip(jnp.sum(base_rest.age_weights * surviving_frac_by_age), 1e-12, 1.0)
+    host_weights = host_weights_info.weights
+    surviving_mass_fraction = jnp.clip(jnp.sum(host_weights_info.age_weights * surviving_frac_by_age), 1e-12, 1.0)
     target_surviving_mass = 10.0**log_stellar_mass
     target_formed_mass = target_surviving_mass / surviving_mass_fraction
     base_formed_mass = jnp.clip(base_history.smh[-1], 1e-30, 1.0e40)
     sfh_scale = target_formed_mass / base_formed_mass
     scaled_sfh = base_history.sfh * sfh_scale
-    scaled_history = calc_sfh_singlegal(bounded, DEFAULT_MAH_PARAMS, gal_t_table, return_smh=True)
-    scaled_smh = scaled_history.smh * sfh_scale
-    host_native = calc_rest_sed_sfh_table_lognormal_mdf(
-        gal_t_table,
-        scaled_sfh,
-        gal_lgmet,
-        gal_lgmet_scatter,
-        ssp_lgmet,
-        ssp_lg_age_gyr,
-        ssp_flux,
-        t_obs_gyr,
+    scaled_smh = base_history.smh * sfh_scale
+    host_rest = target_formed_mass * jnp.sum(
+        host_basis_rest * host_weights.reshape((*host_weights.shape, 1)),
+        axis=(0, 1),
     )
-    host_native_llambda = _lnu_lsun_per_hz_to_llambda_w_per_a(ssp_wave, host_native.rest_sed)
-    host_rest = _interp_rest_sed(_np_to_jnp(context.rest_wave), ssp_wave, host_native_llambda)
     return {
         "host_rest": host_rest,
         "log_stellar_mass": log_stellar_mass,
-        "host_age_weights": host_native.age_weights,
-        "host_lgmet_weights": host_native.lgmet_weights,
-        "host_ssp_weights": host_native.weights,
+        "host_age_weights": host_weights_info.age_weights,
+        "host_lgmet_weights": host_weights_info.lgmet_weights,
+        "host_ssp_weights": host_weights,
         "surviving_mass_fraction": surviving_mass_fraction,
         "formed_mass": target_formed_mass,
         "sfh_scale": sfh_scale,

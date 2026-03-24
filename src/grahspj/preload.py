@@ -72,12 +72,20 @@ class SSPData:
 
 
 @dataclass
+class HostBasis:
+    """Precomputed SSP basis arrays on the model rest-wavelength grid."""
+    rest_llambda: np.ndarray
+    surviving_frac_by_age: np.ndarray
+
+
+@dataclass
 class ModelContext:
     """Static arrays and metadata required by one grahspj model evaluation."""
     fit_config: FitConfig
     rest_wave: np.ndarray
     obs_wave: np.ndarray
     ssp_data: SSPData
+    host_basis: HostBasis
     t_obs_gyr: float
     luminosity_distance_m: float
     gal_t_table: np.ndarray
@@ -97,6 +105,7 @@ _SSP_DATA_CACHE: dict[str, SSPData] = {}
 _FILTER_RESPONSE_CACHE: dict[tuple[Any, ...], list[Any]] = {}
 _TEMPLATE_CACHE: dict[tuple[Any, ...], LoadedTemplates] = {}
 _DALE2014_CACHE: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
+_HOST_BASIS_CACHE: dict[tuple[str, float, float, int], HostBasis] = {}
 _DEFAULT_SPECLITE_NAME_MAP = {
     "u_sdss": "sdss2010-u",
     "g_sdss": "sdss2010-g",
@@ -486,6 +495,13 @@ def _prepare_loaded_filter(obs_wave: np.ndarray, response: speclite_filters.Filt
     )
 
 
+def _lnu_lsun_per_hz_to_llambda_w_per_a_np(wave_a: np.ndarray, lnu_lsun_per_hz: np.ndarray) -> np.ndarray:
+    """Convert DSPS `Lnu` in Lsun/Hz to `Llambda` in W/Angstrom using NumPy."""
+    wave_m = np.maximum(np.asarray(wave_a, dtype=float), 1e-12) * 1.0e-10
+    lnu_w_per_hz = np.asarray(lnu_lsun_per_hz, dtype=float) * 3.828e26
+    return lnu_w_per_hz * 2.99792458e8 / (wave_m * wave_m) * 1.0e-10
+
+
 def _pack_loaded_filters(filters: Sequence[LoadedFilter]) -> PackedFilters:
     """Pack per-filter interpolation arrays into padded matrices."""
     if not filters:
@@ -521,6 +537,45 @@ def _pack_loaded_filters(filters: Sequence[LoadedFilter]) -> PackedFilters:
     )
 
 
+def _build_host_basis(rest_wave: np.ndarray, ssp_data: SSPData) -> HostBasis:
+    """Precompute the SSP basis on the model rest-wave grid."""
+    cache_key = (
+        str(ssp_data.ssp_flux.__array_interface__["data"][0]),
+        float(rest_wave[0]),
+        float(rest_wave[-1]),
+        int(rest_wave.size),
+    )
+    cached = _HOST_BASIS_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+    ssp_llambda = _lnu_lsun_per_hz_to_llambda_w_per_a_np(
+        ssp_data.ssp_wave[None, None, :],
+        ssp_data.ssp_flux,
+    )
+    rest_llambda = np.empty(
+        (ssp_data.ssp_flux.shape[0], ssp_data.ssp_flux.shape[1], rest_wave.size),
+        dtype=float,
+    )
+    for i in range(ssp_data.ssp_flux.shape[0]):
+        for j in range(ssp_data.ssp_flux.shape[1]):
+            rest_llambda[i, j] = np.interp(
+                rest_wave,
+                ssp_data.ssp_wave,
+                ssp_llambda[i, j],
+                left=0.0,
+                right=0.0,
+            )
+    from dsps.imf.surviving_mstar import surviving_mstar
+
+    surviving_frac_by_age = np.asarray(surviving_mstar(ssp_data.ssp_lg_age_gyr + 9.0), dtype=float)
+    loaded = HostBasis(
+        rest_llambda=rest_llambda,
+        surviving_frac_by_age=surviving_frac_by_age,
+    )
+    _HOST_BASIS_CACHE[cache_key] = loaded
+    return loaded
+
+
 def build_model_context(cfg: FitConfig) -> ModelContext:
     """Construct the static context consumed by the grahspj NumPyro model."""
     cfg.validate()
@@ -538,6 +593,7 @@ def build_model_context(cfg: FitConfig) -> ModelContext:
     rest_wave = np.geomspace(cfg.galaxy.rest_wave_min, cfg.galaxy.rest_wave_max, cfg.galaxy.n_wave).astype(float)
     obs_wave = rest_wave * (1.0 + max(cfg.observation.redshift, 0.0))
     ssp_data = load_cached_ssp_data(cfg.galaxy.dsps_ssp_fn)
+    host_basis = _build_host_basis(rest_wave, ssp_data)
     cosmology = FlatLambdaCDM(H0=cfg.galaxy.cosmology_h0, Om0=cfg.galaxy.cosmology_om0)
     t_obs_gyr = float(cosmology.age(max(cfg.observation.redshift, 0.0)).value)
     luminosity_distance_m = float(cosmology.luminosity_distance(max(cfg.observation.redshift, 0.0)).to_value(u.m))
@@ -568,6 +624,7 @@ def build_model_context(cfg: FitConfig) -> ModelContext:
         rest_wave=rest_wave,
         obs_wave=obs_wave,
         ssp_data=ssp_data,
+        host_basis=host_basis,
         t_obs_gyr=t_obs_gyr,
         luminosity_distance_m=luminosity_distance_m,
         gal_t_table=gal_t_table,
