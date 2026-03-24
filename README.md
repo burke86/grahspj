@@ -1,6 +1,6 @@
-# GRAHSP-J
+# grahspj
 
-`GRAHSP-J` is an experimental JAX-based port of pieces of `CIGALE` and `GRAHSP`.
+`grahspj` is an experimental JAX-based port of pieces of `CIGALE` and `GRAHSP`.
 
 The current Python package and install name are:
 
@@ -9,7 +9,7 @@ The current Python package and install name are:
 
 This codebase is not a full line-by-line reimplementation of either upstream project. It is a research-oriented, single-source fitting framework that ports selected `GRAHSP`/`pcigale` model components into JAX/NumPyro and combines them with a JAX-native galaxy path based on `Diffstar` + `DSPS`.
 
-At a high level, `GRAHSP-J` currently includes:
+At a high level, `grahspj` currently includes:
 
 - a JAX/NumPyro fitting engine
 - `Diffstar` + `DSPS` host-galaxy modeling
@@ -36,19 +36,27 @@ plt.style.use(style_path())
 
 ## Install
 
+`grahspj` requires Python 3.10 or newer.
+
 ```bash
-cd /Users/colinburke/research/grahsp-run-jax
-pip install -e .
+cd /Users/colinburke/research/grahspj
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e .
+curl -O https://portal.nersc.gov/project/hacc/aphearin/DSPS_data/ssp_data_fsps_v3.2_lgmet_age.h5
 ```
 
-This installs two console commands:
+This installs the package in editable mode. You will also need a DSPS SSP template file such as `ssp_data_fsps_v3.2_lgmet_age.h5`, downloaded above, and then referenced from your configuration via `cfg.galaxy.dsps_ssp_fn` or passed directly to `fit(...)` via `dsps_ssp_fn`.
+
+The install provides two console commands:
 
 - `grahspj`
 - `grahspj-benchmark`
 
 ## SED plotting
 
-`GRAHSP-J` includes a `pcigale`-style component SED plot that overlays:
+`grahspj` includes a `pcigale`-style component SED plot that overlays:
 
 - observed photometry with uncertainties
 - model photometry
@@ -179,7 +187,7 @@ Bundled third-party resources under [src/grahspj/resources](/Users/colinburke/re
 
 ## Filters
 
-`GRAHSP-J` routes all filter handling through `speclite`.
+`grahspj` routes all filter handling through `speclite`.
 
 - Built-in mappings cover common names such as `u_sdss -> sdss2010-u` and `J_2mass -> twomass-J`
 - You can override any mapping with `filters.speclite_names`
@@ -190,6 +198,8 @@ Bundled third-party resources under [src/grahspj/resources](/Users/colinburke/re
 ## Chimera benchmark
 
 The Chimera benchmark is intended as a regression and calibration tool for this experimental port, not as a finalized scientific validation of full `GRAHSP`/`CIGALE` parity.
+
+`dsps_ssp_fn` must point to a valid DSPS SSP HDF5 file. Additional SPS template files, including variants with nebular grids, are available at `https://halos.as.arizona.edu/suchethacooray/dsps_ssp/`. At present, `grahspj` cannot vary nebular parameters independently beyond whatever is baked into the selected DSPS template, but this is expected to be sufficient for most broad-band fitting use cases.
 
 The stellar-mass recovery benchmark uses:
 

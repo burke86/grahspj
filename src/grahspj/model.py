@@ -247,11 +247,25 @@ def _redshift_scalar_to_obs(rest_wave, rest_value, obs_wave, redshift):
     return jnp.interp(obs_wave, wave_obs, rest_value, left=0.0, right=0.0)
 
 
-def _project_filter(obs_flux, filt):
-    """Project an observed-frame spectrum through one prepared filter."""
-    values = obs_flux[filt.interp_indices] * (1.0 - filt.interp_weight) + obs_flux[filt.interp_indices + 1] * filt.interp_weight
-    f_lambda = jnp.trapezoid(values * filt.transmission, filt.work_wave) / jnp.maximum(jnp.trapezoid(filt.transmission, filt.work_wave), 1e-30)
-    return 1e-10 / 299792458.0 * 1e29 * filt.effective_wavelength * filt.effective_wavelength * f_lambda
+def _project_filters(obs_flux, packed_filters):
+    """Project an observed-frame spectrum through all prepared filters at once."""
+    interp_indices = jnp.asarray(np.asarray(packed_filters.interp_indices, dtype=np.int32))
+    interp_weight = _np_to_jnp(packed_filters.interp_weight)
+    transmission = _np_to_jnp(packed_filters.transmission)
+    work_wave = _np_to_jnp(packed_filters.work_wave)
+    effective_wavelength = _np_to_jnp(packed_filters.effective_wavelength)
+    valid_mask = _bool_to_jnp(packed_filters.valid_mask)
+
+    left = obs_flux[interp_indices]
+    right = obs_flux[interp_indices + 1]
+    values = left * (1.0 - interp_weight) + right * interp_weight
+    values = jnp.where(valid_mask, values, 0.0)
+    weighted_trans = jnp.where(valid_mask, transmission, 0.0)
+    weighted_wave = jnp.where(valid_mask, work_wave, 0.0)
+    numer = jnp.trapezoid(values * weighted_trans, weighted_wave, axis=1)
+    denom = jnp.maximum(jnp.trapezoid(weighted_trans, weighted_wave, axis=1), 1e-30)
+    f_lambda = numer / denom
+    return 1e-10 / 299792458.0 * 1e29 * effective_wavelength * effective_wavelength * f_lambda
 
 
 def _interp_rest_sed(target_wave, source_wave, source_sed):
@@ -408,8 +422,8 @@ def photometric_loglike(pred_fluxes, obs_fluxes, obs_errors, upper_limits, data_
     return logl_data + logl_lim + penalty
 
 
-def grahsp_photometric_model(context: ModelContext):
-    """NumPyro model for one grahspj photometric fit."""
+def grahsp_photometric_model(context: ModelContext, include_components: bool = False):
+    """NumPyro model for one grahspj photometric fit or predictive expansion."""
     cfg = context.fit_config
     prior_config = cfg.prior_config
     rest_wave = _np_to_jnp(context.rest_wave)
@@ -574,33 +588,47 @@ def grahsp_photometric_model(context: ModelContext):
     agn_rest = agn_att_rest
     igm = _igm_transmission(rest_wave, redshift)
     total_obs = _redshift_to_obs(rest_wave, total_rest * igm, obs_wave, redshift, luminosity_distance_m)
-    agn_obs = _redshift_to_obs(rest_wave, agn_rest * igm, obs_wave, redshift, luminosity_distance_m)
-    host_obs = _redshift_to_obs(rest_wave, gal_att_rest * igm, obs_wave, redshift, luminosity_distance_m)
-    dust_obs = _redshift_to_obs(rest_wave, dust_rest * igm, obs_wave, redshift, luminosity_distance_m)
-    disk_obs = _redshift_to_obs(rest_wave, disk_rest * igm, obs_wave, redshift, luminosity_distance_m)
-    torus_obs = _redshift_to_obs(rest_wave, torus_rest * igm, obs_wave, redshift, luminosity_distance_m)
-    feii_obs = _redshift_to_obs(rest_wave, feii_rest * igm, obs_wave, redshift, luminosity_distance_m)
-    line_obs = _redshift_to_obs(rest_wave, line_rest * igm, obs_wave, redshift, luminosity_distance_m)
-    line_bl_obs = _redshift_to_obs(rest_wave, line_bl_rest * igm, obs_wave, redshift, luminosity_distance_m)
-    line_nl_obs = _redshift_to_obs(rest_wave, line_nl_rest * igm, obs_wave, redshift, luminosity_distance_m)
-    line_liner_obs = _redshift_to_obs(rest_wave, line_liner_rest * igm, obs_wave, redshift, luminosity_distance_m)
-    balmer_obs = _redshift_to_obs(rest_wave, balmer_rest * igm, obs_wave, redshift, luminosity_distance_m)
     transmitted_fraction = jnp.clip(total_rest / jnp.maximum(host_rest + disk_rest + torus_rest + feii_rest + line_rest + balmer_rest, 1e-30), 1e-4, 1.0)
-    transmitted_fraction_obs = _redshift_scalar_to_obs(rest_wave, transmitted_fraction, obs_wave, redshift)
 
-    pred_fluxes = jnp.stack([_project_filter(total_obs, filt) for filt in context.filters])
-    agn_fluxes = jnp.stack([_project_filter(agn_obs, filt) for filt in context.filters])
-    host_fluxes = jnp.stack([_project_filter(host_obs, filt) for filt in context.filters])
-    dust_fluxes = jnp.stack([_project_filter(dust_obs, filt) for filt in context.filters])
-    disk_fluxes = jnp.stack([_project_filter(disk_obs, filt) for filt in context.filters])
-    torus_fluxes = jnp.stack([_project_filter(torus_obs, filt) for filt in context.filters])
-    feii_fluxes = jnp.stack([_project_filter(feii_obs, filt) for filt in context.filters])
-    line_fluxes = jnp.stack([_project_filter(line_obs, filt) for filt in context.filters])
-    line_bl_fluxes = jnp.stack([_project_filter(line_bl_obs, filt) for filt in context.filters])
-    line_nl_fluxes = jnp.stack([_project_filter(line_nl_obs, filt) for filt in context.filters])
-    line_liner_fluxes = jnp.stack([_project_filter(line_liner_obs, filt) for filt in context.filters])
-    balmer_fluxes = jnp.stack([_project_filter(balmer_obs, filt) for filt in context.filters])
-    trans_fluxes = jnp.stack([_project_filter(transmitted_fraction_obs, filt) for filt in context.filters])
+    pred_fluxes = _project_filters(total_obs, context.packed_filters)
+    need_agn_fluxes = include_components or cfg.likelihood.variability_uncertainty
+    need_trans_fluxes = include_components or cfg.likelihood.attenuation_model_uncertainty
+    if include_components:
+        agn_obs = _redshift_to_obs(rest_wave, agn_rest * igm, obs_wave, redshift, luminosity_distance_m)
+        host_obs = _redshift_to_obs(rest_wave, gal_att_rest * igm, obs_wave, redshift, luminosity_distance_m)
+        dust_obs = _redshift_to_obs(rest_wave, dust_rest * igm, obs_wave, redshift, luminosity_distance_m)
+        disk_obs = _redshift_to_obs(rest_wave, disk_rest * igm, obs_wave, redshift, luminosity_distance_m)
+        torus_obs = _redshift_to_obs(rest_wave, torus_rest * igm, obs_wave, redshift, luminosity_distance_m)
+        feii_obs = _redshift_to_obs(rest_wave, feii_rest * igm, obs_wave, redshift, luminosity_distance_m)
+        line_obs = _redshift_to_obs(rest_wave, line_rest * igm, obs_wave, redshift, luminosity_distance_m)
+        line_bl_obs = _redshift_to_obs(rest_wave, line_bl_rest * igm, obs_wave, redshift, luminosity_distance_m)
+        line_nl_obs = _redshift_to_obs(rest_wave, line_nl_rest * igm, obs_wave, redshift, luminosity_distance_m)
+        line_liner_obs = _redshift_to_obs(rest_wave, line_liner_rest * igm, obs_wave, redshift, luminosity_distance_m)
+        balmer_obs = _redshift_to_obs(rest_wave, balmer_rest * igm, obs_wave, redshift, luminosity_distance_m)
+        transmitted_fraction_obs = _redshift_scalar_to_obs(rest_wave, transmitted_fraction, obs_wave, redshift)
+        agn_fluxes = _project_filters(agn_obs, context.packed_filters)
+        host_fluxes = _project_filters(host_obs, context.packed_filters)
+        dust_fluxes = _project_filters(dust_obs, context.packed_filters)
+        disk_fluxes = _project_filters(disk_obs, context.packed_filters)
+        torus_fluxes = _project_filters(torus_obs, context.packed_filters)
+        feii_fluxes = _project_filters(feii_obs, context.packed_filters)
+        line_fluxes = _project_filters(line_obs, context.packed_filters)
+        line_bl_fluxes = _project_filters(line_bl_obs, context.packed_filters)
+        line_nl_fluxes = _project_filters(line_nl_obs, context.packed_filters)
+        line_liner_fluxes = _project_filters(line_liner_obs, context.packed_filters)
+        balmer_fluxes = _project_filters(balmer_obs, context.packed_filters)
+        trans_fluxes = _project_filters(transmitted_fraction_obs, context.packed_filters)
+    else:
+        if need_agn_fluxes:
+            agn_obs = _redshift_to_obs(rest_wave, agn_rest * igm, obs_wave, redshift, luminosity_distance_m)
+            agn_fluxes = _project_filters(agn_obs, context.packed_filters)
+        else:
+            agn_fluxes = jnp.zeros_like(pred_fluxes)
+        if need_trans_fluxes:
+            transmitted_fraction_obs = _redshift_scalar_to_obs(rest_wave, transmitted_fraction, obs_wave, redshift)
+            trans_fluxes = _project_filters(transmitted_fraction_obs, context.packed_filters)
+        else:
+            trans_fluxes = jnp.ones_like(pred_fluxes)
 
     logl = photometric_loglike(
         pred_fluxes=pred_fluxes,
@@ -631,57 +659,58 @@ def grahsp_photometric_model(context: ModelContext):
         )
         numpyro.factor("absolute_flux_scale_prior", abs_flux_scale_logprior)
 
-    numpyro.deterministic("pred_fluxes", pred_fluxes)
-    numpyro.deterministic("intrinsic_scatter_fit", intrinsic_scatter)
-    numpyro.deterministic("log_agn_amp_fit", log_agn_amp)
-    numpyro.deterministic("agn_fluxes", agn_fluxes)
-    numpyro.deterministic("host_fluxes", host_fluxes)
-    numpyro.deterministic("dust_fluxes", dust_fluxes)
-    numpyro.deterministic("disk_fluxes", disk_fluxes)
-    numpyro.deterministic("torus_fluxes", torus_fluxes)
-    numpyro.deterministic("feii_fluxes", feii_fluxes)
-    numpyro.deterministic("line_fluxes", line_fluxes)
-    numpyro.deterministic("line_bl_fluxes", line_bl_fluxes)
-    numpyro.deterministic("line_nl_fluxes", line_nl_fluxes)
-    numpyro.deterministic("line_liner_fluxes", line_liner_fluxes)
-    numpyro.deterministic("balmer_fluxes", balmer_fluxes)
-    numpyro.deterministic("host_age_weights", host_state["host_age_weights"])
-    numpyro.deterministic("host_lgmet_weights", host_state["host_lgmet_weights"])
-    numpyro.deterministic("host_ssp_weights", host_state["host_ssp_weights"])
-    numpyro.deterministic("gal_sfr_table", host_state["gal_sfr_table"])
-    numpyro.deterministic("gal_smh_table", host_state["gal_smh_table"])
-    numpyro.deterministic("formed_stellar_mass", host_state["formed_mass"])
-    numpyro.deterministic("surviving_mass_fraction", host_state["surviving_mass_fraction"])
-    numpyro.deterministic("gal_lgmet_fit", host_state["gal_lgmet"])
-    numpyro.deterministic("gal_lgmet_scatter_fit", host_state["gal_lgmet_scatter"])
-    numpyro.deterministic("dust_luminosity", dust_luminosity)
-    numpyro.deterministic("dust_alpha_fit", dust_alpha)
-    numpyro.deterministic("absolute_flux_scale_logprior", abs_flux_scale_logprior)
-    numpyro.deterministic("rest_wave", rest_wave)
-    numpyro.deterministic("obs_wave", obs_wave)
-    numpyro.deterministic("redshift_fit", redshift)
-    numpyro.deterministic("total_rest_sed", total_rest)
-    numpyro.deterministic("agn_rest_sed", agn_rest)
-    numpyro.deterministic("host_rest_sed", gal_att_rest)
-    numpyro.deterministic("host_absorbed_rest_sed", host_absorbed_rest)
-    numpyro.deterministic("dust_rest_sed", dust_rest)
-    numpyro.deterministic("disk_rest_sed", disk_rest)
-    numpyro.deterministic("torus_rest_sed", torus_rest)
-    numpyro.deterministic("feii_rest_sed", feii_rest)
-    numpyro.deterministic("line_rest_sed", line_rest)
-    numpyro.deterministic("line_bl_rest_sed", line_bl_rest)
-    numpyro.deterministic("line_nl_rest_sed", line_nl_rest)
-    numpyro.deterministic("line_liner_rest_sed", line_liner_rest)
-    numpyro.deterministic("balmer_rest_sed", balmer_rest)
-    numpyro.deterministic("total_obs_sed", total_obs)
-    numpyro.deterministic("agn_obs_sed", agn_obs)
-    numpyro.deterministic("host_obs_sed", host_obs)
-    numpyro.deterministic("dust_obs_sed", dust_obs)
-    numpyro.deterministic("disk_obs_sed", disk_obs)
-    numpyro.deterministic("torus_obs_sed", torus_obs)
-    numpyro.deterministic("feii_obs_sed", feii_obs)
-    numpyro.deterministic("line_obs_sed", line_obs)
-    numpyro.deterministic("line_bl_obs_sed", line_bl_obs)
-    numpyro.deterministic("line_nl_obs_sed", line_nl_obs)
-    numpyro.deterministic("line_liner_obs_sed", line_liner_obs)
-    numpyro.deterministic("balmer_obs_sed", balmer_obs)
+    if include_components:
+        numpyro.deterministic("pred_fluxes", pred_fluxes)
+        numpyro.deterministic("intrinsic_scatter_fit", intrinsic_scatter)
+        numpyro.deterministic("log_agn_amp_fit", log_agn_amp)
+        numpyro.deterministic("agn_fluxes", agn_fluxes)
+        numpyro.deterministic("host_fluxes", host_fluxes)
+        numpyro.deterministic("dust_fluxes", dust_fluxes)
+        numpyro.deterministic("disk_fluxes", disk_fluxes)
+        numpyro.deterministic("torus_fluxes", torus_fluxes)
+        numpyro.deterministic("feii_fluxes", feii_fluxes)
+        numpyro.deterministic("line_fluxes", line_fluxes)
+        numpyro.deterministic("line_bl_fluxes", line_bl_fluxes)
+        numpyro.deterministic("line_nl_fluxes", line_nl_fluxes)
+        numpyro.deterministic("line_liner_fluxes", line_liner_fluxes)
+        numpyro.deterministic("balmer_fluxes", balmer_fluxes)
+        numpyro.deterministic("host_age_weights", host_state["host_age_weights"])
+        numpyro.deterministic("host_lgmet_weights", host_state["host_lgmet_weights"])
+        numpyro.deterministic("host_ssp_weights", host_state["host_ssp_weights"])
+        numpyro.deterministic("gal_sfr_table", host_state["gal_sfr_table"])
+        numpyro.deterministic("gal_smh_table", host_state["gal_smh_table"])
+        numpyro.deterministic("formed_stellar_mass", host_state["formed_mass"])
+        numpyro.deterministic("surviving_mass_fraction", host_state["surviving_mass_fraction"])
+        numpyro.deterministic("gal_lgmet_fit", host_state["gal_lgmet"])
+        numpyro.deterministic("gal_lgmet_scatter_fit", host_state["gal_lgmet_scatter"])
+        numpyro.deterministic("dust_luminosity", dust_luminosity)
+        numpyro.deterministic("dust_alpha_fit", dust_alpha)
+        numpyro.deterministic("absolute_flux_scale_logprior", abs_flux_scale_logprior)
+        numpyro.deterministic("rest_wave", rest_wave)
+        numpyro.deterministic("obs_wave", obs_wave)
+        numpyro.deterministic("redshift_fit", redshift)
+        numpyro.deterministic("total_rest_sed", total_rest)
+        numpyro.deterministic("agn_rest_sed", agn_rest)
+        numpyro.deterministic("host_rest_sed", gal_att_rest)
+        numpyro.deterministic("host_absorbed_rest_sed", host_absorbed_rest)
+        numpyro.deterministic("dust_rest_sed", dust_rest)
+        numpyro.deterministic("disk_rest_sed", disk_rest)
+        numpyro.deterministic("torus_rest_sed", torus_rest)
+        numpyro.deterministic("feii_rest_sed", feii_rest)
+        numpyro.deterministic("line_rest_sed", line_rest)
+        numpyro.deterministic("line_bl_rest_sed", line_bl_rest)
+        numpyro.deterministic("line_nl_rest_sed", line_nl_rest)
+        numpyro.deterministic("line_liner_rest_sed", line_liner_rest)
+        numpyro.deterministic("balmer_rest_sed", balmer_rest)
+        numpyro.deterministic("total_obs_sed", total_obs)
+        numpyro.deterministic("agn_obs_sed", agn_obs)
+        numpyro.deterministic("host_obs_sed", host_obs)
+        numpyro.deterministic("dust_obs_sed", dust_obs)
+        numpyro.deterministic("disk_obs_sed", disk_obs)
+        numpyro.deterministic("torus_obs_sed", torus_obs)
+        numpyro.deterministic("feii_obs_sed", feii_obs)
+        numpyro.deterministic("line_obs_sed", line_obs)
+        numpyro.deterministic("line_bl_obs_sed", line_bl_obs)
+        numpyro.deterministic("line_nl_obs_sed", line_nl_obs)
+        numpyro.deterministic("line_liner_obs_sed", line_liner_obs)
+        numpyro.deterministic("balmer_obs_sed", balmer_obs)

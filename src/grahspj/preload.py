@@ -38,6 +38,17 @@ class LoadedFilter:
 
 
 @dataclass
+class PackedFilters:
+    """Padded filter interpolation metadata for vectorized photometry projection."""
+    interp_indices: np.ndarray
+    interp_weight: np.ndarray
+    transmission: np.ndarray
+    work_wave: np.ndarray
+    effective_wavelength: np.ndarray
+    valid_mask: np.ndarray
+
+
+@dataclass
 class LoadedTemplates:
     """Template arrays required by the supported AGN and host-dust components."""
     feii_wave: np.ndarray
@@ -71,6 +82,7 @@ class ModelContext:
     luminosity_distance_m: float
     gal_t_table: np.ndarray
     filters: list[LoadedFilter]
+    packed_filters: PackedFilters
     templates: LoadedTemplates
     fluxes: np.ndarray
     errors: np.ndarray
@@ -474,6 +486,41 @@ def _prepare_loaded_filter(obs_wave: np.ndarray, response: speclite_filters.Filt
     )
 
 
+def _pack_loaded_filters(filters: Sequence[LoadedFilter]) -> PackedFilters:
+    """Pack per-filter interpolation arrays into padded matrices."""
+    if not filters:
+        raise ValueError("At least one filter is required to build a model context.")
+    n_filters = len(filters)
+    max_points = max(f.work_wave.size for f in filters)
+    interp_indices = np.zeros((n_filters, max_points), dtype=int)
+    interp_weight = np.zeros((n_filters, max_points), dtype=float)
+    transmission = np.zeros((n_filters, max_points), dtype=float)
+    work_wave = np.zeros((n_filters, max_points), dtype=float)
+    valid_mask = np.zeros((n_filters, max_points), dtype=bool)
+    effective_wavelength = np.zeros(n_filters, dtype=float)
+    for i, filt in enumerate(filters):
+        n = filt.work_wave.size
+        interp_indices[i, :n] = filt.interp_indices
+        interp_weight[i, :n] = filt.interp_weight
+        transmission[i, :n] = filt.transmission
+        work_wave[i, :n] = filt.work_wave
+        valid_mask[i, :n] = True
+        effective_wavelength[i] = filt.effective_wavelength
+        if n < max_points:
+            interp_indices[i, n:] = filt.interp_indices[-1]
+            interp_weight[i, n:] = filt.interp_weight[-1]
+            transmission[i, n:] = 0.0
+            work_wave[i, n:] = filt.work_wave[-1]
+    return PackedFilters(
+        interp_indices=interp_indices,
+        interp_weight=interp_weight,
+        transmission=transmission,
+        work_wave=work_wave,
+        effective_wavelength=effective_wavelength,
+        valid_mask=valid_mask,
+    )
+
+
 def build_model_context(cfg: FitConfig) -> ModelContext:
     """Construct the static context consumed by the grahspj NumPyro model."""
     cfg.validate()
@@ -502,6 +549,7 @@ def build_model_context(cfg: FitConfig) -> ModelContext:
 
     filter_responses = _load_filter_responses(cfg)
     loaded_filters = [_prepare_loaded_filter(obs_wave, response) for response in filter_responses]
+    packed_filters = _pack_loaded_filters(loaded_filters)
     templates = _load_templates(cfg)
 
     mw_ebv = 0.0
@@ -524,6 +572,7 @@ def build_model_context(cfg: FitConfig) -> ModelContext:
         luminosity_distance_m=luminosity_distance_m,
         gal_t_table=gal_t_table,
         filters=loaded_filters,
+        packed_filters=packed_filters,
         templates=templates,
         fluxes=fluxes,
         errors=errors,

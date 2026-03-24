@@ -17,8 +17,6 @@ from typing import Any, Iterable
 import zlib
 
 import numpy as np
-from astropy import units as u
-from astropy.cosmology import FlatLambdaCDM
 from astropy.io import fits
 from tqdm.auto import tqdm
 
@@ -327,19 +325,16 @@ def build_chimera_fit_config(row: dict[str, Any], dsps_ssp_fn: str = "tempdata.h
 
 def _estimate_chimera_prior_config(row: dict[str, Any]) -> dict[str, Any]:
     """Seed a simple prior configuration from one Chimera photometric row."""
-    cosmology = FlatLambdaCDM(H0=70.0, Om0=0.3)
     redshift = float(row["redshift"])
-    luminosity_distance_m = float(cosmology.luminosity_distance(redshift).to_value(u.m))
-    luminosity_distance_mpc = float(cosmology.luminosity_distance(redshift).to_value(u.Mpc))
-
-    nir_fluxes = np.array([float(row[name]) for name in ("J_2mass", "H_2mass", "Ks_2mass", "IRAC1", "IRAC2")], dtype=float)
+    nir_fluxes = np.array(
+        [float(row[name]) for name in ("J_2mass", "H_2mass", "Ks_2mass", "IRAC1", "IRAC2")],
+        dtype=float,
+    )
     nir_fluxes = nir_fluxes[np.isfinite(nir_fluxes) & (nir_fluxes > 0.0)]
     if nir_fluxes.size == 0:
         host_flux_mjy = 0.01
     else:
         host_flux_mjy = float(np.median(np.clip(nir_fluxes, 1.0e-6, None)))
-    log_stellar_mass_loc = 8.5 + np.log10(host_flux_mjy / 0.01) + 2.0 * np.log10(max(luminosity_distance_mpc, 1.0) / 100.0)
-    log_stellar_mass_loc = float(np.clip(log_stellar_mass_loc, 7.0, 12.0))
 
     target_obs_wave = 5100.0 * (1.0 + redshift)
     candidate_bands = [
@@ -355,7 +350,7 @@ def _estimate_chimera_prior_config(row: dict[str, Any]) -> dict[str, Any]:
     fracagn_loc = float(np.clip(optical_flux_mjy / max(optical_flux_mjy + host_flux_mjy, 1.0e-12), 0.02, 0.95))
 
     return {
-        "log_stellar_mass": {"loc": log_stellar_mass_loc, "scale": 1.2},
+        "log_stellar_mass": {"loc": 10.5, "scale": 2.0},
         "fracAGN_5100": {"loc": fracagn_loc, "scale": 0.2},
     }
 

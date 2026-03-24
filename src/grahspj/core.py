@@ -53,7 +53,11 @@ class GRAHSPJ:
 
     def _model(self):
         """Return the bound NumPyro model for the current context."""
-        return grahsp_photometric_model(self.context)
+        return grahsp_photometric_model(self.context, include_components=False)
+
+    def _predictive_model(self):
+        """Return the bound NumPyro model used for posterior predictive products."""
+        return grahsp_photometric_model(self.context, include_components=True)
 
     def _compute_predictive(self) -> dict[str, Any]:
         """Generate and cache predictive outputs from posterior samples."""
@@ -61,7 +65,7 @@ class GRAHSPJ:
             raise RuntimeError("No fitted posterior available. Run fit_map() or fit_nuts() first.")
         rng_key = jax.random.PRNGKey(self.config.inference.seed + 17)
         pred = Predictive(
-            self._model,
+            self._predictive_model,
             posterior_samples=self.samples,
             return_sites=[
                 "pred_fluxes",
@@ -270,7 +274,7 @@ class GRAHSPJ:
         init_values = None
         if self.map_result is not None:
             init_values = {k: np.asarray(v) for k, v in self.map_result["median"].items() if np.ndim(v) != 0 or np.isfinite(v)}
-        kernel = NUTS(self._model, init_strategy=init_to_value(values=init_values) if init_values else None, target_accept_prob=target_accept_prob, dense_mass=True, max_tree_depth=8)
+        kernel = NUTS(self._model, init_strategy=init_to_value(values=init_values) if init_values else None, target_accept_prob=target_accept_prob, dense_mass=False, max_tree_depth=8)
         mcmc = MCMC(kernel, num_warmup=num_warmup, num_samples=num_samples, num_chains=num_chains, progress_bar=progress_bar, jit_model_args=False)
         rng_key = jax.random.PRNGKey(self.config.inference.seed + 1)
         mcmc.run(rng_key)
