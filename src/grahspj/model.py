@@ -29,6 +29,8 @@ from .preload import ModelContext
 C_KMS = 299792.458
 C_MS = 2.99792458e8
 L_SUN_W = 3.828e26
+ERG_PER_WATT = 1.0e7
+AGN_BOLOMETRIC_CORRECTION_5100 = 9.26
 
 
 def _np_to_jnp(x):
@@ -384,13 +386,24 @@ def _absolute_flux_scale_logprior(pred_fluxes, obs_fluxes, valid_mask, sigma_dex
     return jax.lax.cond(n_valid > 0, _compute, lambda: jnp.asarray(0.0, dtype=jnp.float64))
 
 
-def photometric_loglike(pred_fluxes, obs_fluxes, obs_errors, upper_limits, data_mask, systematics_width, intrinsic_scatter, student_t_df, agn_component, agn_nev, variability_uncertainty, attenuation_model_uncertainty, transmitted_fraction, lyman_break_uncertainty, filter_wavelength, redshift):
+def _agn_variability_nev(agn_bol_lum_w, max_nev):
+    """Return the Simm+2016-inspired fractional variability variance cap."""
+    agn_bol_lum_w = jnp.maximum(jnp.asarray(agn_bol_lum_w, dtype=jnp.float64), 1.0e-30)
+    max_nev = jnp.maximum(jnp.asarray(max_nev, dtype=jnp.float64), 1.0e-6)
+    log_lbol_erg_s = jnp.log10(agn_bol_lum_w * ERG_PER_WATT)
+    l45 = log_lbol_erg_s - 45.0
+    simm_nev = 10.0 ** (-1.43 - 0.74 * l45)
+    return jnp.minimum(max_nev, simm_nev)
+
+
+def photometric_loglike(pred_fluxes, obs_fluxes, obs_errors, upper_limits, data_mask, systematics_width, intrinsic_scatter, student_t_df, agn_component, agn_bol_lum_w, agn_nev, variability_uncertainty, attenuation_model_uncertainty, transmitted_fraction, lyman_break_uncertainty, filter_wavelength, redshift):
     """Evaluate the broadband photometric log-likelihood for one model state."""
     pred_fluxes = jnp.nan_to_num(pred_fluxes, nan=0.0, posinf=1.0e30, neginf=-1.0e30)
     agn_component = jnp.nan_to_num(agn_component, nan=0.0, posinf=1.0e30, neginf=-1.0e30)
     transmitted_fraction = jnp.nan_to_num(transmitted_fraction, nan=1.0e-4, posinf=1.0, neginf=1.0e-4)
     obs_variance = obs_errors**2 + jnp.maximum(intrinsic_scatter, 0.0) ** 2
-    var_variance = jnp.where(variability_uncertainty, agn_nev * agn_component**2, 0.0)
+    variability_nev = _agn_variability_nev(agn_bol_lum_w, agn_nev)
+    var_variance = jnp.where(variability_uncertainty, variability_nev * agn_component**2, 0.0)
     sys_variance = (systematics_width * pred_fluxes) ** 2
     if attenuation_model_uncertainty:
         tf = jnp.clip(transmitted_fraction, 1e-4, 1.0)
@@ -485,6 +498,7 @@ def grahsp_photometric_model(context: ModelContext, include_components: bool = F
         balmer_tau = jnp.asarray(1.0, dtype=jnp.float64)
         balmer_vel = jnp.asarray(float(cfg.agn.line_width_kms_default), dtype=jnp.float64)
     l_agn_lambda_5100 = agn_amp / 5100.0
+    agn_bol_luminosity = agn_amp * AGN_BOLOMETRIC_CORRECTION_5100
     l_broadlines = 0.02 * l_agn_lambda_5100 * lines_strength
     l_narrowlines = 0.002 * l_agn_lambda_5100 * lines_strength
 
@@ -629,6 +643,7 @@ def grahsp_photometric_model(context: ModelContext, include_components: bool = F
         intrinsic_scatter=intrinsic_scatter,
         student_t_df=cfg.likelihood.student_t_df,
         agn_component=agn_fluxes,
+        agn_bol_lum_w=agn_bol_luminosity,
         agn_nev=cfg.likelihood.agn_nev,
         variability_uncertainty=cfg.likelihood.variability_uncertainty,
         attenuation_model_uncertainty=cfg.likelihood.attenuation_model_uncertainty,
@@ -652,6 +667,8 @@ def grahsp_photometric_model(context: ModelContext, include_components: bool = F
         numpyro.deterministic("pred_fluxes", pred_fluxes)
         numpyro.deterministic("intrinsic_scatter_fit", intrinsic_scatter)
         numpyro.deterministic("log_agn_amp_fit", log_agn_amp)
+        numpyro.deterministic("agn_bol_luminosity", agn_bol_luminosity)
+        numpyro.deterministic("agn_variability_nev", _agn_variability_nev(agn_bol_luminosity, cfg.likelihood.agn_nev))
         numpyro.deterministic("agn_fluxes", agn_fluxes)
         numpyro.deterministic("host_fluxes", host_fluxes)
         numpyro.deterministic("dust_fluxes", dust_fluxes)
