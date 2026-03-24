@@ -158,7 +158,8 @@ class GRAHSPJ:
             nuts_chains = kwargs.pop("num_chains")
         if "target_accept_prob" in kwargs and target_accept_prob is None:
             target_accept_prob = kwargs.pop("target_accept_prob")
-        if "use_map_init" in kwargs:
+        use_map_init_explicit = "use_map_init" in kwargs
+        if use_map_init_explicit:
             use_map_init = kwargs.pop("use_map_init")
         if hasattr(self, "_apply_runtime_overrides"):
             self._apply_runtime_overrides(prior_config=prior_config, dsps_ssp_fn=dsps_ssp_fn)
@@ -168,39 +169,57 @@ class GRAHSPJ:
             if kwargs:
                 unknown = ", ".join(sorted(kwargs))
                 raise TypeError(f"Unknown fit() keyword arguments: {unknown}")
+            map_kwargs: dict[str, Any] = {"progress_bar": progress_bar}
+            if optax_steps is not None:
+                map_kwargs["steps"] = optax_steps
+            if optax_lr is not None:
+                map_kwargs["learning_rate"] = optax_lr
             fit_output: dict[str, Any] | Any = self.fit_map(
-                steps=optax_steps,
-                learning_rate=optax_lr,
-                progress_bar=progress_bar,
+                **map_kwargs,
             )
         elif method == "nuts":
             if kwargs:
                 unknown = ", ".join(sorted(kwargs))
                 raise TypeError(f"Unknown fit() keyword arguments: {unknown}")
+            nuts_kwargs: dict[str, Any] = {"progress_bar": progress_bar}
+            if nuts_warmup is not None:
+                nuts_kwargs["num_warmup"] = nuts_warmup
+            if nuts_samples is not None:
+                nuts_kwargs["num_samples"] = nuts_samples
+            if nuts_chains is not None:
+                nuts_kwargs["num_chains"] = nuts_chains
+            if target_accept_prob is not None:
+                nuts_kwargs["target_accept_prob"] = target_accept_prob
+            if use_map_init_explicit or use_map_init is not True:
+                nuts_kwargs["use_map_init"] = use_map_init
             fit_output = self.fit_nuts(
-                num_warmup=nuts_warmup,
-                num_samples=nuts_samples,
-                num_chains=nuts_chains,
-                target_accept_prob=target_accept_prob,
-                use_map_init=use_map_init,
-                progress_bar=progress_bar,
+                **nuts_kwargs,
             )
         elif method == "optax+nuts":
             if kwargs:
                 unknown = ", ".join(sorted(kwargs))
                 raise TypeError(f"Unknown fit() keyword arguments: {unknown}")
+            map_kwargs = {"progress_bar": progress_bar}
+            if optax_steps is not None:
+                map_kwargs["steps"] = optax_steps
+            if optax_lr is not None:
+                map_kwargs["learning_rate"] = optax_lr
             map_result = self.fit_map(
-                steps=optax_steps,
-                learning_rate=optax_lr,
-                progress_bar=progress_bar,
+                **map_kwargs,
             )
+            nuts_kwargs = {"progress_bar": progress_bar}
+            if nuts_warmup is not None:
+                nuts_kwargs["num_warmup"] = nuts_warmup
+            if nuts_samples is not None:
+                nuts_kwargs["num_samples"] = nuts_samples
+            if nuts_chains is not None:
+                nuts_kwargs["num_chains"] = nuts_chains
+            if target_accept_prob is not None:
+                nuts_kwargs["target_accept_prob"] = target_accept_prob
+            if use_map_init_explicit or use_map_init is not True:
+                nuts_kwargs["use_map_init"] = use_map_init
             nuts_result = self.fit_nuts(
-                num_warmup=nuts_warmup,
-                num_samples=nuts_samples,
-                num_chains=nuts_chains,
-                target_accept_prob=target_accept_prob,
-                use_map_init=use_map_init,
-                progress_bar=progress_bar,
+                **nuts_kwargs,
             )
             fit_output = {"map": map_result, "nuts": nuts_result}
         else:
