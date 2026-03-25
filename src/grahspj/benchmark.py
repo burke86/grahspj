@@ -157,7 +157,7 @@ def _load_bruhweiler_feii_template() -> FeIITemplate:
         raise ValueError(f"Invalid FeII normalization derived from {path}.")
     tmpl = FeIITemplate(
         name="BruhweilerVerner08",
-        wave=(wave_rest * 0.1).tolist(),
+        wave=wave_rest.tolist(),
         lumin=(llam / norm).tolist(),
     )
     _BENCHMARK_RESOURCE_CACHE[cache_key] = tmpl
@@ -183,7 +183,7 @@ def _load_mor_netzer_emission_lines() -> EmissionLineTemplate:
         ],
     )
     tmpl = EmissionLineTemplate(
-        wave=(np.asarray(data["wave"], dtype=float) * 0.1).tolist(),
+        wave=np.asarray(data["wave"], dtype=float).tolist(),
         lumin_blagn=np.asarray(data["broad"], dtype=float).tolist(),
         lumin_sy2=np.asarray(data["S2"], dtype=float).tolist(),
         lumin_liner=np.asarray(data["LINER"], dtype=float).tolist(),
