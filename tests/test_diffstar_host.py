@@ -58,8 +58,7 @@ def test_diffstar_host_model_exposes_log_stellar_mass(monkeypatch):
     assert np.all(np.isfinite(np.asarray(tr["host_age_weights"]["value"])))
     assert np.all(np.isfinite(np.asarray(tr["host_lgmet_weights"]["value"])))
     assert np.isfinite(float(np.asarray(tr["formed_stellar_mass"]["value"])))
-    assert np.isfinite(float(np.asarray(tr["dust_luminosity"]["value"])))
-    assert float(np.asarray(tr["dust_luminosity"]["value"])) >= 0.0
+    assert np.isfinite(float(np.asarray(tr["log_dust_luminosity_fit"]["value"])))
     assert np.all(np.isfinite(np.asarray(tr["host_absorbed_rest_sed"]["value"])))
     assert np.all(np.isfinite(np.asarray(tr["dust_rest_sed"]["value"])))
     assert np.all(np.asarray(tr["dust_rest_sed"]["value"]) >= 0.0)

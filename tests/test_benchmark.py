@@ -96,6 +96,8 @@ def test_build_chimera_fit_config(tmp_path):
     assert cfg.photometry.filter_names[0] == "u_sdss"
     assert cfg.galaxy.dsps_ssp_fn == str(ssp_path)
     assert "log_stellar_mass" in cfg.prior_config
+    assert cfg.prior_config["log_stellar_mass"]["dist"] == "student_t"
+    assert cfg.prior_config["log_stellar_mass"]["loc"] == 10.0
     assert "fracAGN_5100" in cfg.prior_config
 
 

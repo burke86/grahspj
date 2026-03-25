@@ -112,10 +112,11 @@ class GRAHSPJ:
                 "line_nl_obs_sed",
                 "line_liner_obs_sed",
                 "balmer_obs_sed",
-                "dust_luminosity",
+                "log_dust_luminosity_fit",
                 "dust_alpha_fit",
                 "intrinsic_scatter_fit",
-                "agn_bol_luminosity",
+                "log_agn_bol_luminosity_fit",
+                "log_disk_luminosity_fit",
                 "agn_variability_nev",
                 "host_total_fluxes",
                 "host_capture_fraction_fluxes",
@@ -358,8 +359,12 @@ class GRAHSPJ:
             out["dust_alpha_fit"] = float(np.median(np.asarray(self.samples["dust_alpha"], dtype=float)))
         if self.predictive is not None:
             out["pred_fluxes_median"] = np.median(np.asarray(self.predictive["pred_fluxes"]), axis=0).tolist()
-            if "dust_luminosity" in self.predictive:
-                out["dust_luminosity_fit"] = float(np.median(np.asarray(self.predictive["dust_luminosity"], dtype=float)))
+            if "log_dust_luminosity_fit" in self.predictive:
+                out["log_dust_luminosity_fit"] = float(np.median(np.asarray(self.predictive["log_dust_luminosity_fit"], dtype=float)))
+            if "log_agn_bol_luminosity_fit" in self.predictive:
+                out["log_agn_bol_luminosity_fit"] = float(np.median(np.asarray(self.predictive["log_agn_bol_luminosity_fit"], dtype=float)))
+            if "log_disk_luminosity_fit" in self.predictive:
+                out["log_disk_luminosity_fit"] = float(np.median(np.asarray(self.predictive["log_disk_luminosity_fit"], dtype=float)))
             if "intrinsic_scatter_fit" in self.predictive:
                 out["intrinsic_scatter_fit"] = float(np.median(np.asarray(self.predictive["intrinsic_scatter_fit"], dtype=float)))
             if "absolute_flux_scale_logprior" in self.predictive:

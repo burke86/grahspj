@@ -350,7 +350,7 @@ def _estimate_chimera_prior_config(row: dict[str, Any]) -> dict[str, Any]:
     fracagn_loc = float(np.clip(optical_flux_mjy / max(optical_flux_mjy + host_flux_mjy, 1.0e-12), 0.02, 0.95))
 
     return {
-        "log_stellar_mass": {"loc": 10.5, "scale": 2.0},
+        "log_stellar_mass": {"dist": "student_t", "loc": 10.0, "scale": 2.0, "df": 5.0},
         "fracAGN_5100": {"loc": fracagn_loc, "scale": 0.2},
     }
 

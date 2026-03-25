@@ -68,6 +68,33 @@ def _cfg_mean_scale(prior_config: dict[str, Any], key: str, default_loc: float, 
     return _cfg_norm(prior_config, key, default_loc, default_scale)
 
 
+def _safe_log10(x):
+    """Take log10 after clipping to a tiny positive floor."""
+    return jnp.log10(jnp.clip(jnp.asarray(x, dtype=jnp.float64), 1.0e-30, 1.0e300))
+
+
+def _sample_log_stellar_mass(prior_config: dict[str, Any]):
+    """Sample stellar mass with a less top-heavy default prior.
+
+    By default this uses a heavy-tailed Student-t prior centered lower than the
+    original Normal(10.5, 2.5) benchmark default. Existing Normal-like
+    overrides with only ``loc`` and ``scale`` are still supported.
+    """
+    cfg = prior_config.get("log_stellar_mass", None)
+    if isinstance(cfg, dict):
+        loc = jnp.asarray(cfg.get("loc", 10.0))
+        scale = jnp.asarray(cfg.get("scale", 2.0))
+        dist_name = str(cfg.get("dist", "student_t")).lower()
+        if dist_name in {"student_t", "studentt", "t"}:
+            df = jnp.asarray(cfg.get("df", 5.0))
+            return numpyro.sample("log_stellar_mass", dist.StudentT(df=df, loc=loc, scale=scale))
+        if dist_name in {"normal", "gaussian"}:
+            return numpyro.sample("log_stellar_mass", dist.Normal(loc, scale))
+    if isinstance(cfg, (tuple, list)) and len(cfg) >= 2:
+        return numpyro.sample("log_stellar_mass", dist.Normal(jnp.asarray(cfg[0]), jnp.asarray(cfg[1])))
+    return numpyro.sample("log_stellar_mass", dist.StudentT(df=5.0, loc=10.0, scale=2.0))
+
+
 def _gaussian_kernel1d(sigma_pix, radius_mult=5.0, max_half=256):
     """Build a normalized 1D Gaussian convolution kernel."""
     sigma_pix = jnp.maximum(sigma_pix, 1e-3)
@@ -306,7 +333,7 @@ def _build_diffstar_host(context: ModelContext, prior_config: dict[str, Any]):
     gal_t_table = _np_to_jnp(context.gal_t_table)
     t_obs_gyr = jnp.asarray(context.t_obs_gyr, dtype=jnp.float64)
 
-    log_stellar_mass = numpyro.sample("log_stellar_mass", dist.Normal(*_cfg_mean_scale(prior_config, "log_stellar_mass", 10.5, 2.5)))
+    log_stellar_mass = _sample_log_stellar_mass(prior_config)
 
     u_params = {}
     for key in DEFAULT_DIFFSTAR_U_PARAMS._fields:
@@ -823,7 +850,8 @@ def grahsp_photometric_model(context: ModelContext, include_components: bool = F
     numpyro.deterministic("pred_fluxes", pred_fluxes)
     numpyro.deterministic("intrinsic_scatter_fit", intrinsic_scatter)
     numpyro.deterministic("log_agn_amp_fit", log_agn_amp)
-    numpyro.deterministic("agn_bol_luminosity", agn_bol_luminosity)
+    numpyro.deterministic("log_disk_luminosity_fit", _safe_log10(l_agn_lambda_5100))
+    numpyro.deterministic("log_agn_bol_luminosity_fit", _safe_log10(agn_bol_luminosity))
     numpyro.deterministic("agn_variability_nev", _agn_variability_nev(agn_bol_luminosity, cfg.likelihood.agn_nev))
     numpyro.deterministic("transmitted_fraction_fluxes", trans_fluxes)
     numpyro.deterministic("host_total_fluxes", host_fluxes_total)
@@ -839,7 +867,7 @@ def grahsp_photometric_model(context: ModelContext, include_components: bool = F
     numpyro.deterministic("surviving_mass_fraction", host_state["surviving_mass_fraction"])
     numpyro.deterministic("gal_lgmet_fit", host_state["gal_lgmet"])
     numpyro.deterministic("gal_lgmet_scatter_fit", host_state["gal_lgmet_scatter"])
-    numpyro.deterministic("dust_luminosity", dust_luminosity)
+    numpyro.deterministic("log_dust_luminosity_fit", _safe_log10(dust_luminosity))
     numpyro.deterministic("dust_alpha_fit", dust_alpha)
     numpyro.deterministic("absolute_flux_scale_logprior", abs_flux_scale_logprior)
     numpyro.deterministic("rest_wave", rest_wave)
