@@ -155,7 +155,7 @@ def test_tabulated_redshift_pdf_prior_is_supported(monkeypatch):
     redshift = float(np.asarray(tr["redshift"]["value"]))
     assert 0.05 <= redshift <= 0.4
     assert "redshift_pdf_prior" in tr
-    assert np.isfinite(float(np.asarray(tr["redshift_pdf_prior"]["fn"])))
+    assert np.isfinite(float(np.asarray(tr["redshift_pdf_prior"]["value"])))
 
 
 def test_summary_uses_log_stellar_mass_and_host_weights():
