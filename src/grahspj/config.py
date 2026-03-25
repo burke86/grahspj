@@ -159,6 +159,25 @@ class FitConfig:
         self.photometry.validate()
         if not self.galaxy.fit_host and not self.agn.fit_agn:
             raise ValueError("At least one of galaxy.fit_host or agn.fit_agn must be True.")
+        redshift_pdf = self.prior_config.get("redshift_pdf")
+        if redshift_pdf is not None:
+            if not isinstance(redshift_pdf, Mapping):
+                raise TypeError("prior_config['redshift_pdf'] must be a mapping with 'z_grid' and 'pdf'.")
+            if "z_grid" not in redshift_pdf or "pdf" not in redshift_pdf:
+                raise ValueError("prior_config['redshift_pdf'] must contain 'z_grid' and 'pdf'.")
+            z_grid = np.asarray(redshift_pdf["z_grid"], dtype=float)
+            pdf = np.asarray(redshift_pdf["pdf"], dtype=float)
+            if z_grid.ndim != 1 or pdf.ndim != 1 or z_grid.size != pdf.size or z_grid.size < 2:
+                raise ValueError("redshift_pdf z_grid and pdf must be one-dimensional arrays of the same length >= 2.")
+            if not np.all(np.isfinite(z_grid)) or not np.all(np.isfinite(pdf)):
+                raise ValueError("redshift_pdf z_grid and pdf must be finite.")
+            if np.any(np.diff(z_grid) <= 0.0):
+                raise ValueError("redshift_pdf z_grid must be strictly increasing.")
+            if np.any(pdf < 0.0):
+                raise ValueError("redshift_pdf pdf must be non-negative.")
+            norm = float(np.trapezoid(pdf, z_grid))
+            if not np.isfinite(norm) or norm <= 0.0:
+                raise ValueError("redshift_pdf must integrate to a positive finite value.")
 
     def to_dict(self) -> dict[str, Any]:
         """Convert the dataclass tree into a plain Python dictionary."""

@@ -396,6 +396,36 @@ def _estimate_log_agn_amp_prior_loc(context: ModelContext, redshift: float) -> f
     return float(np.log(np.clip(agn_amp_w, 1.0e30, 1.0e50)))
 
 
+def _sample_redshift(context: ModelContext, prior_config: dict[str, Any], cfg) -> jnp.ndarray:
+    """Sample redshift from either the legacy Gaussian prior or a tabulated p(z)."""
+    redshift_pdf = prior_config.get("redshift_pdf")
+    if redshift_pdf is None:
+        return numpyro.sample(
+            "redshift",
+            dist.TruncatedNormal(
+                cfg.observation.redshift,
+                max(cfg.observation.redshift_err, 1e-3),
+                low=0.0,
+            ),
+        )
+
+    z_grid = np.asarray(redshift_pdf["z_grid"], dtype=float)
+    pdf = np.asarray(redshift_pdf["pdf"], dtype=float)
+    pdf_norm = pdf / max(float(np.trapezoid(pdf, z_grid)), 1.0e-300)
+    z_grid_jnp = _np_to_jnp(z_grid)
+    pdf_jnp = _np_to_jnp(pdf_norm)
+    redshift = numpyro.sample(
+        "redshift",
+        dist.Uniform(
+            low=float(z_grid[0]),
+            high=float(z_grid[-1]),
+        ),
+    )
+    pz_val = jnp.interp(redshift, z_grid_jnp, pdf_jnp, left=0.0, right=0.0)
+    numpyro.factor("redshift_pdf_prior", jnp.log(jnp.clip(pz_val, 1.0e-300, None)))
+    return redshift
+
+
 def _chi2_upper_limit(obs_fluxes, model_fluxes, total_variance):
     """Return the one-sided chi-square contribution for upper limits."""
     z = (obs_fluxes - model_fluxes) / (jnp.sqrt(2.0) * jnp.maximum(total_variance, 1e-30))
@@ -675,14 +705,7 @@ def grahsp_photometric_model(context: ModelContext, include_components: bool = F
     else:
         intrinsic_scatter = jnp.asarray(float(cfg.likelihood.intrinsic_scatter_default), dtype=jnp.float64)
     if cfg.observation.fit_redshift:
-        redshift = numpyro.sample(
-            "redshift",
-            dist.TruncatedNormal(
-                cfg.observation.redshift,
-                max(cfg.observation.redshift_err, 1e-3),
-                low=0.0,
-            ),
-        )
+        redshift = _sample_redshift(context, prior_config, cfg)
     else:
         redshift = jnp.asarray(float(cfg.observation.redshift), dtype=jnp.float64)
     gal_att_rest, agn_att_rest, host_absorbed_rest, dust_luminosity = _apply_biattenuation(

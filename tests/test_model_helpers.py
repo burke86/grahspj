@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from grahspj.config import (
     AGNConfig,
@@ -58,3 +59,23 @@ def test_build_context_with_inline_templates(monkeypatch):
     assert context.templates.dust_alpha_grid.size > 0
     assert context.templates.dust_wave.size > 0
     assert context.templates.dust_lumin.ndim == 2
+
+
+def test_config_rejects_invalid_redshift_pdf():
+    cfg = FitConfig(
+        observation=Observation(object_id="obj", redshift=0.1, fit_redshift=True),
+        photometry=PhotometryData(filter_names=["f1"], fluxes=[1.0], errors=[0.1]),
+        filters=FilterSet(curves=[FilterCurve(name="f1", wave=[1000.0, 2000.0, 3000.0], transmission=[0.0, 1.0, 0.0])], use_grahsp_database=False),
+        galaxy=GalaxyConfig(dsps_ssp_fn="fake.h5", n_wave=64),
+        agn=AGNConfig(),
+        likelihood=LikelihoodConfig(),
+        inference=InferenceConfig(map_steps=2),
+        prior_config={
+            "redshift_pdf": {
+                "z_grid": [0.3, 0.2, 0.4],
+                "pdf": [0.2, 0.5, 0.3],
+            }
+        },
+    )
+    with pytest.raises(ValueError, match="strictly increasing"):
+        cfg.validate()
