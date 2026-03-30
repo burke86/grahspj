@@ -135,8 +135,8 @@ class InferenceConfig:
     """Inference defaults for MAP optimization and NUTS sampling."""
     learning_rate: float = 5e-3
     map_steps: int = 1500
-    num_warmup: int = 500
-    num_samples: int = 1000
+    num_warmup: int = 200
+    num_samples: int = 200
     num_chains: int = 1
     target_accept_prob: float = 0.85
     seed: int = 0

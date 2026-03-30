@@ -18,6 +18,8 @@ At a high level, `grahspj` currently includes:
 python -m pip install .
 curl -o tempdata.h5 https://portal.nersc.gov/project/hacc/aphearin/DSPS_data/ssp_data_fsps_v3.2_lgmet_age.h5
 ```
+`grahspj` now also requires `jax_cosmo` and `setuptools` in the runtime environment so the redshift-dependent luminosity-distance path stays JAX-native during inference.
+
 You will also need a DSPS SSP template file such as `ssp_data_fsps_v3.2_lgmet_age.h5`, downloaded above, and then referenced from your configuration via `cfg.galaxy.dsps_ssp_fn` or passed directly to `fit(...)` via `dsps_ssp_fn`.
 
 This repo assumes `dustmaps` is already configured and SFD maps are available.
@@ -85,6 +87,16 @@ fitter.fit(
     save_fig=True,
     save_result=True,
     output_dir="fit_outputs",
+)
+```
+
+Nested sampling is also available through NumPyro's `jaxns` wrapper:
+
+```python
+fitter.fit(
+    fit_method="ns",
+    ns_live_points=200,
+    ns_dlogz=0.1,
 )
 ```
 

@@ -12,6 +12,7 @@ from __future__ import annotations
 # Upstream license: CeCILL v2. See LICENSES/CeCILL-v2.txt and
 # THIRD_PARTY_NOTICES.md in the repository root.
 
+from functools import lru_cache
 from typing import Any
 
 import jax
@@ -22,7 +23,6 @@ from diffstar import DEFAULT_DIFFSTAR_U_PARAMS, DiffstarUParams, calc_sfh_single
 from dsps.sed.ssp_weights import calc_ssp_weights_sfh_table_lognormal_mdf
 import numpyro
 import numpyro.distributions as dist
-from scipy.special import factorial
 
 from .preload import ModelContext
 
@@ -31,6 +31,7 @@ C_MS = 2.99792458e8
 L_SUN_W = 3.828e26
 ERG_PER_WATT = 1.0e7
 AGN_BOLOMETRIC_CORRECTION_5100 = 9.26
+MPC_TO_M = 3.085677581491367e22
 
 
 def _np_to_jnp(x):
@@ -41,6 +42,39 @@ def _np_to_jnp(x):
 def _bool_to_jnp(x):
     """Convert an array-like object to a boolean JAX array."""
     return jnp.asarray(np.asarray(x, dtype=bool))
+
+
+@lru_cache(maxsize=16)
+def _get_jax_cosmo_backend(h0: float, om0: float):
+    """Return cached jax_cosmo helpers for a flat LCDM luminosity distance."""
+    import jax_cosmo.background as bg
+    from jax_cosmo.core import Cosmology
+
+    omega_b = min(0.05, max(float(om0) - 1.0e-6, 1.0e-6))
+    omega_c = max(float(om0) - omega_b, 1.0e-6)
+    cosmo = Cosmology(
+        Omega_c=omega_c,
+        Omega_b=omega_b,
+        h=float(h0) / 100.0,
+        n_s=0.96,
+        sigma8=0.8,
+        Omega_k=0.0,
+        w0=-1.0,
+        wa=0.0,
+    )
+    return bg, cosmo
+
+
+def _luminosity_distance_m_jax(redshift, h0: float, om0: float):
+    """Return luminosity distance in meters using jax_cosmo."""
+    redshift = jnp.asarray(redshift, dtype=jnp.float64)
+    scalar_input = redshift.ndim == 0
+    bg, cosmo = _get_jax_cosmo_backend(float(h0), float(om0))
+    a = 1.0 / (1.0 + jnp.maximum(redshift, 0.0))
+    d_a_mpc_over_h = bg.angular_diameter_distance(cosmo, a)
+    d_l_mpc_over_h = d_a_mpc_over_h / jnp.maximum(a * a, 1.0e-30)
+    d_l_m = d_l_mpc_over_h / cosmo.h * MPC_TO_M
+    return jnp.reshape(d_l_m, ()) if scalar_input else d_l_m
 
 
 def _cfg_norm(prior_config: dict[str, Any], key: str, default_loc: float, default_scale: float):
@@ -228,18 +262,20 @@ def _igm_transmission(wavelength, redshift):
     z_l = wavelength / lambda_limit - 1.0
     w = z_l < redshift
     tau_l_igm = jnp.where(w, 0.805 * (1.0 + z_l) ** 3 * (1.0 / (1.0 + z_l) - 1.0 / (1.0 + redshift)), 0.0)
-    term1 = gamma - np.exp(-1.0)
-    n = np.arange(n_transitions_low - 1)
-    term2 = float(np.sum(np.power(-1.0, n) / (factorial(n) * (2 * n - 1))))
+    term1 = gamma - jnp.exp(-1.0)
+    n = jnp.arange(n_transitions_low - 1, dtype=jnp.float64)
+    factorial_n = jnp.exp(jax.scipy.special.gammaln(n + 1.0))
+    term2 = jnp.sum(jnp.power(-1.0, n) / (factorial_n * (2.0 * n - 1.0)))
     term3 = (1.0 + redshift) * (wavelength / lambda_limit) ** 1.5 - (wavelength / lambda_limit) ** 2.5
-    ni = np.arange(1, n_transitions_low, dtype=float)
-    coeff = 2.0 * np.power(-1.0, ni) / (factorial(ni) * ((6.0 * ni - 5.0) * (2.0 * ni - 1.0)))
+    ni = jnp.arange(1, n_transitions_low, dtype=jnp.float64)
+    factorial_ni = jnp.exp(jax.scipy.special.gammaln(ni + 1.0))
+    coeff = 2.0 * jnp.power(-1.0, ni) / (factorial_ni * ((6.0 * ni - 5.0) * (2.0 * ni - 1.0)))
     wl_ratio = wavelength / lambda_limit
     term4_terms = coeff[:, None] * (
         (1.0 + redshift) ** (2.5 - (3.0 * ni[:, None])) * wl_ratio[None, :] ** (3.0 * ni[:, None])
         - wl_ratio[None, :] ** 2.5
     )
-    term4 = jnp.sum(jnp.asarray(term4_terms, dtype=jnp.float64), axis=0)
+    term4 = jnp.sum(term4_terms, axis=0)
     tau_l_lls = jnp.where(w, n0 * ((term1 - term2) * term3 - term4), 0.0)
     tau_taun = jnp.sum(tau_n[2:n_transitions_max, :], axis=0)
     lambda_min_igm = (1.0 + redshift) * 70.0
@@ -538,7 +574,6 @@ def grahsp_photometric_model(context: ModelContext, include_components: bool = F
     prior_config = cfg.prior_config
     rest_wave = _np_to_jnp(context.rest_wave)
     obs_wave = _np_to_jnp(context.obs_wave)
-    luminosity_distance_m = jnp.asarray(context.luminosity_distance_m, dtype=jnp.float64)
     feii_wave = _np_to_jnp(context.templates.feii_wave)
     feii_lumin = _np_to_jnp(context.templates.feii_lumin)
     line_wave = _np_to_jnp(context.templates.line_wave)
@@ -735,6 +770,11 @@ def grahsp_photometric_model(context: ModelContext, include_components: bool = F
         redshift = _sample_redshift(context, prior_config, cfg)
     else:
         redshift = jnp.asarray(float(cfg.observation.redshift), dtype=jnp.float64)
+    luminosity_distance_m = _luminosity_distance_m_jax(
+        redshift,
+        cfg.galaxy.cosmology_h0,
+        cfg.galaxy.cosmology_om0,
+    )
     gal_att_rest, agn_att_rest, host_absorbed_rest, dust_luminosity = _apply_biattenuation(
         rest_wave,
         host_rest,

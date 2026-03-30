@@ -14,6 +14,7 @@ authors = [
 dependencies = [
   "numpy",
   "scipy",
+  "setuptools",
   "astropy",
   "tqdm",
   "speclite",
@@ -21,6 +22,7 @@ dependencies = [
   "matplotlib",
   "jax",
   "jaxlib",
+  "jax_cosmo",
   "numpyro",
   "optax",
   "dsps",

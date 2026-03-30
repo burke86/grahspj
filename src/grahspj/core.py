@@ -22,6 +22,7 @@ class GRAHSPJ:
         self.context: ModelContext = build_model_context(config)
         self.map_result: dict[str, Any] | None = None
         self.nuts_result: dict[str, Any] | None = None
+        self.ns_result: dict[str, Any] | None = None
         self.samples: dict[str, Any] | None = None
         self.predictive: dict[str, Any] | None = None
         self._plot_cache: dict[str, Any] | None = None
@@ -30,6 +31,7 @@ class GRAHSPJ:
         """Clear cached inference and predictive state."""
         self.map_result = None
         self.nuts_result = None
+        self.ns_result = None
         self.samples = None
         self.predictive = None
         self._plot_cache = None
@@ -62,7 +64,7 @@ class GRAHSPJ:
     def _compute_predictive(self) -> dict[str, Any]:
         """Generate and cache predictive outputs from posterior samples."""
         if self.samples is None:
-            raise RuntimeError("No fitted posterior available. Run fit_map() or fit_nuts() first.")
+            raise RuntimeError("No fitted posterior available. Run fit_map(), fit_nuts(), or fit_ns() first.")
         rng_key = jax.random.PRNGKey(self.config.inference.seed + 17)
         pred = Predictive(
             self._predictive_model,
@@ -140,6 +142,9 @@ class GRAHSPJ:
         nuts_warmup: int | None = None,
         nuts_samples: int | None = None,
         nuts_chains: int | None = None,
+        ns_live_points: int | None = None,
+        ns_max_samples: int | None = None,
+        ns_dlogz: float | None = None,
         plot_fig: bool = False,
         save_fig: bool = False,
         save_result: bool = False,
@@ -161,6 +166,12 @@ class GRAHSPJ:
             nuts_samples = kwargs.pop("num_samples")
         if "num_chains" in kwargs and nuts_chains is None:
             nuts_chains = kwargs.pop("num_chains")
+        if "ns_live_points" in kwargs and ns_live_points is None:
+            ns_live_points = kwargs.pop("ns_live_points")
+        if "ns_max_samples" in kwargs and ns_max_samples is None:
+            ns_max_samples = kwargs.pop("ns_max_samples")
+        if "ns_dlogz" in kwargs and ns_dlogz is None:
+            ns_dlogz = kwargs.pop("ns_dlogz")
         if "target_accept_prob" in kwargs and target_accept_prob is None:
             target_accept_prob = kwargs.pop("target_accept_prob")
         use_map_init_explicit = "use_map_init" in kwargs
@@ -227,8 +238,20 @@ class GRAHSPJ:
                 **nuts_kwargs,
             )
             fit_output = {"map": map_result, "nuts": nuts_result}
+        elif method == "ns":
+            if kwargs:
+                unknown = ", ".join(sorted(kwargs))
+                raise TypeError(f"Unknown fit() keyword arguments: {unknown}")
+            ns_kwargs: dict[str, Any] = {"progress_bar": progress_bar}
+            if ns_live_points is not None:
+                ns_kwargs["num_live_points"] = ns_live_points
+            if ns_max_samples is not None:
+                ns_kwargs["max_samples"] = ns_max_samples
+            if ns_dlogz is not None:
+                ns_kwargs["dlogz"] = ns_dlogz
+            fit_output = self.fit_ns(**ns_kwargs)
         else:
-            raise ValueError("fit_method must be one of: 'optax+nuts', 'optax', 'nuts'")
+            raise ValueError("fit_method must be one of: 'optax+nuts', 'optax', 'nuts', 'ns'")
 
         saved_result_path = None
         saved_fig_path = None
@@ -317,6 +340,48 @@ class GRAHSPJ:
         self.predictive = None
         return self.nuts_result
 
+    def fit_ns(
+        self,
+        num_live_points: int | None = None,
+        max_samples: int | None = None,
+        dlogz: float | None = None,
+        progress_bar: bool = True,
+    ):
+        """Run full-model nested sampling and resample equal-weight posterior draws."""
+        from numpyro.contrib.nested_sampling import NestedSampler
+
+        constructor_kwargs: dict[str, Any] = {"verbose": bool(progress_bar)}
+        if num_live_points is not None:
+            constructor_kwargs["num_live_points"] = int(num_live_points)
+        if max_samples is not None:
+            constructor_kwargs["max_samples"] = int(max_samples)
+        termination_kwargs: dict[str, Any] = {}
+        if dlogz is not None:
+            termination_kwargs["dlogZ"] = float(dlogz)
+
+        sampler = NestedSampler(
+            self._model,
+            constructor_kwargs=constructor_kwargs,
+            termination_kwargs=termination_kwargs,
+        )
+        rng_key = jax.random.PRNGKey(self.config.inference.seed + 2)
+        sampler.run(rng_key)
+        posterior_rng_key = jax.random.PRNGKey(self.config.inference.seed + 3)
+        samples = sampler.get_samples(
+            posterior_rng_key,
+            num_samples=int(self.config.inference.num_samples),
+            group_by_chain=False,
+        )
+        self.ns_result = {
+            "sampler": sampler,
+            "results": getattr(sampler, "_results", None),
+            "constructor_kwargs": dict(getattr(sampler, "constructor_kwargs", constructor_kwargs)),
+            "termination_kwargs": dict(getattr(sampler, "termination_kwargs", termination_kwargs)),
+        }
+        self.samples = {k: np.asarray(v) for k, v in samples.items()}
+        self.predictive = None
+        return self.ns_result
+
     def predict(self, posterior: str = "latest") -> dict[str, Any]:
         """Return cached predictive outputs or generate them on demand."""
         if self.predictive is None:
@@ -329,7 +394,7 @@ class GRAHSPJ:
             return float(np.median(np.asarray(self.samples["log_stellar_mass"], dtype=float)))
         if self.map_result is not None and "median" in self.map_result and "log_stellar_mass" in self.map_result["median"]:
             return float(np.asarray(self.map_result["median"]["log_stellar_mass"], dtype=float))
-        raise RuntimeError("No recovered stellar mass available. Run fit_map() or fit_nuts() first.")
+        raise RuntimeError("No recovered stellar mass available. Run fit_map(), fit_nuts(), or fit_ns() first.")
 
     def summary(self) -> dict[str, Any]:
         """Summarize posterior medians and selected derived quantities."""
