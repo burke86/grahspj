@@ -280,7 +280,7 @@ def test_fit_ns_populates_samples(monkeypatch):
                 "host_lgmet_weights": np.tile(np.array([[0.6, 0.4]]), (num_samples, 1)),
             }
 
-    monkeypatch.setattr("numpyro.contrib.nested_sampling.NestedSampler", _FakeNestedSampler)
+    monkeypatch.setattr("grahspj.core._get_nested_sampler_cls", lambda: _FakeNestedSampler)
 
     fitter = GRAHSPJ.__new__(GRAHSPJ)
     fitter.config = _mock_config()

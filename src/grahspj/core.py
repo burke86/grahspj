@@ -14,6 +14,13 @@ from .model import grahsp_photometric_model
 from .preload import ModelContext, build_model_context
 
 
+def _get_nested_sampler_cls():
+    """Resolve NumPyro's optional nested sampler lazily."""
+    from numpyro.contrib.nested_sampling import NestedSampler
+
+    return NestedSampler
+
+
 class GRAHSPJ:
     """High-level single-object fitting interface for grahspj."""
     def __init__(self, config: FitConfig):
@@ -348,7 +355,7 @@ class GRAHSPJ:
         progress_bar: bool = True,
     ):
         """Run full-model nested sampling and resample equal-weight posterior draws."""
-        from numpyro.contrib.nested_sampling import NestedSampler
+        NestedSampler = _get_nested_sampler_cls()
 
         constructor_kwargs: dict[str, Any] = {"verbose": bool(progress_bar)}
         if num_live_points is not None:
