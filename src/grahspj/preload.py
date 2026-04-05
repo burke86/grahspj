@@ -14,6 +14,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
 
+import jax
+import jax.numpy as jnp
 import numpy as np
 from astropy.coordinates import SkyCoord
 from astropy.cosmology import FlatLambdaCDM
@@ -49,6 +51,35 @@ class PackedFilters:
 
 
 @dataclass
+class PackedFiltersJax:
+    """JAX-native packed filter arrays reused by the photometry projection path."""
+    interp_indices: jnp.ndarray
+    interp_weight: jnp.ndarray
+    transmission: jnp.ndarray
+    work_wave: jnp.ndarray
+    effective_wavelength: jnp.ndarray
+    valid_mask: jnp.ndarray
+
+
+@dataclass
+class IGMCacheJax:
+    """Cached wavelength-only arrays used by the IGM transmission model."""
+    wavelength: jnp.ndarray
+    z_n: jnp.ndarray
+    z_n2: jnp.ndarray
+    z_eval: jnp.ndarray
+    z_n9: jnp.ndarray
+    z_l: jnp.ndarray
+    wl_ratio: jnp.ndarray
+    fact: jnp.ndarray
+    fact_eval: jnp.ndarray
+    n_eval: jnp.ndarray
+    val_gt9_coeff: jnp.ndarray
+    term2: jnp.ndarray
+    coeff: jnp.ndarray
+
+
+@dataclass
 class LoadedTemplates:
     """Template arrays required by the supported AGN and host-dust components."""
     feii_wave: np.ndarray
@@ -79,6 +110,16 @@ class HostBasis:
 
 
 @dataclass
+class HostBasisJax:
+    """JAX-native host-basis arrays reused by the Diffstar host model."""
+    ssp_lgmet: jnp.ndarray
+    ssp_lg_age_gyr: jnp.ndarray
+    rest_llambda: jnp.ndarray
+    surviving_frac_by_age: jnp.ndarray
+    gal_t_table: jnp.ndarray
+
+
+@dataclass
 class ModelContext:
     """Static arrays and metadata required by one grahspj model evaluation."""
     fit_config: FitConfig
@@ -86,11 +127,14 @@ class ModelContext:
     obs_wave: np.ndarray
     ssp_data: SSPData
     host_basis: HostBasis
+    host_basis_jax: HostBasisJax
     t_obs_gyr: float
     luminosity_distance_m: float
     gal_t_table: np.ndarray
     filters: list[LoadedFilter]
     packed_filters: PackedFilters
+    packed_filters_jax: PackedFiltersJax
+    igm_cache_jax: IGMCacheJax
     templates: LoadedTemplates
     fluxes: np.ndarray
     errors: np.ndarray
@@ -540,6 +584,55 @@ def _pack_loaded_filters(filters: Sequence[LoadedFilter]) -> PackedFilters:
     )
 
 
+def _pack_loaded_filters_jax(packed_filters: PackedFilters) -> PackedFiltersJax:
+    """Convert packed filter arrays into JAX arrays once per model context."""
+    return PackedFiltersJax(
+        interp_indices=jnp.asarray(packed_filters.interp_indices, dtype=jnp.int32),
+        interp_weight=jnp.asarray(packed_filters.interp_weight, dtype=jnp.float64),
+        transmission=jnp.asarray(packed_filters.transmission, dtype=jnp.float64),
+        work_wave=jnp.asarray(packed_filters.work_wave, dtype=jnp.float64),
+        effective_wavelength=jnp.asarray(packed_filters.effective_wavelength, dtype=jnp.float64),
+        valid_mask=jnp.asarray(packed_filters.valid_mask, dtype=bool),
+    )
+
+
+def _build_igm_cache_jax(rest_wave: np.ndarray) -> IGMCacheJax:
+    """Build JAX-native wavelength-only helper arrays for the IGM model."""
+    wavelength = jnp.asarray(rest_wave, dtype=jnp.float64)
+    n_transitions_low = 10
+    n_transitions_max = 31
+    lambda_limit = 91.2
+    n_arr = jnp.arange(n_transitions_max, dtype=jnp.float64)
+    lambda_n = jnp.where(n_arr >= 2, lambda_limit / (1.0 - 1.0 / jnp.maximum(n_arr * n_arr, 1.0)), 1.0)
+    z_n = wavelength[None, :] / lambda_n[:, None] - 1.0
+    n_eval = jnp.arange(3, n_transitions_max, dtype=jnp.float64)
+    fact = jnp.array([1.0, 1.0, 1.0, 0.348, 0.179, 0.109, 0.0722, 0.0508, 0.0373, 0.0283], dtype=jnp.float64)
+    fact_eval = jnp.where(n_eval <= 9.0, fact[n_eval.astype(jnp.int32)], 0.0)
+    val_gt9_coeff = 720.0 / (n_eval * (n_eval * n_eval * n_eval - 1.0))
+    z_l = wavelength / lambda_limit - 1.0
+    wl_ratio = wavelength / lambda_limit
+    n = jnp.arange(n_transitions_low - 1, dtype=jnp.float64)
+    factorial_n = jnp.exp(jax.scipy.special.gammaln(n + 1.0))
+    term2 = jnp.sum(jnp.power(-1.0, n) / (factorial_n * (2.0 * n - 1.0)))
+    ni = jnp.arange(1, n_transitions_low, dtype=jnp.float64)
+    factorial_ni = jnp.exp(jax.scipy.special.gammaln(ni + 1.0))
+    coeff = 2.0 * jnp.power(-1.0, ni) / (factorial_ni * ((6.0 * ni - 5.0) * (2.0 * ni - 1.0)))
+    return IGMCacheJax(
+        wavelength=wavelength,
+        z_n=z_n,
+        z_n2=z_n[2],
+        z_eval=z_n[3:],
+        z_n9=z_n[9],
+        z_l=z_l,
+        wl_ratio=wl_ratio,
+        fact=fact,
+        fact_eval=fact_eval,
+        n_eval=n_eval,
+        val_gt9_coeff=val_gt9_coeff,
+        term2=term2,
+        coeff=coeff,
+    )
+
 def _build_host_basis(rest_wave: np.ndarray, ssp_data: SSPData) -> HostBasis:
     """Precompute the SSP basis on the model rest-wave grid."""
     cache_key = (
@@ -577,6 +670,17 @@ def _build_host_basis(rest_wave: np.ndarray, ssp_data: SSPData) -> HostBasis:
     )
     _HOST_BASIS_CACHE[cache_key] = loaded
     return loaded
+
+
+def _build_host_basis_jax(ssp_data: SSPData, host_basis: HostBasis, gal_t_table: np.ndarray) -> HostBasisJax:
+    """Convert frequently used host-basis arrays into JAX arrays once per context."""
+    return HostBasisJax(
+        ssp_lgmet=jnp.asarray(ssp_data.ssp_lgmet, dtype=jnp.float64),
+        ssp_lg_age_gyr=jnp.asarray(ssp_data.ssp_lg_age_gyr, dtype=jnp.float64),
+        rest_llambda=jnp.asarray(host_basis.rest_llambda, dtype=jnp.float64),
+        surviving_frac_by_age=jnp.asarray(host_basis.surviving_frac_by_age, dtype=jnp.float64),
+        gal_t_table=jnp.asarray(gal_t_table, dtype=jnp.float64),
+    )
 
 
 def build_model_context(cfg: FitConfig) -> ModelContext:
@@ -618,10 +722,13 @@ def build_model_context(cfg: FitConfig) -> ModelContext:
         max(t_obs_gyr, cfg.galaxy.sfh_t_min_gyr * 1.01),
         int(cfg.galaxy.sfh_n_steps),
     ).astype(float)
+    host_basis_jax = _build_host_basis_jax(ssp_data, host_basis, gal_t_table)
 
     filter_responses = _load_filter_responses(cfg)
     loaded_filters = [_prepare_loaded_filter(obs_wave, response) for response in filter_responses]
     packed_filters = _pack_loaded_filters(loaded_filters)
+    packed_filters_jax = _pack_loaded_filters_jax(packed_filters)
+    igm_cache_jax = _build_igm_cache_jax(rest_wave)
     templates = _load_templates(cfg)
 
     mw_ebv = 0.0
@@ -641,11 +748,14 @@ def build_model_context(cfg: FitConfig) -> ModelContext:
         obs_wave=obs_wave,
         ssp_data=ssp_data,
         host_basis=host_basis,
+        host_basis_jax=host_basis_jax,
         t_obs_gyr=t_obs_gyr,
         luminosity_distance_m=luminosity_distance_m,
         gal_t_table=gal_t_table,
         filters=loaded_filters,
         packed_filters=packed_filters,
+        packed_filters_jax=packed_filters_jax,
+        igm_cache_jax=igm_cache_jax,
         templates=templates,
         fluxes=fluxes,
         errors=errors,

@@ -51,7 +51,7 @@ def test_diffstar_host_model_exposes_log_stellar_mass(monkeypatch):
     cfg = _mock_config()
     cfg.galaxy.dsps_ssp_fn = "fake-diffstar.h5"
     context = build_model_context(cfg)
-    tr = trace(seed(lambda: grahsp_photometric_model(context), 0)).get_trace()
+    tr = trace(seed(lambda: grahsp_photometric_model(context, include_components=True), 0)).get_trace()
 
     assert "log_stellar_mass" in tr
     assert "log_host_amp" not in tr
@@ -81,7 +81,7 @@ def test_agn_type_2_uses_sy2_narrow_lines_only(monkeypatch):
     cfg.galaxy.dsps_ssp_fn = "fake-diffstar.h5"
     cfg.agn.agn_type = 2
     context = build_model_context(cfg)
-    tr = trace(seed(lambda: grahsp_photometric_model(context), 0)).get_trace()
+    tr = trace(seed(lambda: grahsp_photometric_model(context, include_components=True), 0)).get_trace()
 
     assert np.allclose(np.asarray(tr["line_bl_rest_sed"]["value"]), 0.0)
     assert np.any(np.asarray(tr["line_nl_rest_sed"]["value"]) > 0.0)
@@ -103,7 +103,7 @@ def test_agn_type_3_uses_liner_lines_only(monkeypatch):
     cfg.galaxy.dsps_ssp_fn = "fake-diffstar.h5"
     cfg.agn.agn_type = 3
     context = build_model_context(cfg)
-    tr = trace(seed(lambda: grahsp_photometric_model(context), 0)).get_trace()
+    tr = trace(seed(lambda: grahsp_photometric_model(context, include_components=True), 0)).get_trace()
 
     assert np.allclose(np.asarray(tr["line_bl_rest_sed"]["value"]), 0.0)
     assert np.allclose(np.asarray(tr["line_nl_rest_sed"]["value"]), 0.0)
@@ -125,7 +125,7 @@ def test_energy_balance_can_be_disabled(monkeypatch):
     cfg.galaxy.dsps_ssp_fn = "fake-diffstar.h5"
     cfg.galaxy.use_energy_balance = False
     context = build_model_context(cfg)
-    tr = trace(seed(lambda: grahsp_photometric_model(context), 0)).get_trace()
+    tr = trace(seed(lambda: grahsp_photometric_model(context, include_components=True), 0)).get_trace()
 
     dust_rest = np.asarray(tr["dust_rest_sed"]["value"])
     assert np.allclose(dust_rest, 0.0)

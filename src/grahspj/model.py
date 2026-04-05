@@ -224,60 +224,51 @@ def _balmer_continuum_jax(wave, balmer_norm, balmer_te, balmer_tau, balmer_vel):
     return _shift_and_broaden_single_spectrum_lnlam(jnp.log(wave), bc, 0.0, balmer_vel)
 
 
-def _igm_transmission(wavelength, redshift):
+def _igm_transmission(igm_cache, redshift):
     """Approximate IGM transmission following the GRAHSP-style implementation."""
     n_transitions_low = 10
-    n_transitions_max = 31
     gamma = 0.2788
     n0 = 0.25
     lambda_limit = 91.2
-    wavelength = jnp.asarray(wavelength)
-    n_arr = jnp.arange(n_transitions_max, dtype=jnp.float64)
-    lambda_n = jnp.where(n_arr >= 2, lambda_limit / (1.0 - 1.0 / jnp.maximum(n_arr * n_arr, 1.0)), 1.0)
-    z_n = wavelength[None, :] / lambda_n[:, None] - 1.0
-    fact = jnp.array([1., 1., 1., 0.348, 0.179, 0.109, 0.0722, 0.0508, 0.0373, 0.0283], dtype=jnp.float64)
+    wavelength = igm_cache.wavelength
+    z_n2 = igm_cache.z_n2
+    z_eval = igm_cache.z_eval
+    z_n9 = igm_cache.z_n9
+    z_l = igm_cache.z_l
+    wl_ratio = igm_cache.wl_ratio
+    fact = igm_cache.fact
+    fact_eval = igm_cache.fact_eval
+    n_eval = igm_cache.n_eval
     tau_a = jnp.where(redshift <= 4, 0.00211 * (1.0 + redshift) ** 3.7, 0.00058 * (1.0 + redshift) ** 4.5)
-    tau_n = jnp.zeros((n_transitions_max, wavelength.size), dtype=jnp.float64)
-    tau2 = jnp.where(redshift <= 4, 0.00211 * (1.0 + z_n[2]) ** 3.7, 0.00058 * (1.0 + z_n[2]) ** 4.5)
-    tau_n = tau_n.at[2, :].set(tau2)
-
-    n_eval = jnp.arange(3, n_transitions_max, dtype=jnp.float64)
-    z_eval = z_n[3:, :]
-    fact_eval = jnp.where(n_eval <= 9.0, fact[n_eval.astype(jnp.int32)], 0.0)
+    tau2 = jnp.where(redshift <= 4, 0.00211 * (1.0 + z_n2) ** 3.7, 0.00058 * (1.0 + z_n2) ** 4.5)
+    tau2 = jnp.where(z_n2 >= redshift, 0.0, tau2)
     val_le5 = jnp.where(
         z_eval < 3.0,
         tau_a * fact_eval[:, None] * (0.25 * (1.0 + z_eval)) ** (1.0 / 3.0),
         tau_a * fact_eval[:, None] * (0.25 * (1.0 + z_eval)) ** (1.0 / 6.0),
     )
     val_6_9 = tau_a * fact_eval[:, None] * (0.25 * (1.0 + z_eval)) ** (1.0 / 3.0)
-    tau9 = tau_a * fact[9] * (0.25 * (1.0 + z_n[9])) ** (1.0 / 3.0)
-    val_gt9 = tau9[None, :] * 720.0 / (n_eval[:, None] * (n_eval[:, None] * n_eval[:, None] - 1.0))
+    tau9 = tau_a * fact[9] * (0.25 * (1.0 + z_n9)) ** (1.0 / 3.0)
+    val_gt9 = tau9[None, :] * igm_cache.val_gt9_coeff[:, None]
     val_eval = jnp.where(
         n_eval[:, None] <= 5.0,
         val_le5,
         jnp.where(n_eval[:, None] <= 9.0, val_6_9, val_gt9),
     )
-    tau_n = tau_n.at[3:, :].set(jnp.where(z_eval >= redshift, 0.0, val_eval))
-    tau_n = tau_n.at[2, :].set(jnp.where(z_n[2] >= redshift, 0.0, tau_n[2]))
-    z_l = wavelength / lambda_limit - 1.0
+    tau_taun = tau2 + jnp.sum(jnp.where(z_eval >= redshift, 0.0, val_eval), axis=0)
     w = z_l < redshift
     tau_l_igm = jnp.where(w, 0.805 * (1.0 + z_l) ** 3 * (1.0 / (1.0 + z_l) - 1.0 / (1.0 + redshift)), 0.0)
     term1 = gamma - jnp.exp(-1.0)
-    n = jnp.arange(n_transitions_low - 1, dtype=jnp.float64)
-    factorial_n = jnp.exp(jax.scipy.special.gammaln(n + 1.0))
-    term2 = jnp.sum(jnp.power(-1.0, n) / (factorial_n * (2.0 * n - 1.0)))
-    term3 = (1.0 + redshift) * (wavelength / lambda_limit) ** 1.5 - (wavelength / lambda_limit) ** 2.5
+    term2 = igm_cache.term2
+    term3 = (1.0 + redshift) * wl_ratio ** 1.5 - wl_ratio ** 2.5
     ni = jnp.arange(1, n_transitions_low, dtype=jnp.float64)
-    factorial_ni = jnp.exp(jax.scipy.special.gammaln(ni + 1.0))
-    coeff = 2.0 * jnp.power(-1.0, ni) / (factorial_ni * ((6.0 * ni - 5.0) * (2.0 * ni - 1.0)))
-    wl_ratio = wavelength / lambda_limit
+    coeff = igm_cache.coeff
     term4_terms = coeff[:, None] * (
         (1.0 + redshift) ** (2.5 - (3.0 * ni[:, None])) * wl_ratio[None, :] ** (3.0 * ni[:, None])
         - wl_ratio[None, :] ** 2.5
     )
     term4 = jnp.sum(term4_terms, axis=0)
     tau_l_lls = jnp.where(w, n0 * ((term1 - term2) * term3 - term4), 0.0)
-    tau_taun = jnp.sum(tau_n[2:n_transitions_max, :], axis=0)
     lambda_min_igm = (1.0 + redshift) * 70.0
     weight = jnp.where(wavelength < lambda_min_igm, (wavelength / lambda_min_igm) ** 2, 1.0)
     return jnp.exp(-tau_taun - tau_l_igm - tau_l_lls) * weight
@@ -313,12 +304,12 @@ def _redshift_scalar_to_obs(rest_wave, rest_value, obs_wave, redshift):
 
 def _project_filters(obs_flux, packed_filters):
     """Project an observed-frame spectrum through all prepared filters at once."""
-    interp_indices = jnp.asarray(np.asarray(packed_filters.interp_indices, dtype=np.int32))
-    interp_weight = _np_to_jnp(packed_filters.interp_weight)
-    transmission = _np_to_jnp(packed_filters.transmission)
-    work_wave = _np_to_jnp(packed_filters.work_wave)
-    effective_wavelength = _np_to_jnp(packed_filters.effective_wavelength)
-    valid_mask = _bool_to_jnp(packed_filters.valid_mask)
+    interp_indices = packed_filters.interp_indices
+    interp_weight = packed_filters.interp_weight
+    transmission = packed_filters.transmission
+    work_wave = packed_filters.work_wave
+    effective_wavelength = packed_filters.effective_wavelength
+    valid_mask = packed_filters.valid_mask
 
     left = obs_flux[interp_indices]
     right = obs_flux[interp_indices + 1]
@@ -360,13 +351,13 @@ def _lnu_lsun_per_hz_to_llambda_w_per_a(wave_a, lnu_lsun_per_hz):
     return lnu_w_per_hz * C_MS / (wave_m * wave_m) * 1.0e-10
 
 
-def _build_diffstar_host(context: ModelContext, prior_config: dict[str, Any]):
+def _build_diffstar_host(context: ModelContext, prior_config: dict[str, Any], *, full_output: bool = True):
     """Build the host-galaxy SED from Diffstar SFH and a precomputed SSP basis."""
-    ssp_lgmet = _np_to_jnp(context.ssp_data.ssp_lgmet)
-    ssp_lg_age_gyr = _np_to_jnp(context.ssp_data.ssp_lg_age_gyr)
-    host_basis_rest = _np_to_jnp(context.host_basis.rest_llambda)
-    surviving_frac_by_age = _np_to_jnp(context.host_basis.surviving_frac_by_age)
-    gal_t_table = _np_to_jnp(context.gal_t_table)
+    ssp_lgmet = context.host_basis_jax.ssp_lgmet
+    ssp_lg_age_gyr = context.host_basis_jax.ssp_lg_age_gyr
+    host_basis_rest = context.host_basis_jax.rest_llambda
+    surviving_frac_by_age = context.host_basis_jax.surviving_frac_by_age
+    gal_t_table = context.host_basis_jax.gal_t_table
     t_obs_gyr = jnp.asarray(context.t_obs_gyr, dtype=jnp.float64)
 
     log_stellar_mass = _sample_log_stellar_mass(prior_config)
@@ -395,28 +386,36 @@ def _build_diffstar_host(context: ModelContext, prior_config: dict[str, Any]):
     target_formed_mass = target_surviving_mass / surviving_mass_fraction
     base_formed_mass = jnp.clip(base_history.smh[-1], 1e-30, 1.0e40)
     sfh_scale = target_formed_mass / base_formed_mass
-    scaled_sfh = base_history.sfh * sfh_scale
-    scaled_smh = base_history.smh * sfh_scale
-    host_rest = target_formed_mass * jnp.sum(
-        host_basis_rest * host_weights.reshape((*host_weights.shape, 1)),
-        axis=(0, 1),
+    host_rest = target_formed_mass * jnp.tensordot(
+        host_weights,
+        host_basis_rest,
+        axes=((0, 1), (0, 1)),
     )
-    return {
+    state = {
         "host_rest": host_rest,
         "log_stellar_mass": log_stellar_mass,
-        "host_age_weights": host_weights_info.age_weights,
-        "host_lgmet_weights": host_weights_info.lgmet_weights,
-        "host_ssp_weights": host_weights,
         "surviving_mass_fraction": surviving_mass_fraction,
         "formed_mass": target_formed_mass,
         "sfh_scale": sfh_scale,
         "gal_lgmet": gal_lgmet,
         "gal_lgmet_scatter": gal_lgmet_scatter,
-        "gal_sfr_table": scaled_sfh,
-        "gal_smh_table": scaled_smh,
-        "ssp_lg_age_gyr": ssp_lg_age_gyr,
-        "ssp_lgmet": ssp_lgmet,
     }
+    if not full_output:
+        return state
+    scaled_sfh = base_history.sfh * sfh_scale
+    scaled_smh = base_history.smh * sfh_scale
+    state.update(
+        {
+            "host_age_weights": host_weights_info.age_weights,
+            "host_lgmet_weights": host_weights_info.lgmet_weights,
+            "host_ssp_weights": host_weights,
+            "gal_sfr_table": scaled_sfh,
+            "gal_smh_table": scaled_smh,
+            "ssp_lg_age_gyr": ssp_lg_age_gyr,
+            "ssp_lgmet": ssp_lgmet,
+        }
+    )
+    return state
 
 
 def _empty_host_state(context: ModelContext):
@@ -595,7 +594,7 @@ def grahsp_photometric_model(context: ModelContext, include_components: bool = F
         and cfg.likelihood.use_host_capture_model
         and np.any(np.isfinite(context.effective_spatial_scale_arcsec) & (np.asarray(context.effective_spatial_scale_arcsec, dtype=float) > 0.0))
     )
-    host_state = _build_diffstar_host(context, prior_config) if fit_host else _empty_host_state(context)
+    host_state = _build_diffstar_host(context, prior_config, full_output=include_components) if fit_host else _empty_host_state(context)
     host_rest = host_state["host_rest"]
     if fit_host:
         gal_v_kms = numpyro.sample("gal_v_kms", dist.Normal(*_cfg_norm(prior_config, "gal_v_kms", 0.0, 150.0)))
@@ -793,13 +792,12 @@ def grahsp_photometric_model(context: ModelContext, include_components: bool = F
     )
     total_rest = gal_att_rest + dust_rest + agn_att_rest
     agn_rest = agn_att_rest
-    igm = _igm_transmission(rest_wave, redshift)
+    igm = _igm_transmission(context.igm_cache_jax, redshift)
+    transmitted_fraction = jnp.clip(total_rest / jnp.maximum(host_rest + disk_rest + torus_rest + feii_rest + line_rest + balmer_rest, 1e-30), 1e-4, 1.0)
     total_obs = _redshift_to_obs(rest_wave, total_rest * igm, obs_wave, redshift, luminosity_distance_m)
     host_obs = _redshift_to_obs(rest_wave, gal_att_rest * igm, obs_wave, redshift, luminosity_distance_m)
-    transmitted_fraction = jnp.clip(total_rest / jnp.maximum(host_rest + disk_rest + torus_rest + feii_rest + line_rest + balmer_rest, 1e-30), 1e-4, 1.0)
-
-    pred_fluxes_raw = _project_filters(total_obs, context.packed_filters)
-    host_fluxes_total = _project_filters(host_obs, context.packed_filters)
+    pred_fluxes_raw = _project_filters(total_obs, context.packed_filters_jax)
+    host_fluxes_total = _project_filters(host_obs, context.packed_filters_jax)
     if host_capture_enabled:
         log_host_capture_scale_arcsec = numpyro.sample(
             "log_host_capture_scale_arcsec",
@@ -834,26 +832,26 @@ def grahsp_photometric_model(context: ModelContext, include_components: bool = F
         line_liner_obs = _redshift_to_obs(rest_wave, line_liner_rest * igm, obs_wave, redshift, luminosity_distance_m)
         balmer_obs = _redshift_to_obs(rest_wave, balmer_rest * igm, obs_wave, redshift, luminosity_distance_m)
         transmitted_fraction_obs = _redshift_scalar_to_obs(rest_wave, transmitted_fraction, obs_wave, redshift)
-        agn_fluxes = _project_filters(agn_obs, context.packed_filters)
-        dust_fluxes = _project_filters(dust_obs, context.packed_filters)
-        disk_fluxes = _project_filters(disk_obs, context.packed_filters)
-        torus_fluxes = _project_filters(torus_obs, context.packed_filters)
-        feii_fluxes = _project_filters(feii_obs, context.packed_filters)
-        line_fluxes = _project_filters(line_obs, context.packed_filters)
-        line_bl_fluxes = _project_filters(line_bl_obs, context.packed_filters)
-        line_nl_fluxes = _project_filters(line_nl_obs, context.packed_filters)
-        line_liner_fluxes = _project_filters(line_liner_obs, context.packed_filters)
-        balmer_fluxes = _project_filters(balmer_obs, context.packed_filters)
-        trans_fluxes = _project_filters(transmitted_fraction_obs, context.packed_filters)
+        agn_fluxes = _project_filters(agn_obs, context.packed_filters_jax)
+        dust_fluxes = _project_filters(dust_obs, context.packed_filters_jax)
+        disk_fluxes = _project_filters(disk_obs, context.packed_filters_jax)
+        torus_fluxes = _project_filters(torus_obs, context.packed_filters_jax)
+        feii_fluxes = _project_filters(feii_obs, context.packed_filters_jax)
+        line_fluxes = _project_filters(line_obs, context.packed_filters_jax)
+        line_bl_fluxes = _project_filters(line_bl_obs, context.packed_filters_jax)
+        line_nl_fluxes = _project_filters(line_nl_obs, context.packed_filters_jax)
+        line_liner_fluxes = _project_filters(line_liner_obs, context.packed_filters_jax)
+        balmer_fluxes = _project_filters(balmer_obs, context.packed_filters_jax)
+        trans_fluxes = _project_filters(transmitted_fraction_obs, context.packed_filters_jax)
     else:
         if need_agn_fluxes:
             agn_obs = _redshift_to_obs(rest_wave, agn_rest * igm, obs_wave, redshift, luminosity_distance_m)
-            agn_fluxes = _project_filters(agn_obs, context.packed_filters)
+            agn_fluxes = _project_filters(agn_obs, context.packed_filters_jax)
         else:
             agn_fluxes = jnp.zeros_like(pred_fluxes)
         if need_trans_fluxes:
             transmitted_fraction_obs = _redshift_scalar_to_obs(rest_wave, transmitted_fraction, obs_wave, redshift)
-            trans_fluxes = _project_filters(transmitted_fraction_obs, context.packed_filters)
+            trans_fluxes = _project_filters(transmitted_fraction_obs, context.packed_filters_jax)
         else:
             trans_fluxes = jnp.ones_like(pred_fluxes)
 
@@ -898,11 +896,6 @@ def grahsp_photometric_model(context: ModelContext, include_components: bool = F
     numpyro.deterministic("host_capture_fraction_fluxes", host_capture_fraction)
     numpyro.deterministic("log_host_capture_scale_arcsec_fit", log_host_capture_scale_arcsec)
     numpyro.deterministic("host_capture_slope_fit", host_capture_slope)
-    numpyro.deterministic("host_age_weights", host_state["host_age_weights"])
-    numpyro.deterministic("host_lgmet_weights", host_state["host_lgmet_weights"])
-    numpyro.deterministic("host_ssp_weights", host_state["host_ssp_weights"])
-    numpyro.deterministic("gal_sfr_table", host_state["gal_sfr_table"])
-    numpyro.deterministic("gal_smh_table", host_state["gal_smh_table"])
     numpyro.deterministic("formed_stellar_mass", host_state["formed_mass"])
     numpyro.deterministic("surviving_mass_fraction", host_state["surviving_mass_fraction"])
     numpyro.deterministic("gal_lgmet_fit", host_state["gal_lgmet"])
@@ -913,20 +906,25 @@ def grahsp_photometric_model(context: ModelContext, include_components: bool = F
     numpyro.deterministic("rest_wave", rest_wave)
     numpyro.deterministic("obs_wave", obs_wave)
     numpyro.deterministic("redshift_fit", redshift)
-    numpyro.deterministic("total_rest_sed", total_rest)
-    numpyro.deterministic("agn_rest_sed", agn_rest)
-    numpyro.deterministic("host_rest_sed", gal_att_rest)
-    numpyro.deterministic("host_absorbed_rest_sed", host_absorbed_rest)
-    numpyro.deterministic("dust_rest_sed", dust_rest)
-    numpyro.deterministic("disk_rest_sed", disk_rest)
-    numpyro.deterministic("torus_rest_sed", torus_rest)
-    numpyro.deterministic("feii_rest_sed", feii_rest)
-    numpyro.deterministic("line_rest_sed", line_rest)
-    numpyro.deterministic("line_bl_rest_sed", line_bl_rest)
-    numpyro.deterministic("line_nl_rest_sed", line_nl_rest)
-    numpyro.deterministic("line_liner_rest_sed", line_liner_rest)
-    numpyro.deterministic("balmer_rest_sed", balmer_rest)
     if include_components:
+        numpyro.deterministic("host_age_weights", host_state["host_age_weights"])
+        numpyro.deterministic("host_lgmet_weights", host_state["host_lgmet_weights"])
+        numpyro.deterministic("host_ssp_weights", host_state["host_ssp_weights"])
+        numpyro.deterministic("gal_sfr_table", host_state["gal_sfr_table"])
+        numpyro.deterministic("gal_smh_table", host_state["gal_smh_table"])
+        numpyro.deterministic("total_rest_sed", total_rest)
+        numpyro.deterministic("agn_rest_sed", agn_rest)
+        numpyro.deterministic("host_rest_sed", gal_att_rest)
+        numpyro.deterministic("host_absorbed_rest_sed", host_absorbed_rest)
+        numpyro.deterministic("dust_rest_sed", dust_rest)
+        numpyro.deterministic("disk_rest_sed", disk_rest)
+        numpyro.deterministic("torus_rest_sed", torus_rest)
+        numpyro.deterministic("feii_rest_sed", feii_rest)
+        numpyro.deterministic("line_rest_sed", line_rest)
+        numpyro.deterministic("line_bl_rest_sed", line_bl_rest)
+        numpyro.deterministic("line_nl_rest_sed", line_nl_rest)
+        numpyro.deterministic("line_liner_rest_sed", line_liner_rest)
+        numpyro.deterministic("balmer_rest_sed", balmer_rest)
         numpyro.deterministic("agn_fluxes", agn_fluxes)
         numpyro.deterministic("host_fluxes", host_fluxes)
         numpyro.deterministic("dust_fluxes", dust_fluxes)
