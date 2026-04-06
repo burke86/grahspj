@@ -119,6 +119,13 @@ def _sample_log_stellar_mass(prior_config: dict[str, Any]):
         loc = jnp.asarray(cfg.get("loc", 10.0))
         scale = jnp.asarray(cfg.get("scale", 2.0))
         dist_name = str(cfg.get("dist", "student_t")).lower()
+        if dist_name in {"uniform", "flat"}:
+            low = jnp.asarray(cfg.get("low", 6.0))
+            high = jnp.asarray(cfg.get("high", 12.0))
+            lo = jnp.minimum(low, high)
+            hi = jnp.maximum(low, high)
+            hi = jnp.maximum(hi, lo + 1.0e-6)
+            return numpyro.sample("log_stellar_mass", dist.Uniform(lo, hi))
         if dist_name in {"student_t", "studentt", "t"}:
             df = jnp.asarray(cfg.get("df", 5.0))
             return numpyro.sample("log_stellar_mass", dist.StudentT(df=df, loc=loc, scale=scale))
@@ -138,7 +145,9 @@ def _mass_metallicity_relation_logprior(
 ):
     """Return an optional soft stellar mass-metallicity log-prior."""
     cfg = prior_config.get("mass_metallicity_relation", None)
-    if not isinstance(cfg, dict) or not bool(cfg.get("enabled", False)):
+    if cfg is None:
+        cfg = {}
+    if not isinstance(cfg, dict) or cfg.get("enabled", True) is False:
         return jnp.asarray(0.0, dtype=jnp.float64)
 
     pivot_mass = jnp.asarray(cfg.get("pivot_mass", 10.0), dtype=jnp.float64)
