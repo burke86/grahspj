@@ -136,6 +136,15 @@ class ModelContext:
     packed_filters_jax: PackedFiltersJax
     igm_cache_jax: IGMCacheJax
     templates: LoadedTemplates
+    rest_wave_jax: jnp.ndarray
+    obs_wave_jax: jnp.ndarray
+    filter_effective_wavelength_jax: jnp.ndarray
+    feii_template_on_rest_jax: jnp.ndarray
+    dust_alpha_grid_jax: jnp.ndarray
+    dust_lumin_rest_jax: jnp.ndarray
+    fixed_redshift_jax: jnp.ndarray | None
+    fixed_luminosity_distance_m_jax: jnp.ndarray | None
+    fixed_igm_jax: jnp.ndarray | None
     fluxes: np.ndarray
     errors: np.ndarray
     upper_limits: np.ndarray
@@ -151,6 +160,7 @@ _FILTER_RESPONSE_CACHE: dict[tuple[Any, ...], list[Any]] = {}
 _TEMPLATE_CACHE: dict[tuple[Any, ...], LoadedTemplates] = {}
 _DALE2014_CACHE: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
 _HOST_BASIS_CACHE: dict[tuple[str, float, float, int], HostBasis] = {}
+_REST_TEMPLATE_CACHE: dict[tuple[Any, ...], tuple[np.ndarray, np.ndarray]] = {}
 _DEFAULT_SPECLITE_NAME_MAP = {
     "u_sdss": "sdss2010-u",
     "g_sdss": "sdss2010-g",
@@ -633,6 +643,57 @@ def _build_igm_cache_jax(rest_wave: np.ndarray) -> IGMCacheJax:
         coeff=coeff,
     )
 
+
+def _build_fixed_igm_jax(igm_cache: IGMCacheJax, redshift: float) -> jnp.ndarray:
+    """Evaluate the IGM transmission once for fixed-redshift contexts."""
+    n_transitions_low = 10
+    gamma = 0.2788
+    n0 = 0.25
+    lambda_limit = 91.2
+    wavelength = igm_cache.wavelength
+    z_n2 = igm_cache.z_n2
+    z_eval = igm_cache.z_eval
+    z_n9 = igm_cache.z_n9
+    z_l = igm_cache.z_l
+    wl_ratio = igm_cache.wl_ratio
+    fact = igm_cache.fact
+    fact_eval = igm_cache.fact_eval
+    n_eval = igm_cache.n_eval
+    z = jnp.asarray(redshift, dtype=jnp.float64)
+    tau_a = jnp.where(z <= 4, 0.00211 * (1.0 + z) ** 3.7, 0.00058 * (1.0 + z) ** 4.5)
+    tau2 = jnp.where(z <= 4, 0.00211 * (1.0 + z_n2) ** 3.7, 0.00058 * (1.0 + z_n2) ** 4.5)
+    tau2 = jnp.where(z_n2 >= z, 0.0, tau2)
+    val_le5 = jnp.where(
+        z_eval < 3.0,
+        tau_a * fact_eval[:, None] * (0.25 * (1.0 + z_eval)) ** (1.0 / 3.0),
+        tau_a * fact_eval[:, None] * (0.25 * (1.0 + z_eval)) ** (1.0 / 6.0),
+    )
+    val_6_9 = tau_a * fact_eval[:, None] * (0.25 * (1.0 + z_eval)) ** (1.0 / 3.0)
+    tau9 = tau_a * fact[9] * (0.25 * (1.0 + z_n9)) ** (1.0 / 3.0)
+    val_gt9 = tau9[None, :] * igm_cache.val_gt9_coeff[:, None]
+    val_eval = jnp.where(
+        n_eval[:, None] <= 5.0,
+        val_le5,
+        jnp.where(n_eval[:, None] <= 9.0, val_6_9, val_gt9),
+    )
+    tau_taun = tau2 + jnp.sum(jnp.where(z_eval >= z, 0.0, val_eval), axis=0)
+    w = z_l < z
+    tau_l_igm = jnp.where(w, 0.805 * (1.0 + z_l) ** 3 * (1.0 / (1.0 + z_l) - 1.0 / (1.0 + z)), 0.0)
+    term1 = gamma - jnp.exp(-1.0)
+    term2 = igm_cache.term2
+    term3 = (1.0 + z) * wl_ratio ** 1.5 - wl_ratio ** 2.5
+    ni = jnp.arange(1, n_transitions_low, dtype=jnp.float64)
+    coeff = igm_cache.coeff
+    term4_terms = coeff[:, None] * (
+        (1.0 + z) ** (2.5 - (3.0 * ni[:, None])) * wl_ratio[None, :] ** (3.0 * ni[:, None])
+        - wl_ratio[None, :] ** 2.5
+    )
+    term4 = jnp.sum(term4_terms, axis=0)
+    tau_l_lls = jnp.where(w, n0 * ((term1 - term2) * term3 - term4), 0.0)
+    lambda_min_igm = (1.0 + z) * 70.0
+    weight = jnp.where(wavelength < lambda_min_igm, (wavelength / lambda_min_igm) ** 2, 1.0)
+    return jnp.exp(-tau_taun - tau_l_igm - tau_l_lls) * weight
+
 def _build_host_basis(rest_wave: np.ndarray, ssp_data: SSPData) -> HostBasis:
     """Precompute the SSP basis on the model rest-wave grid."""
     cache_key = (
@@ -683,6 +744,29 @@ def _build_host_basis_jax(ssp_data: SSPData, host_basis: HostBasis, gal_t_table:
     )
 
 
+def _build_rest_template_cache(rest_wave: np.ndarray, templates: LoadedTemplates) -> tuple[np.ndarray, np.ndarray]:
+    """Interpolate static templates onto the model rest-wave grid once per context."""
+    cache_key = (
+        id(templates.feii_wave),
+        id(templates.feii_lumin),
+        id(templates.dust_wave),
+        id(templates.dust_lumin),
+        float(rest_wave[0]),
+        float(rest_wave[-1]),
+        int(rest_wave.size),
+    )
+    cached = _REST_TEMPLATE_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+    feii_template_on_rest = np.interp(rest_wave, templates.feii_wave, np.clip(templates.feii_lumin, 0.0, None), left=0.0, right=0.0)
+    dust_lumin_rest = np.empty((templates.dust_lumin.shape[0], rest_wave.size), dtype=float)
+    for i in range(templates.dust_lumin.shape[0]):
+        dust_lumin_rest[i] = np.interp(rest_wave, templates.dust_wave, templates.dust_lumin[i], left=0.0, right=0.0)
+    loaded = (feii_template_on_rest.astype(float), dust_lumin_rest.astype(float))
+    _REST_TEMPLATE_CACHE[cache_key] = loaded
+    return loaded
+
+
 def build_model_context(cfg: FitConfig) -> ModelContext:
     """Construct the static context consumed by the grahspj NumPyro model."""
     cfg.validate()
@@ -730,6 +814,21 @@ def build_model_context(cfg: FitConfig) -> ModelContext:
     packed_filters_jax = _pack_loaded_filters_jax(packed_filters)
     igm_cache_jax = _build_igm_cache_jax(rest_wave)
     templates = _load_templates(cfg)
+    feii_template_on_rest, dust_lumin_rest = _build_rest_template_cache(rest_wave, templates)
+    rest_wave_jax = jnp.asarray(rest_wave, dtype=jnp.float64)
+    obs_wave_jax = jnp.asarray(obs_wave, dtype=jnp.float64)
+    filter_effective_wavelength_jax = jnp.asarray(np.array([f.effective_wavelength for f in loaded_filters], dtype=float), dtype=jnp.float64)
+    dust_alpha_grid_jax = jnp.asarray(templates.dust_alpha_grid, dtype=jnp.float64)
+    feii_template_on_rest_jax = jnp.asarray(feii_template_on_rest, dtype=jnp.float64)
+    dust_lumin_rest_jax = jnp.asarray(dust_lumin_rest, dtype=jnp.float64)
+    if cfg.observation.fit_redshift:
+        fixed_redshift_jax = None
+        fixed_luminosity_distance_m_jax = None
+        fixed_igm_jax = None
+    else:
+        fixed_redshift_jax = jnp.asarray(float(cfg.observation.redshift), dtype=jnp.float64)
+        fixed_luminosity_distance_m_jax = jnp.asarray(luminosity_distance_m, dtype=jnp.float64)
+        fixed_igm_jax = _build_fixed_igm_jax(igm_cache_jax, float(cfg.observation.redshift))
 
     mw_ebv = 0.0
     if cfg.observation.apply_mw_deredden and cfg.observation.ra is not None and cfg.observation.dec is not None:
@@ -757,6 +856,15 @@ def build_model_context(cfg: FitConfig) -> ModelContext:
         packed_filters_jax=packed_filters_jax,
         igm_cache_jax=igm_cache_jax,
         templates=templates,
+        rest_wave_jax=rest_wave_jax,
+        obs_wave_jax=obs_wave_jax,
+        filter_effective_wavelength_jax=filter_effective_wavelength_jax,
+        feii_template_on_rest_jax=feii_template_on_rest_jax,
+        dust_alpha_grid_jax=dust_alpha_grid_jax,
+        dust_lumin_rest_jax=dust_lumin_rest_jax,
+        fixed_redshift_jax=fixed_redshift_jax,
+        fixed_luminosity_distance_m_jax=fixed_luminosity_distance_m_jax,
+        fixed_igm_jax=fixed_igm_jax,
         fluxes=fluxes,
         errors=errors,
         upper_limits=upper_limits,

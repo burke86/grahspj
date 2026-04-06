@@ -129,6 +129,33 @@ def _sample_log_stellar_mass(prior_config: dict[str, Any]):
     return numpyro.sample("log_stellar_mass", dist.StudentT(df=5.0, loc=10.0, scale=2.0))
 
 
+def _mass_metallicity_relation_logprior(
+    log_stellar_mass,
+    gal_lgmet,
+    prior_config: dict[str, Any],
+    *,
+    redshift: float = 0.0,
+):
+    """Return an optional soft stellar mass-metallicity log-prior."""
+    cfg = prior_config.get("mass_metallicity_relation", None)
+    if not isinstance(cfg, dict) or not bool(cfg.get("enabled", False)):
+        return jnp.asarray(0.0, dtype=jnp.float64)
+
+    pivot_mass = jnp.asarray(cfg.get("pivot_mass", 10.0), dtype=jnp.float64)
+    pivot_logzsol = jnp.asarray(cfg.get("pivot_logzsol", -0.15), dtype=jnp.float64)
+    slope = jnp.asarray(cfg.get("slope", 0.35), dtype=jnp.float64)
+    scale = jnp.maximum(jnp.asarray(cfg.get("scale", 0.25), dtype=jnp.float64), 1.0e-6)
+    redshift_ref = jnp.asarray(cfg.get("redshift_ref", 0.0), dtype=jnp.float64)
+    redshift_slope = jnp.asarray(cfg.get("redshift_slope", -0.15), dtype=jnp.float64)
+    min_loc = jnp.asarray(cfg.get("min", -1.5), dtype=jnp.float64)
+    max_loc = jnp.asarray(cfg.get("max", 0.3), dtype=jnp.float64)
+
+    loc = pivot_logzsol + slope * (jnp.asarray(log_stellar_mass, dtype=jnp.float64) - pivot_mass)
+    loc = loc + redshift_slope * (jnp.asarray(redshift, dtype=jnp.float64) - redshift_ref)
+    loc = jnp.clip(loc, jnp.minimum(min_loc, max_loc), jnp.maximum(min_loc, max_loc))
+    return dist.Normal(loc, scale).log_prob(jnp.asarray(gal_lgmet, dtype=jnp.float64))
+
+
 def _gaussian_kernel1d(sigma_pix, radius_mult=5.0, max_half=256):
     """Build a normalized 1D Gaussian convolution kernel."""
     sigma_pix = jnp.maximum(sigma_pix, 1e-3)
@@ -195,11 +222,10 @@ def _torus_component(wave, fcov, si, cool_lam, cool_width, hot_lam, hot_width, h
     return torus + si_spec
 
 
-def _feii_component(wave, template_wave, template_flux, norm, fwhm_kms, shift_frac):
+def _feii_component(wave, template_flux_on_wave, norm, fwhm_kms, shift_frac):
     """Broaden, shift, and normalize the Fe II template contribution."""
-    template_on_wave = jnp.interp(wave, template_wave, jnp.maximum(template_flux, 0.0), left=0.0, right=0.0)
     sigma_kms = jnp.maximum(fwhm_kms / (2.0 * jnp.sqrt(2.0 * jnp.log(2.0))), 10.0)
-    return norm * _shift_and_broaden_single_spectrum_lnlam(jnp.log(wave), template_on_wave, C_KMS * shift_frac, sigma_kms)
+    return norm * _shift_and_broaden_single_spectrum_lnlam(jnp.log(wave), jnp.maximum(template_flux_on_wave, 0.0), C_KMS * shift_frac, sigma_kms)
 
 
 def _line_gaussians(wave, line_wave, line_lumin, width_kms):
@@ -336,12 +362,9 @@ def _interp_dale_template(alpha, alpha_grid, dust_lumin_grid):
 
 def _host_dust_emission(context: ModelContext, dust_luminosity, dust_alpha):
     """Convert absorbed host luminosity into a Dale-template dust SED."""
-    dust_wave = _np_to_jnp(context.templates.dust_wave)
-    dust_alpha_grid = _np_to_jnp(context.templates.dust_alpha_grid)
-    dust_lumin_grid = _np_to_jnp(context.templates.dust_lumin)
-    dust_template = _interp_dale_template(dust_alpha, dust_alpha_grid, dust_lumin_grid)
+    dust_template = _interp_dale_template(dust_alpha, context.dust_alpha_grid_jax, context.dust_lumin_rest_jax)
     dust_rest_native = jnp.clip(dust_luminosity, 0.0, None) * jnp.clip(dust_template, 0.0, None)
-    return _interp_rest_sed(_np_to_jnp(context.rest_wave), dust_wave, dust_rest_native)
+    return dust_rest_native
 
 
 def _lnu_lsun_per_hz_to_llambda_w_per_a(wave_a, lnu_lsun_per_hz):
@@ -371,6 +394,13 @@ def _build_diffstar_host(context: ModelContext, prior_config: dict[str, Any], *,
 
     gal_lgmet = numpyro.sample("gal_lgmet", dist.Normal(*_cfg_mean_scale(prior_config, "gal_lgmet", -0.3, 0.5)))
     gal_lgmet_scatter = numpyro.sample("gal_lgmet_scatter", dist.HalfNormal(_cfg_halfnorm(prior_config, "gal_lgmet_scatter", 0.2)))
+    mmr_logprior = _mass_metallicity_relation_logprior(
+        log_stellar_mass,
+        gal_lgmet,
+        prior_config,
+        redshift=float(context.fit_config.observation.redshift),
+    )
+    numpyro.factor("mass_metallicity_relation_prior", mmr_logprior)
     host_weights_info = calc_ssp_weights_sfh_table_lognormal_mdf(
         gal_t_table,
         base_history.sfh,
@@ -399,6 +429,7 @@ def _build_diffstar_host(context: ModelContext, prior_config: dict[str, Any], *,
         "sfh_scale": sfh_scale,
         "gal_lgmet": gal_lgmet,
         "gal_lgmet_scatter": gal_lgmet_scatter,
+        "mass_metallicity_relation_logprior": mmr_logprior,
     }
     if not full_output:
         return state
@@ -435,6 +466,7 @@ def _empty_host_state(context: ModelContext):
         "sfh_scale": jnp.asarray(0.0, dtype=jnp.float64),
         "gal_lgmet": jnp.asarray(0.0, dtype=jnp.float64),
         "gal_lgmet_scatter": jnp.asarray(0.0, dtype=jnp.float64),
+        "mass_metallicity_relation_logprior": jnp.asarray(0.0, dtype=jnp.float64),
         "gal_sfr_table": jnp.zeros_like(gal_t_table),
         "gal_smh_table": jnp.zeros_like(gal_t_table),
         "ssp_lg_age_gyr": ssp_lg_age_gyr,
@@ -571,15 +603,14 @@ def grahsp_photometric_model(context: ModelContext, include_components: bool = F
     """NumPyro model for one grahspj photometric fit or predictive expansion."""
     cfg = context.fit_config
     prior_config = cfg.prior_config
-    rest_wave = _np_to_jnp(context.rest_wave)
-    obs_wave = _np_to_jnp(context.obs_wave)
-    feii_wave = _np_to_jnp(context.templates.feii_wave)
-    feii_lumin = _np_to_jnp(context.templates.feii_lumin)
+    rest_wave = context.rest_wave_jax
+    obs_wave = context.obs_wave_jax
+    feii_template_on_rest = context.feii_template_on_rest_jax
     line_wave = _np_to_jnp(context.templates.line_wave)
     line_blagn = _np_to_jnp(context.templates.line_blagn)
     line_sy2 = _np_to_jnp(context.templates.line_sy2)
     line_liner = _np_to_jnp(context.templates.line_liner)
-    filter_wavelength = _np_to_jnp(np.array([f.effective_wavelength for f in context.filters], dtype=float))
+    filter_wavelength = context.filter_effective_wavelength_jax
     obs_fluxes = _np_to_jnp(context.fluxes)
     obs_errors = _np_to_jnp(context.errors)
     upper_limits = _bool_to_jnp(context.upper_limits)
@@ -698,7 +729,7 @@ def grahsp_photometric_model(context: ModelContext, include_components: bool = F
             feii_fwhm = numpyro.sample("feii_fwhm", dist.LogNormal(*_cfg_norm(prior_config, "log_feii_fwhm", np.log(cfg.agn.line_width_kms_default), 0.3)))
             feii_shift = numpyro.sample("feii_shift", dist.Normal(*_cfg_norm(prior_config, "feii_shift", 0.0, 0.01)))
             l_feii = feii_norm * l_broadlines
-            feii_rest = _feii_component(rest_wave, feii_wave, feii_lumin, l_feii, feii_fwhm, feii_shift)
+            feii_rest = _feii_component(rest_wave, feii_template_on_rest, l_feii, feii_fwhm, feii_shift)
         else:
             feii_norm = jnp.asarray(0.0, dtype=jnp.float64)
             feii_fwhm = jnp.asarray(float(cfg.agn.line_width_kms_default), dtype=jnp.float64)
@@ -767,13 +798,16 @@ def grahsp_photometric_model(context: ModelContext, include_components: bool = F
         intrinsic_scatter = jnp.asarray(float(cfg.likelihood.intrinsic_scatter_default), dtype=jnp.float64)
     if cfg.observation.fit_redshift:
         redshift = _sample_redshift(context, prior_config, cfg)
+        luminosity_distance_m = _luminosity_distance_m_jax(
+            redshift,
+            cfg.galaxy.cosmology_h0,
+            cfg.galaxy.cosmology_om0,
+        )
+        igm = _igm_transmission(context.igm_cache_jax, redshift)
     else:
-        redshift = jnp.asarray(float(cfg.observation.redshift), dtype=jnp.float64)
-    luminosity_distance_m = _luminosity_distance_m_jax(
-        redshift,
-        cfg.galaxy.cosmology_h0,
-        cfg.galaxy.cosmology_om0,
-    )
+        redshift = context.fixed_redshift_jax
+        luminosity_distance_m = context.fixed_luminosity_distance_m_jax
+        igm = context.fixed_igm_jax
     gal_att_rest, agn_att_rest, host_absorbed_rest, dust_luminosity = _apply_biattenuation(
         rest_wave,
         host_rest,
@@ -792,12 +826,15 @@ def grahsp_photometric_model(context: ModelContext, include_components: bool = F
     )
     total_rest = gal_att_rest + dust_rest + agn_att_rest
     agn_rest = agn_att_rest
-    igm = _igm_transmission(context.igm_cache_jax, redshift)
     transmitted_fraction = jnp.clip(total_rest / jnp.maximum(host_rest + disk_rest + torus_rest + feii_rest + line_rest + balmer_rest, 1e-30), 1e-4, 1.0)
     total_obs = _redshift_to_obs(rest_wave, total_rest * igm, obs_wave, redshift, luminosity_distance_m)
-    host_obs = _redshift_to_obs(rest_wave, gal_att_rest * igm, obs_wave, redshift, luminosity_distance_m)
     pred_fluxes_raw = _project_filters(total_obs, context.packed_filters_jax)
-    host_fluxes_total = _project_filters(host_obs, context.packed_filters_jax)
+    if host_capture_enabled or include_components:
+        host_obs = _redshift_to_obs(rest_wave, gal_att_rest * igm, obs_wave, redshift, luminosity_distance_m)
+        host_fluxes_total = _project_filters(host_obs, context.packed_filters_jax)
+    else:
+        host_obs = jnp.zeros_like(total_obs)
+        host_fluxes_total = jnp.zeros_like(pred_fluxes_raw)
     if host_capture_enabled:
         log_host_capture_scale_arcsec = numpyro.sample(
             "log_host_capture_scale_arcsec",
@@ -817,7 +854,7 @@ def grahsp_photometric_model(context: ModelContext, include_components: bool = F
         host_capture_slope = jnp.asarray(2.0, dtype=jnp.float64)
         host_capture_fraction = jnp.ones_like(pred_fluxes_raw)
     host_fluxes = host_fluxes_total * host_capture_fraction
-    pred_fluxes = pred_fluxes_raw - host_fluxes_total + host_fluxes
+    pred_fluxes = pred_fluxes_raw if not host_capture_enabled else pred_fluxes_raw - host_fluxes_total + host_fluxes
     need_agn_fluxes = include_components or cfg.likelihood.variability_uncertainty
     need_trans_fluxes = include_components or cfg.likelihood.attenuation_model_uncertainty
     if include_components:
@@ -900,6 +937,7 @@ def grahsp_photometric_model(context: ModelContext, include_components: bool = F
     numpyro.deterministic("surviving_mass_fraction", host_state["surviving_mass_fraction"])
     numpyro.deterministic("gal_lgmet_fit", host_state["gal_lgmet"])
     numpyro.deterministic("gal_lgmet_scatter_fit", host_state["gal_lgmet_scatter"])
+    numpyro.deterministic("mass_metallicity_relation_logprior", host_state["mass_metallicity_relation_logprior"])
     numpyro.deterministic("log_dust_luminosity_fit", _safe_log10(dust_luminosity))
     numpyro.deterministic("dust_alpha_fit", dust_alpha)
     numpyro.deterministic("absolute_flux_scale_logprior", abs_flux_scale_logprior)

@@ -87,6 +87,13 @@ class _BenchmarkWorkerTask:
     dsps_ssp_fn: str
     base_config: FitConfig | None
     z_edges: np.ndarray
+    fit_method: str
+    optax_steps: int
+    optax_lr: float
+    nuts_warmup: int
+    nuts_samples: int
+    nuts_chains: int
+    target_accept_prob: float
 
 
 def _package_root() -> Path:
@@ -494,13 +501,14 @@ def _run_single_chimera_fit(task: _BenchmarkWorkerTask, fitter_cls=None) -> tupl
     cfg.inference.seed = _stable_row_seed(str(task.row["id"]))
     fitter = fitter_cls(cfg)
     fitter.fit(
-        fit_method=DEFAULT_BENCHMARK_FIT_METHOD,
+        fit_method=task.fit_method,
         progress_bar=False,
-        optax_steps=cfg.inference.map_steps,
-        optax_lr=cfg.inference.learning_rate,
-        nuts_warmup=cfg.inference.num_warmup,
-        nuts_samples=cfg.inference.num_samples,
-        nuts_chains=cfg.inference.num_chains,
+        optax_steps=task.optax_steps,
+        optax_lr=task.optax_lr,
+        nuts_warmup=task.nuts_warmup,
+        nuts_samples=task.nuts_samples,
+        nuts_chains=task.nuts_chains,
+        target_accept_prob=task.target_accept_prob,
     )
     logm_samples = np.asarray(fitter.samples["log_stellar_mass"], dtype=float).reshape(-1)
     logm16, logm50, logm84 = np.percentile(logm_samples, [16.0, 50.0, 84.0])
@@ -634,6 +642,13 @@ def run_chimera_mass_benchmark(
     min_finite_fraction: float = DEFAULT_MIN_FINITE_FRACTION,
     limit: int | None = None,
     num_workers: int | None = None,
+    fit_method: str = DEFAULT_BENCHMARK_FIT_METHOD,
+    optax_steps: int = DEFAULT_BENCHMARK_OPTAX_STEPS,
+    optax_lr: float = DEFAULT_BENCHMARK_OPTAX_LR,
+    nuts_warmup: int = DEFAULT_BENCHMARK_NUTS_WARMUP,
+    nuts_samples: int = DEFAULT_BENCHMARK_NUTS_SAMPLES,
+    nuts_chains: int = DEFAULT_BENCHMARK_NUTS_CHAINS,
+    target_accept_prob: float = 0.85,
 ) -> dict[str, Any]:
     """Run the Chimera stellar-mass recovery benchmark end to end."""
     if fitter_cls is None:
@@ -642,6 +657,16 @@ def run_chimera_mass_benchmark(
         fitter_cls = GRAHSPJ
     print("[benchmark] Preparing Chimera stellar-mass recovery benchmark")
     print(f"[benchmark] Using DSPS SSP file: {Path(dsps_ssp_fn).expanduser()}")
+    print(
+        "[benchmark] Inference settings: "
+        f"fit_method={fit_method}, "
+        f"optax_steps={optax_steps}, "
+        f"optax_lr={optax_lr}, "
+        f"nuts_warmup={nuts_warmup}, "
+        f"nuts_samples={nuts_samples}, "
+        f"nuts_chains={nuts_chains}, "
+        f"target_accept_prob={target_accept_prob}"
+    )
     dataset = load_chimera_benchmark_dataset(root=root)
     rows = select_chimera_subset(dataset, root=root)
     if limit is not None:
@@ -664,11 +689,18 @@ def run_chimera_mass_benchmark(
             dsps_ssp_fn=dsps_ssp_fn,
             base_config=base_config,
             z_edges=z_edges,
+            fit_method=str(fit_method),
+            optax_steps=int(optax_steps),
+            optax_lr=float(optax_lr),
+            nuts_warmup=int(nuts_warmup),
+            nuts_samples=int(nuts_samples),
+            nuts_chains=int(nuts_chains),
+            target_accept_prob=float(target_accept_prob),
         )
         for i, row in enumerate(rows)
     ]
     benchmark_rows: list[dict[str, Any]] = [dict() for _ in tasks]
-    progress = tqdm(total=len(tasks), desc=f"Chimera {DEFAULT_BENCHMARK_FIT_METHOD} fits", unit="obj")
+    progress = tqdm(total=len(tasks), desc=f"Chimera {fit_method} fits", unit="obj")
     if num_workers == 1:
         for task in tasks:
             progress.set_postfix_str(str(task.row["id"]))
@@ -706,7 +738,7 @@ def run_chimera_mass_benchmark(
                 print(f"[benchmark] {task.row['id']} reduced chi2 = {enriched['reduced_chi2']:.3f}")
                 progress.update(1)
     progress.close()
-    print(f"[benchmark] Finished {DEFAULT_BENCHMARK_FIT_METHOD} fitting")
+    print(f"[benchmark] Finished {fit_method} fitting")
 
     fit = np.array([row["log_stellar_mass_fit"] for row in benchmark_rows], dtype=float)
     truth = np.array([row["log_stellar_mass_truth"] for row in benchmark_rows], dtype=float)
@@ -751,6 +783,15 @@ def run_chimera_mass_benchmark(
             "max_abs_weighted_bias": max_abs_weighted_bias,
             "min_finite_fraction": min_finite_fraction,
         },
+        "inference": {
+            "fit_method": str(fit_method),
+            "optax_steps": int(optax_steps),
+            "optax_lr": float(optax_lr),
+            "nuts_warmup": int(nuts_warmup),
+            "nuts_samples": int(nuts_samples),
+            "nuts_chains": int(nuts_chains),
+            "target_accept_prob": float(target_accept_prob),
+        },
     }
     if output_dir is not None:
         outdir = Path(output_dir)
@@ -764,6 +805,7 @@ def run_chimera_mass_benchmark(
                     "by_redshift_bin": by_redshift,
                     "by_chimera_qso_weight": by_qso_weight,
                     "num_workers": num_workers,
+                    "inference": out["inference"],
                     "thresholds": out["thresholds"],
                     "passed": passed,
                 },
@@ -792,6 +834,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--min-finite-fraction", type=float, default=DEFAULT_MIN_FINITE_FRACTION)
     parser.add_argument("--limit", type=int, default=None, help="Optional number of benchmark rows to run from the deterministic subset.")
     parser.add_argument("--num-workers", type=int, default=None, help="Optional number of worker processes for parallel MAP fitting.")
+    parser.add_argument("--fit-method", default=DEFAULT_BENCHMARK_FIT_METHOD, choices=["optax", "nuts", "optax+nuts", "ns"], help="Inference path to use for each benchmark object.")
+    parser.add_argument("--optax-steps", type=int, default=DEFAULT_BENCHMARK_OPTAX_STEPS, help="Optax/MAP optimization steps per object.")
+    parser.add_argument("--optax-lr", type=float, default=DEFAULT_BENCHMARK_OPTAX_LR, help="Optax/MAP learning rate.")
+    parser.add_argument("--nuts-warmup", type=int, default=DEFAULT_BENCHMARK_NUTS_WARMUP, help="NUTS warmup steps per object.")
+    parser.add_argument("--nuts-samples", type=int, default=DEFAULT_BENCHMARK_NUTS_SAMPLES, help="NUTS posterior samples per object.")
+    parser.add_argument("--nuts-chains", type=int, default=DEFAULT_BENCHMARK_NUTS_CHAINS, help="NUTS chains per object.")
+    parser.add_argument("--target-accept-prob", type=float, default=0.85, help="NUTS target acceptance probability.")
     args = parser.parse_args(argv)
 
     result = run_chimera_mass_benchmark(
@@ -803,11 +852,19 @@ def main(argv: list[str] | None = None) -> int:
         min_finite_fraction=args.min_finite_fraction,
         limit=args.limit,
         num_workers=args.num_workers,
+        fit_method=args.fit_method,
+        optax_steps=args.optax_steps,
+        optax_lr=args.optax_lr,
+        nuts_warmup=args.nuts_warmup,
+        nuts_samples=args.nuts_samples,
+        nuts_chains=args.nuts_chains,
+        target_accept_prob=args.target_accept_prob,
     )
     summary = {
         "passed": result["passed"],
         "metrics": result["metrics"],
         "num_workers": result["num_workers"],
+        "inference": result["inference"],
         "thresholds": result["thresholds"],
         "output_dir": str(Path(args.output_dir).resolve()),
     }
