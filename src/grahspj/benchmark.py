@@ -332,33 +332,8 @@ def build_chimera_fit_config(row: dict[str, Any], dsps_ssp_fn: str = "tempdata.h
 
 def _estimate_chimera_prior_config(row: dict[str, Any]) -> dict[str, Any]:
     """Seed a simple prior configuration from one Chimera photometric row."""
-    redshift = float(row["redshift"])
-    nir_fluxes = np.array(
-        [float(row[name]) for name in ("J_2mass", "H_2mass", "Ks_2mass", "IRAC1", "IRAC2")],
-        dtype=float,
-    )
-    nir_fluxes = nir_fluxes[np.isfinite(nir_fluxes) & (nir_fluxes > 0.0)]
-    if nir_fluxes.size == 0:
-        host_flux_mjy = 0.01
-    else:
-        host_flux_mjy = float(np.median(np.clip(nir_fluxes, 1.0e-6, None)))
-
-    target_obs_wave = 5100.0 * (1.0 + redshift)
-    candidate_bands = [
-        name
-        for name in CHIMERA_FILTER_NAMES
-        if np.isfinite(float(row[name])) and float(row[name]) > 0.0
-    ]
-    if not candidate_bands:
-        optical_flux_mjy = 0.01
-    else:
-        nearest_band = min(candidate_bands, key=lambda name: abs(_CHIMERA_EFFECTIVE_WAVELENGTHS_A[name] - target_obs_wave))
-        optical_flux_mjy = float(np.clip(float(row[nearest_band]), 1.0e-6, None))
-    fracagn_loc = float(np.clip(optical_flux_mjy / max(optical_flux_mjy + host_flux_mjy, 1.0e-12), 0.02, 0.95))
-
     return {
         "log_stellar_mass": {"dist": "student_t", "loc": 10.0, "scale": 2.0, "df": 5.0},
-        "fracAGN_5100": {"loc": fracagn_loc, "scale": 0.2},
     }
 
 
@@ -512,14 +487,20 @@ def _run_single_chimera_fit(task: _BenchmarkWorkerTask, fitter_cls=None) -> tupl
     )
     logm_samples = np.asarray(fitter.samples["log_stellar_mass"], dtype=float).reshape(-1)
     logm16, logm50, logm84 = np.percentile(logm_samples, [16.0, 50.0, 84.0])
+    log_fit = float(logm50)
+    reduced_chi2 = _reduced_chi2_for_fit(fitter)
     fracagn_raw = (fitter.samples or {}).get("fracAGN_5100", None)
     if fracagn_raw is None:
-        fracagn50 = float("nan")
+        pred = getattr(fitter, "predictive", None)
+        fracagn_pred = pred.get("fracAGN_5100_fit", None) if isinstance(pred, dict) else None
+        if fracagn_pred is None:
+            fracagn50 = float("nan")
+        else:
+            fracagn_samples = np.asarray(fracagn_pred, dtype=float).reshape(-1)
+            fracagn50 = float(np.percentile(fracagn_samples, 50.0))
     else:
         fracagn_samples = np.asarray(fracagn_raw, dtype=float).reshape(-1)
         fracagn50 = float(np.percentile(fracagn_samples, 50.0))
-    log_fit = float(logm50)
-    reduced_chi2 = _reduced_chi2_for_fit(fitter)
     enriched = dict(task.row)
     enriched["log_stellar_mass_fit"] = log_fit
     enriched["log_stellar_mass_fit_p16"] = float(logm16)

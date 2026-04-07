@@ -50,7 +50,10 @@ class _FakeFitter:
         draws = np.array([self._mass - 0.1, self._mass, self._mass + 0.1], dtype=float)
         self.samples = {"log_stellar_mass": draws}
         pred = np.asarray(self.config.photometry.fluxes, dtype=float) * (1.0 + 0.01 * token)
-        self._predictive = {"pred_fluxes": pred[None, :]}
+        self._predictive = {
+            "pred_fluxes": pred[None, :],
+            "fracAGN_5100_fit": np.array([min(0.99, 0.2 + 0.05 * token)], dtype=float),
+        }
         return {"median": {"log_stellar_mass": self._mass}}
 
     def fit(self, fit_method="optax+nuts", **kwargs):
@@ -98,7 +101,6 @@ def test_build_chimera_fit_config(tmp_path):
     assert "log_stellar_mass" in cfg.prior_config
     assert cfg.prior_config["log_stellar_mass"]["dist"] == "student_t"
     assert cfg.prior_config["log_stellar_mass"]["loc"] == 10.0
-    assert "fracAGN_5100" in cfg.prior_config
 
 
 def test_build_chimera_fit_config_preserves_user_prior_overrides(tmp_path):
@@ -110,7 +112,6 @@ def test_build_chimera_fit_config_preserves_user_prior_overrides(tmp_path):
     base.prior_config["log_stellar_mass"] = {"loc": 9.9, "scale": 0.1}
     cfg = build_chimera_fit_config(row, dsps_ssp_fn=str(ssp_path), base_config=base)
     assert cfg.prior_config["log_stellar_mass"] == {"loc": 9.9, "scale": 0.1}
-    assert "fracAGN_5100" in cfg.prior_config
 
 
 def test_chimera_mass_benchmark_with_surrogate_fitter(tmp_path):

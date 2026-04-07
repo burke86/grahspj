@@ -644,19 +644,10 @@ def grahsp_photometric_model(context: ModelContext, include_components: bool = F
         gal_v_kms = jnp.asarray(0.0, dtype=jnp.float64)
         gal_sigma_kms = jnp.asarray(1.0, dtype=jnp.float64)
 
-    if fit_agn and fit_host:
-        fracagn_5100 = numpyro.sample(
-            "fracAGN_5100",
-            dist.TruncatedNormal(
-                *_cfg_norm(prior_config, "fracAGN_5100", 0.3, 0.25),
-                low=1.0e-4,
-                high=0.999,
-            ),
-        )
-        host_llambda_5100 = jnp.interp(5100.0, rest_wave, host_rest, left=0.0, right=0.0)
-        agn_amp = jnp.clip(host_llambda_5100, 0.0, 1.0e60) * (1.0 / (1.0 - fracagn_5100) - 1.0) * 5100.0
-        log_agn_amp = jnp.log(jnp.clip(agn_amp, 1.0e-30, 1.0e80))
-    elif fit_agn:
+    host_llambda_5100 = jnp.interp(5100.0, rest_wave, host_rest, left=0.0, right=0.0) if fit_host else jnp.asarray(0.0, dtype=jnp.float64)
+    if fit_agn:
+        # Infer the AGN normalization directly from the photometry rather than
+        # forcing the host 5100 A continuum to set the AGN amplitude.
         fracagn_5100 = jnp.asarray(0.999, dtype=jnp.float64)
         log_agn_amp = numpyro.sample(
             "log_agn_amp",
@@ -670,6 +661,13 @@ def grahsp_photometric_model(context: ModelContext, include_components: bool = F
             ),
         )
         agn_amp = jnp.exp(log_agn_amp)
+        if fit_host:
+            agn_llambda_5100 = agn_amp / 5100.0
+            fracagn_5100 = jnp.clip(
+                agn_llambda_5100 / jnp.maximum(agn_llambda_5100 + jnp.clip(host_llambda_5100, 0.0, 1.0e60), 1.0e-30),
+                1.0e-4,
+                0.999,
+            )
     else:
         fracagn_5100 = jnp.asarray(1.0e-4, dtype=jnp.float64)
         agn_amp = jnp.asarray(0.0, dtype=jnp.float64)
@@ -933,6 +931,7 @@ def grahsp_photometric_model(context: ModelContext, include_components: bool = F
 
     numpyro.deterministic("pred_fluxes", pred_fluxes)
     numpyro.deterministic("intrinsic_scatter_fit", intrinsic_scatter)
+    numpyro.deterministic("fracAGN_5100_fit", fracagn_5100)
     numpyro.deterministic("log_agn_amp_fit", log_agn_amp)
     numpyro.deterministic("log_disk_luminosity_fit", _safe_log10(l_agn_lambda_5100))
     numpyro.deterministic("log_agn_bol_luminosity_fit", _safe_log10(agn_bol_luminosity))

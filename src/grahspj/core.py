@@ -124,6 +124,7 @@ class GRAHSPJ:
                 "log_dust_luminosity_fit",
                 "dust_alpha_fit",
                 "intrinsic_scatter_fit",
+                "fracAGN_5100_fit",
                 "log_agn_bol_luminosity_fit",
                 "log_disk_luminosity_fit",
                 "agn_variability_nev",
