@@ -1,1 +1,5 @@
 data/
+__pycache__/
+*.py[cod]
+*.egg-info/
+benchmark_outputs*/
