@@ -264,16 +264,17 @@ def _igm_transmission(igm_cache, redshift):
     n_transitions_low = 10
     gamma = 0.2788
     n0 = 0.25
-    lambda_limit = 91.2
-    wavelength = igm_cache.wavelength
-    z_n2 = igm_cache.z_n2
-    z_eval = igm_cache.z_eval
-    z_n9 = igm_cache.z_n9
-    z_l = igm_cache.z_l
-    wl_ratio = igm_cache.wl_ratio
+    rest_wavelength = igm_cache.wavelength
     fact = igm_cache.fact
     fact_eval = igm_cache.fact_eval
     n_eval = igm_cache.n_eval
+    one_plus_z = 1.0 + redshift
+    obs_wavelength = rest_wavelength * one_plus_z
+    z_n2 = one_plus_z * (igm_cache.z_n2 + 1.0) - 1.0
+    z_eval = one_plus_z * (igm_cache.z_eval + 1.0) - 1.0
+    z_n9 = one_plus_z * (igm_cache.z_n9 + 1.0) - 1.0
+    z_l = one_plus_z * (igm_cache.z_l + 1.0) - 1.0
+    wl_ratio = one_plus_z * igm_cache.wl_ratio
     tau_a = jnp.where(redshift <= 4, 0.00211 * (1.0 + redshift) ** 3.7, 0.00058 * (1.0 + redshift) ** 4.5)
     tau2 = jnp.where(redshift <= 4, 0.00211 * (1.0 + z_n2) ** 3.7, 0.00058 * (1.0 + z_n2) ** 4.5)
     tau2 = jnp.where(z_n2 >= redshift, 0.0, tau2)
@@ -305,7 +306,7 @@ def _igm_transmission(igm_cache, redshift):
     term4 = jnp.sum(term4_terms, axis=0)
     tau_l_lls = jnp.where(w, n0 * ((term1 - term2) * term3 - term4), 0.0)
     lambda_min_igm = (1.0 + redshift) * 70.0
-    weight = jnp.where(wavelength < lambda_min_igm, (wavelength / lambda_min_igm) ** 2, 1.0)
+    weight = jnp.where(obs_wavelength < lambda_min_igm, (obs_wavelength / lambda_min_igm) ** 2, 1.0)
     return jnp.exp(-tau_taun - tau_l_igm - tau_l_lls) * weight
 
 

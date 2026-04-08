@@ -14,7 +14,8 @@ from grahspj.config import (
     Observation,
     PhotometryData,
 )
-from grahspj.preload import build_model_context
+from grahspj.model import _igm_transmission
+from grahspj.preload import _build_fixed_igm_jax, _build_igm_cache_jax, build_model_context
 
 
 def test_likelihood_defaults_include_absolute_flux_scale_prior():
@@ -79,3 +80,25 @@ def test_config_rejects_invalid_redshift_pdf():
     )
     with pytest.raises(ValueError, match="strictly increasing"):
         cfg.validate()
+
+
+def test_igm_transmission_on_rest_grid_is_near_unity_redward_of_lyman_alpha():
+    rest_wave = np.array([150.0, 121.6, 100.0, 91.2, 80.0], dtype=float)
+    cache = _build_igm_cache_jax(rest_wave)
+    transmission = np.asarray(_build_fixed_igm_jax(cache, 1.0), dtype=float)
+
+    assert transmission[0] > 0.99
+    assert transmission[1] > 0.95
+    assert transmission[2] < 1.0
+    assert transmission[3] < transmission[2]
+    assert transmission[4] < transmission[3]
+
+
+def test_dynamic_and_fixed_igm_evaluators_match():
+    rest_wave = np.array([150.0, 121.6, 100.0, 91.2, 80.0], dtype=float)
+    cache = _build_igm_cache_jax(rest_wave)
+
+    fixed = np.asarray(_build_fixed_igm_jax(cache, 2.0), dtype=float)
+    dynamic = np.asarray(_igm_transmission(cache, 2.0), dtype=float)
+
+    assert np.allclose(dynamic, fixed)
