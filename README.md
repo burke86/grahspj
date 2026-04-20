@@ -134,6 +134,45 @@ Bundled third-party resources under [src/grahspj/resources](/Users/colinburke/re
 - If a filter is not available in `speclite` or in the vendored package resources, the optional GRAHSP database fallback is still supported, but it is no longer required for the benchmark/default supported subset
 - Inline curves are also wrapped into `speclite` objects before synthetic photometry is computed
 
+## Survey PSF Sizes In The Likelihood
+
+Broad-band catalogs do not all measure the same physical light profile. A
+GALEX, SDSS, 2MASS, WISE, or IRAC point has a different effective angular
+resolution, and aperture photometry can capture a different fraction of extended
+host-galaxy light than PSF-like photometry. `grahspj` can account for this with
+the optional host-capture likelihood model.
+
+Pass one value per photometric point through `PhotometryData.psf_fwhm_arcsec`.
+If an aperture diameter is known, pass `PhotometryData.aperture_diameter_arcsec`
+as well. During context construction, `grahspj` defines the effective spatial
+scale for each band as:
+
+```python
+effective_scale = aperture_diameter_arcsec if finite else psf_fwhm_arcsec
+```
+
+When `LikelihoodConfig(use_host_capture_model=True)` and host fitting are both
+enabled, the model fits a smooth capture fraction for the host component as a
+function of that effective scale. Internally this is a sigmoid in
+`log(effective_scale)` with two sampled parameters:
+
+- `log_host_capture_scale_arcsec`, the turnover scale, default prior centered near `log(3 arcsec)`
+- `host_capture_slope`, the transition sharpness, default prior centered near `2`
+
+The AGN point-source component is not scaled by this factor. The raw model is
+first projected through each filter; then only the host contribution is adjusted:
+
+```python
+model_flux = total_flux - host_flux + host_capture_fraction * host_flux
+```
+
+The likelihood then compares this PSF-aware model flux to the observed fluxes
+using the usual Student-t photometric likelihood, including measurement errors,
+fractional model systematics, optional intrinsic scatter, and optional AGN
+variability variance. If no finite PSF/aperture sizes are provided, or
+`use_host_capture_model=False`, every band uses `host_capture_fraction = 1` and
+the fit reduces to the standard integrated-flux likelihood.
+
 ## Chimera benchmark
 
 The Chimera benchmark is intended as a regression and calibration tool for this experimental port, not as a finalized scientific validation of full `GRAHSP`/`CIGALE` parity.
