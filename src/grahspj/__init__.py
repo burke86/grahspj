@@ -7,9 +7,12 @@ from .config import (
     FitConfig,
     GalaxyConfig,
     InferenceConfig,
+    JaxQSOFitConfig,
     LikelihoodConfig,
     Observation,
     PhotometryData,
+    SpectroscopyConfig,
+    SpectroscopyData,
 )
 
 __all__ = [
@@ -24,9 +27,12 @@ __all__ = [
     "GalaxyConfig",
     "GRAHSPJ",
     "InferenceConfig",
+    "JaxQSOFitConfig",
     "LikelihoodConfig",
     "Observation",
     "PhotometryData",
+    "SpectroscopyConfig",
+    "SpectroscopyData",
     "plot_fit_sed",
     "style_path",
     "load_chimera_benchmark_dataset",

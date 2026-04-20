@@ -308,6 +308,7 @@ def test_fit_dispatch_methods(monkeypatch):
     assert calls[0][0] == "optax"
     assert calls[0][1]["steps"] == 7
     assert calls[0][1]["progress_bar"] is True
+    assert calls[0][1]["staged"] is True
     assert calls[1][0] == "nuts"
     assert calls[1][1]["num_warmup"] == 3
     assert calls[1][1]["num_samples"] == 4
@@ -315,7 +316,11 @@ def test_fit_dispatch_methods(monkeypatch):
 
     calls.clear()
     GRAHSPJ.fit(fitter, fit_method="optax", progress_bar=False, steps=2)
-    assert calls == [("optax", {"steps": 2, "progress_bar": False})]
+    assert calls == [("optax", {"steps": 2, "progress_bar": False, "staged": True})]
+
+    calls.clear()
+    GRAHSPJ.fit(fitter, fit_method="optax", progress_bar=False, steps=2, staged_map=False)
+    assert calls == [("optax", {"steps": 2, "progress_bar": False, "staged": False})]
 
     calls.clear()
     GRAHSPJ.fit(fitter, fit_method="nuts", progress_bar=False, num_warmup=2)

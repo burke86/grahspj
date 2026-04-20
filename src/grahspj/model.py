@@ -213,7 +213,7 @@ def _powerlaw_jax(wave, norm, lam1, lam2, x0, xbrk, bend_width, cutoff):
 
 def _torus_component(wave, fcov, si, cool_lam, cool_width, hot_lam, hot_width, hot_fcov, si_ratio, si_em_lam, si_abs_lam, si_em_width, si_abs_width, l_agn):
     """Evaluate the empirical torus component on the rest-frame wavelength grid."""
-    log_wave_um = jnp.log10(wave / 1000.0)
+    log_wave_um = jnp.log10(wave / 10000.0)
     log_cool = jnp.log10(cool_lam)
     log_hot = jnp.log10(hot_lam)
     cool = jnp.exp(-((log_wave_um - log_cool) / cool_width) ** 2)
@@ -609,7 +609,74 @@ def photometric_loglike(pred_fluxes, obs_fluxes, obs_errors, upper_limits, data_
     return logl_data + logl_lim + penalty
 
 
-def grahsp_photometric_model(context: ModelContext, include_components: bool = False):
+def spectroscopic_loglike(pred_fluxes, obs_fluxes, obs_errors, mask, systematics_width, student_t_df):
+    """Evaluate the observed-frame spectral log-likelihood."""
+    pred_fluxes = jnp.nan_to_num(pred_fluxes, nan=0.0, posinf=1.0e30, neginf=-1.0e30)
+    obs_fluxes = jnp.nan_to_num(obs_fluxes, nan=0.0, posinf=1.0e30, neginf=-1.0e30)
+    obs_errors = jnp.nan_to_num(obs_errors, nan=1.0e30, posinf=1.0e30, neginf=1.0e30)
+    variance = obs_errors**2 + (jnp.maximum(systematics_width, 0.0) * pred_fluxes) ** 2
+    scale = jnp.sqrt(jnp.clip(variance, 1e-30, 1.0e60))
+    student = dist.StudentT(df=student_t_df, loc=pred_fluxes, scale=scale)
+    valid = mask & jnp.isfinite(pred_fluxes) & jnp.isfinite(obs_fluxes) & jnp.isfinite(scale)
+    penalty = -1.0e6 * jnp.sum((mask & ~valid).astype(jnp.float64))
+    return jnp.sum(jnp.where(valid, student.log_prob(obs_fluxes), 0.0)) + penalty
+
+
+def _flambda_to_mjy(wave_obs, flux_lambda):
+    """Convert internal f_lambda values on an observed wavelength grid to mJy."""
+    return 1.0e-10 / 299792458.0 * 1.0e29 * wave_obs * wave_obs * flux_lambda
+
+
+def _evaluate_jaxqsofit_backend(
+    wave_obs,
+    redshift,
+    continuum_mjy,
+    cfg,
+    line_prior_config,
+    rest_wave,
+    feii_template_flux,
+):
+    """Evaluate optional jaxqsofit spectral components inside grahspj."""
+    try:
+        from jaxqsofit.components import SpectralComponentConfig, evaluate_joint_spectral_components
+    except Exception as exc:  # pragma: no cover - exercised only without optional dependency
+        raise ImportError(
+            "SpectroscopyConfig.backend='jaxqsofit' requires jaxqsofit on PYTHONPATH."
+        ) from exc
+
+    jqf_cfg = cfg.spectroscopy_config.jaxqsofit
+    component_cfg = SpectralComponentConfig(
+        use_lines=bool(jqf_cfg.use_spectral_lines),
+        use_tied_lines=bool(jqf_cfg.use_tied_lines),
+        use_feii=bool(jqf_cfg.use_spectral_feii),
+        use_balmer_continuum=bool(jqf_cfg.use_spectral_balmer_continuum),
+        use_multiplicative_tilt=bool(jqf_cfg.use_multiplicative_tilt),
+        line_table=jqf_cfg.line_table,
+        line_prior_config=line_prior_config,
+        line_flux_scale_mjy=float(jqf_cfg.line_flux_scale_mjy),
+        include_elg_narrow_lines=bool(jqf_cfg.include_elg_narrow_lines),
+        include_high_ionization_lines=bool(jqf_cfg.include_high_ionization_lines),
+        broad_fwhm_kms_default=float(cfg.agn.line_width_kms_default),
+        feii_fwhm_kms_default=float(cfg.agn.line_width_kms_default),
+        balmer_velocity_kms_default=float(cfg.agn.line_width_kms_default),
+    )
+    return evaluate_joint_spectral_components(
+        wave_obs,
+        redshift,
+        continuum_mjy,
+        config=component_cfg,
+        feii_template_wave_rest=rest_wave,
+        feii_template_flux=feii_template_flux,
+        site_prefix="jqf",
+    )
+
+
+def grahsp_photometric_model(
+    context: ModelContext,
+    include_components: bool = False,
+    include_sed_agn_features: bool = True,
+    include_spectral_features: bool = True,
+):
     """NumPyro model for one grahspj photometric fit or predictive expansion."""
     cfg = context.fit_config
     prior_config = cfg.prior_config
@@ -626,14 +693,33 @@ def grahsp_photometric_model(context: ModelContext, include_components: bool = F
     upper_limits = _bool_to_jnp(context.upper_limits)
     data_mask = _bool_to_jnp(context.data_mask)
     positive_detected_mask = _bool_to_jnp(context.positive_detected_mask)
+    spec_wave_obs = _np_to_jnp(context.spec_wave_obs)
+    spec_fluxes = _np_to_jnp(context.spec_fluxes)
+    spec_errors = _np_to_jnp(context.spec_errors)
+    spec_mask = _bool_to_jnp(context.spec_mask)
+    spec_spectrum_index = jnp.asarray(context.spec_spectrum_index, dtype=jnp.int32)
+    spec_spatial_scale_arcsec = _np_to_jnp(context.spec_effective_spatial_scale_arcsec)
     dust_alpha_grid = np.asarray(context.templates.dust_alpha_grid, dtype=float)
     fit_host = bool(cfg.galaxy.fit_host)
     fit_agn = bool(cfg.agn.fit_agn)
     spatial_scale_arcsec = _np_to_jnp(context.effective_spatial_scale_arcsec)
+    spectroscopy_enabled = bool(
+        cfg.spectroscopy is not None
+        and cfg.spectroscopy_config.enabled
+        and len(context.spec_wave_obs) > 0
+        and np.any(context.spec_mask)
+    )
+    has_phot_spatial_scale = bool(
+        np.any(np.isfinite(context.effective_spatial_scale_arcsec) & (np.asarray(context.effective_spatial_scale_arcsec, dtype=float) > 0.0))
+    )
+    has_spec_spatial_scale = bool(
+        spectroscopy_enabled
+        and np.any(np.isfinite(context.spec_effective_spatial_scale_arcsec) & (np.asarray(context.spec_effective_spatial_scale_arcsec, dtype=float) > 0.0))
+    )
     host_capture_enabled = bool(
         fit_host
         and cfg.likelihood.use_host_capture_model
-        and np.any(np.isfinite(context.effective_spatial_scale_arcsec) & (np.asarray(context.effective_spatial_scale_arcsec, dtype=float) > 0.0))
+        and (has_phot_spatial_scale or has_spec_spatial_scale)
     )
     host_state = _build_diffstar_host(context, prior_config, full_output=include_components) if fit_host else _empty_host_state(context)
     host_rest = host_state["host_rest"]
@@ -692,21 +778,28 @@ def grahsp_photometric_model(context: ModelContext, include_components: bool = F
         hot_fcov = numpyro.sample("hot_fcov", dist.LogNormal(*_cfg_norm(prior_config, "log_hot_fcov", np.log(0.1), 0.8)))
         torus_rest = _torus_component(rest_wave, fcov, si, cool_lam, cool_width, hot_lam, hot_width, hot_fcov, 0.29, 9841.0, 14224.0, 1025.3, 1163.5, agn_amp)
 
-        lines_strength = numpyro.sample("lines_strength", dist.LogNormal(*_cfg_norm(prior_config, "log_lines_strength", np.log(max(cfg.agn.lines_strength_default, 1e-3)), 0.5)))
-        line_width = numpyro.sample("line_width_kms", dist.LogNormal(*_cfg_norm(prior_config, "log_line_width_kms", np.log(cfg.agn.line_width_kms_default), 0.4)))
-        balmer_enabled = agn_type == 1 and (
-            cfg.agn.balmer_continuum_default > 0.0
-            or "log_balmer_norm" in prior_config
-            or "balmer_norm" in prior_config
-        )
-        if balmer_enabled:
-            balmer_norm = numpyro.sample(
-                "balmer_norm",
-                dist.LogNormal(*_cfg_norm(prior_config, "log_balmer_norm", np.log(max(cfg.agn.balmer_continuum_default, 1e-3)), 1.0)),
+        if include_sed_agn_features:
+            lines_strength = numpyro.sample("lines_strength", dist.LogNormal(*_cfg_norm(prior_config, "log_lines_strength", np.log(max(cfg.agn.lines_strength_default, 1e-3)), 0.5)))
+            line_width = numpyro.sample("line_width_kms", dist.LogNormal(*_cfg_norm(prior_config, "log_line_width_kms", np.log(cfg.agn.line_width_kms_default), 0.4)))
+            balmer_enabled = agn_type == 1 and (
+                cfg.agn.balmer_continuum_default > 0.0
+                or "log_balmer_norm" in prior_config
+                or "balmer_norm" in prior_config
             )
-            balmer_tau = numpyro.sample("balmer_tau", dist.LogNormal(*_cfg_norm(prior_config, "log_balmer_tau", np.log(1.0), 0.5)))
-            balmer_vel = numpyro.sample("balmer_vel", dist.LogNormal(*_cfg_norm(prior_config, "log_balmer_vel", np.log(cfg.agn.line_width_kms_default), 0.4)))
+            if balmer_enabled:
+                balmer_norm = numpyro.sample(
+                    "balmer_norm",
+                    dist.LogNormal(*_cfg_norm(prior_config, "log_balmer_norm", np.log(max(cfg.agn.balmer_continuum_default, 1e-3)), 1.0)),
+                )
+                balmer_tau = numpyro.sample("balmer_tau", dist.LogNormal(*_cfg_norm(prior_config, "log_balmer_tau", np.log(1.0), 0.5)))
+                balmer_vel = numpyro.sample("balmer_vel", dist.LogNormal(*_cfg_norm(prior_config, "log_balmer_vel", np.log(cfg.agn.line_width_kms_default), 0.4)))
+            else:
+                balmer_norm = jnp.asarray(0.0, dtype=jnp.float64)
+                balmer_tau = jnp.asarray(1.0, dtype=jnp.float64)
+                balmer_vel = jnp.asarray(float(cfg.agn.line_width_kms_default), dtype=jnp.float64)
         else:
+            lines_strength = jnp.asarray(0.0, dtype=jnp.float64)
+            line_width = jnp.asarray(float(cfg.agn.line_width_kms_default), dtype=jnp.float64)
             balmer_norm = jnp.asarray(0.0, dtype=jnp.float64)
             balmer_tau = jnp.asarray(1.0, dtype=jnp.float64)
             balmer_vel = jnp.asarray(float(cfg.agn.line_width_kms_default), dtype=jnp.float64)
@@ -732,7 +825,7 @@ def grahsp_photometric_model(context: ModelContext, include_components: bool = F
         )
         line_rest = line_bl_rest + line_nl_rest + line_liner_rest
 
-        if agn_type == 1:
+        if include_sed_agn_features and agn_type == 1:
             feii_norm = numpyro.sample("feii_norm", dist.LogNormal(*_cfg_norm(prior_config, "log_feii_norm", np.log(max(cfg.agn.feii_strength_default, 1e-3)), 0.8)))
             feii_fwhm = numpyro.sample("feii_fwhm", dist.LogNormal(*_cfg_norm(prior_config, "log_feii_fwhm", np.log(cfg.agn.line_width_kms_default), 0.3)))
             feii_shift = numpyro.sample("feii_shift", dist.Normal(*_cfg_norm(prior_config, "feii_shift", 0.0, 0.01)))
@@ -837,7 +930,7 @@ def grahsp_photometric_model(context: ModelContext, include_components: bool = F
     transmitted_fraction = jnp.clip(total_rest / jnp.maximum(host_rest + disk_rest + torus_rest + feii_rest + line_rest + balmer_rest, 1e-30), 1e-4, 1.0)
     total_obs = _redshift_to_obs(rest_wave, total_rest * igm, obs_wave, redshift, luminosity_distance_m)
     pred_fluxes_raw = _project_filters(total_obs, context.packed_filters_jax)
-    if host_capture_enabled or include_components:
+    if host_capture_enabled or include_components or spectroscopy_enabled:
         host_obs = _redshift_to_obs(rest_wave, gal_att_rest * igm, obs_wave, redshift, luminosity_distance_m)
         host_fluxes_total = _project_filters(host_obs, context.packed_filters_jax)
     else:
@@ -852,17 +945,97 @@ def grahsp_photometric_model(context: ModelContext, include_components: bool = F
             "host_capture_slope",
             dist.LogNormal(*_cfg_norm(prior_config, "log_host_capture_slope", np.log(2.0), 0.5)),
         )
-        host_capture_fraction = _host_capture_fraction(
+        phot_capture_raw = _host_capture_fraction(
             spatial_scale_arcsec,
             jnp.exp(log_host_capture_scale_arcsec),
             host_capture_slope,
         )
+        phot_scale_valid = jnp.isfinite(spatial_scale_arcsec) & (spatial_scale_arcsec > 0.0)
+        host_capture_fraction = jnp.where(phot_scale_valid, phot_capture_raw, 1.0)
+        spec_capture_raw = _host_capture_fraction(
+            spec_spatial_scale_arcsec,
+            jnp.exp(log_host_capture_scale_arcsec),
+            host_capture_slope,
+        )
+        spec_scale_valid = jnp.isfinite(spec_spatial_scale_arcsec) & (spec_spatial_scale_arcsec > 0.0)
+        spec_host_capture_fraction_by_spectrum = jnp.where(spec_scale_valid, spec_capture_raw, 1.0)
     else:
         log_host_capture_scale_arcsec = jnp.asarray(np.log(3.0), dtype=jnp.float64)
         host_capture_slope = jnp.asarray(2.0, dtype=jnp.float64)
         host_capture_fraction = jnp.ones_like(pred_fluxes_raw)
+        spec_host_capture_fraction_by_spectrum = jnp.ones_like(spec_spatial_scale_arcsec)
     host_fluxes = host_fluxes_total * host_capture_fraction
     pred_fluxes = pred_fluxes_raw if not host_capture_enabled else pred_fluxes_raw - host_fluxes_total + host_fluxes
+
+    spec_model_fluxes = jnp.zeros_like(spec_fluxes)
+    spectrum_scale = jnp.asarray(1.0, dtype=jnp.float64)
+    if spectroscopy_enabled:
+        backend = str(cfg.spectroscopy_config.backend).lower()
+        spec_source_obs = total_obs
+        if backend == "jaxqsofit":
+            spec_source_obs = host_obs + _redshift_to_obs(
+                rest_wave,
+                (disk_rest + torus_rest) * igm,
+                obs_wave,
+                redshift,
+                luminosity_distance_m,
+            )
+        elif backend != "grahspj":
+            raise ValueError(f"Unsupported spectroscopy backend: {cfg.spectroscopy_config.backend!r}")
+
+        spec_model_lambda = jnp.interp(spec_wave_obs, obs_wave, spec_source_obs, left=0.0, right=0.0)
+        spec_host_lambda = jnp.interp(spec_wave_obs, obs_wave, host_obs, left=0.0, right=0.0)
+        if host_capture_enabled:
+            spec_capture_at_pixel = spec_host_capture_fraction_by_spectrum[spec_spectrum_index]
+            spec_model_lambda = spec_model_lambda - spec_host_lambda + spec_capture_at_pixel * spec_host_lambda
+        spec_model_fluxes = _flambda_to_mjy(spec_wave_obs, spec_model_lambda)
+        if backend == "jaxqsofit" and include_spectral_features:
+            jqf_components = _evaluate_jaxqsofit_backend(
+                spec_wave_obs,
+                redshift,
+                spec_model_fluxes,
+                cfg,
+                context.jaxqsofit_prior_config,
+                rest_wave,
+                feii_template_on_rest,
+            )
+            spec_model_fluxes = jqf_components["total"]
+        if cfg.spectroscopy_config.fit_scale:
+            scale_loc, scale_width = _cfg_norm(
+                prior_config,
+                "log_spectrum_scale",
+                0.0,
+                np.log(10.0) * cfg.spectroscopy_config.scale_prior_sigma_dex,
+            )
+            n_spectra = len(context.spec_instruments)
+            if n_spectra > 1:
+                log_spectrum_scale = numpyro.sample(
+                    "log_spectrum_scale",
+                    dist.Normal(scale_loc, scale_width).expand([n_spectra]).to_event(1),
+                )
+                spectrum_scale = jnp.exp(log_spectrum_scale)
+                spec_model_fluxes = spectrum_scale[spec_spectrum_index] * spec_model_fluxes
+            else:
+                log_spectrum_scale = numpyro.sample(
+                    "log_spectrum_scale",
+                    dist.Normal(scale_loc, scale_width),
+                )
+                spectrum_scale = jnp.exp(log_spectrum_scale)
+                spec_model_fluxes = spectrum_scale * spec_model_fluxes
+        else:
+            log_spectrum_scale = jnp.asarray(0.0, dtype=jnp.float64)
+        spec_logl = spectroscopic_loglike(
+            spec_model_fluxes,
+            spec_fluxes,
+            spec_errors,
+            spec_mask,
+            cfg.spectroscopy_config.systematics_width,
+            cfg.spectroscopy_config.student_t_df,
+        )
+        numpyro.factor("spectroscopy_loglike_factor", spec_logl)
+    else:
+        log_spectrum_scale = jnp.asarray(0.0, dtype=jnp.float64)
+        spec_logl = jnp.asarray(0.0, dtype=jnp.float64)
     need_agn_fluxes = include_components or cfg.likelihood.variability_uncertainty
     need_trans_fluxes = include_components or cfg.likelihood.attenuation_model_uncertainty
     if include_components:
@@ -931,6 +1104,11 @@ def grahsp_photometric_model(context: ModelContext, include_components: bool = F
         numpyro.factor("absolute_flux_scale_prior", abs_flux_scale_logprior)
 
     numpyro.deterministic("pred_fluxes", pred_fluxes)
+    numpyro.deterministic("pred_spectrum_fluxes", spec_model_fluxes)
+    numpyro.deterministic("spectrum_scale_fit", spectrum_scale)
+    numpyro.deterministic("log_spectrum_scale_fit", log_spectrum_scale)
+    numpyro.deterministic("spectrum_host_capture_fraction", spec_host_capture_fraction_by_spectrum)
+    numpyro.deterministic("spectroscopy_loglike", spec_logl)
     numpyro.deterministic("intrinsic_scatter_fit", intrinsic_scatter)
     numpyro.deterministic("fracAGN_5100_fit", fracagn_5100)
     numpyro.deterministic("log_agn_amp_fit", log_agn_amp)
@@ -952,6 +1130,8 @@ def grahsp_photometric_model(context: ModelContext, include_components: bool = F
     numpyro.deterministic("absolute_flux_scale_logprior", abs_flux_scale_logprior)
     numpyro.deterministic("rest_wave", rest_wave)
     numpyro.deterministic("obs_wave", obs_wave)
+    numpyro.deterministic("spec_wave_obs", spec_wave_obs)
+    numpyro.deterministic("spec_spectrum_index", spec_spectrum_index)
     numpyro.deterministic("redshift_fit", redshift)
     if include_components:
         numpyro.deterministic("host_age_weights", host_state["host_age_weights"])

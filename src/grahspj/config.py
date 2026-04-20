@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence as SequenceABC
 from dataclasses import asdict, dataclass, field, is_dataclass
 from typing import Any, Mapping, Sequence
 
@@ -42,6 +43,27 @@ class PhotometryData:
             raise ValueError("aperture_diameter_arcsec must match filter_names length.")
         if self.photometry_method is not None and len(self.photometry_method) != n:
             raise ValueError("photometry_method must match filter_names length.")
+
+
+@dataclass
+class SpectroscopyData:
+    """Observed spectral measurements on an observed-frame wavelength grid."""
+    wave_obs: Sequence[float]
+    fluxes: Sequence[float]
+    errors: Sequence[float]
+    mask: Sequence[bool] | None = None
+    instrument: str | None = None
+    aperture_diameter_arcsec: float | None = None
+    psf_fwhm_arcsec: float | None = None
+    epoch_mjd: float | None = None
+
+    def validate(self) -> None:
+        """Validate array lengths for one spectrum payload."""
+        n = len(self.wave_obs)
+        if len(self.fluxes) != n or len(self.errors) != n:
+            raise ValueError("Spectroscopy arrays must have the same length as wave_obs.")
+        if self.mask is not None and len(self.mask) != n:
+            raise ValueError("spectroscopy mask must match wave_obs length.")
 
 
 @dataclass
@@ -131,6 +153,39 @@ class LikelihoodConfig:
 
 
 @dataclass
+class JaxQSOFitConfig:
+    """Spectroscopy-only jaxqsofit component configuration.
+
+    These flags affect only the spectroscopic likelihood. Broadband
+    photometry continues to use grahspj's native SED-scale AGN lines,
+    Fe II, and Balmer continuum components.
+    """
+    use_spectral_lines: bool = True
+    use_spectral_feii: bool = False
+    use_spectral_balmer_continuum: bool = False
+    use_tied_lines: bool = True
+    use_spectral_smart_priors: bool = True
+    use_multiplicative_tilt: bool = False
+    line_flux_scale_mjy: float = 1.0
+    include_elg_narrow_lines: bool = False
+    include_high_ionization_lines: bool = False
+    line_table: Sequence[Mapping[str, Any]] | None = None
+    line_prior_config: Mapping[str, Any] | None = None
+
+
+@dataclass
+class SpectroscopyConfig:
+    """Spectroscopic likelihood configuration."""
+    enabled: bool = False
+    backend: str = "grahspj"
+    student_t_df: float = 5.0
+    systematics_width: float = 0.05
+    fit_scale: bool = True
+    scale_prior_sigma_dex: float = 0.5
+    jaxqsofit: JaxQSOFitConfig = field(default_factory=JaxQSOFitConfig)
+
+
+@dataclass
 class InferenceConfig:
     """Inference defaults for MAP optimization and NUTS sampling."""
     learning_rate: float = 5e-3
@@ -151,12 +206,16 @@ class FitConfig:
     galaxy: GalaxyConfig = field(default_factory=GalaxyConfig)
     agn: AGNConfig = field(default_factory=AGNConfig)
     likelihood: LikelihoodConfig = field(default_factory=LikelihoodConfig)
+    spectroscopy: SpectroscopyData | Sequence[SpectroscopyData] | None = None
+    spectroscopy_config: SpectroscopyConfig = field(default_factory=SpectroscopyConfig)
     inference: InferenceConfig = field(default_factory=InferenceConfig)
     prior_config: dict[str, Any] = field(default_factory=dict)
 
     def validate(self) -> None:
         """Validate nested config components that require runtime checks."""
         self.photometry.validate()
+        for spectrum in self.spectroscopy_list:
+            spectrum.validate()
         if not self.galaxy.fit_host and not self.agn.fit_agn:
             raise ValueError("At least one of galaxy.fit_host or agn.fit_agn must be True.")
         redshift_pdf = self.prior_config.get("redshift_pdf")
@@ -183,6 +242,15 @@ class FitConfig:
         """Convert the dataclass tree into a plain Python dictionary."""
         return asdict(self)
 
+    @property
+    def spectroscopy_list(self) -> list[SpectroscopyData]:
+        """Return spectroscopy payloads as a list while preserving legacy single-spectrum input."""
+        if self.spectroscopy is None:
+            return []
+        if isinstance(self.spectroscopy, SpectroscopyData):
+            return [self.spectroscopy]
+        return list(self.spectroscopy)
+
 
 def _coerce_dataclass(cls, value: Any):
     """Convert a mapping or existing instance into the requested dataclass."""
@@ -196,6 +264,58 @@ def _coerce_dataclass(cls, value: Any):
             kwargs[field_name] = value[field_name]
         return cls(**kwargs)
     raise TypeError(f"Cannot coerce {type(value)!r} to {cls.__name__}")
+
+
+def _coerce_jaxqsofit_config(value: Any) -> JaxQSOFitConfig:
+    """Coerce jaxqsofit config and migrate older generic flag names."""
+    if isinstance(value, JaxQSOFitConfig):
+        return value
+    if not isinstance(value, Mapping):
+        return _coerce_dataclass(JaxQSOFitConfig, value)
+    data = dict(value)
+    aliases = {
+        "use_lines": "use_spectral_lines",
+        "use_feii": "use_spectral_feii",
+        "use_balmer_continuum": "use_spectral_balmer_continuum",
+    }
+    for old_name, new_name in aliases.items():
+        if old_name in data and new_name not in data:
+            data[new_name] = data[old_name]
+    return _coerce_dataclass(JaxQSOFitConfig, data)
+
+
+def _coerce_spectroscopy_config(value: Any) -> SpectroscopyConfig:
+    """Coerce spectroscopy config while supporting nested jaxqsofit config."""
+    if isinstance(value, SpectroscopyConfig):
+        return value
+    if not isinstance(value, Mapping):
+        return _coerce_dataclass(SpectroscopyConfig, value)
+    kwargs = {}
+    legacy_jaxqsofit = {}
+    legacy_aliases = {
+        "jaxqsofit_use_lines": "use_spectral_lines",
+        "jaxqsofit_use_feii": "use_spectral_feii",
+        "jaxqsofit_use_balmer_continuum": "use_spectral_balmer_continuum",
+        "jaxqsofit_use_multiplicative_tilt": "use_multiplicative_tilt",
+    }
+    for old_name, new_name in legacy_aliases.items():
+        if old_name in value:
+            legacy_jaxqsofit[new_name] = value[old_name]
+    for field_name in SpectroscopyConfig.__dataclass_fields__:
+        if field_name not in value:
+            continue
+        if field_name == "jaxqsofit":
+            merged_jaxqsofit = dict(legacy_jaxqsofit)
+            if isinstance(value[field_name], Mapping):
+                merged_jaxqsofit.update(value[field_name])
+                kwargs[field_name] = _coerce_jaxqsofit_config(merged_jaxqsofit)
+            else:
+                kwargs[field_name] = _coerce_jaxqsofit_config(value[field_name])
+        else:
+            kwargs[field_name] = value[field_name]
+    if "jaxqsofit" not in kwargs and legacy_jaxqsofit:
+        kwargs["jaxqsofit"] = _coerce_jaxqsofit_config(legacy_jaxqsofit)
+    return SpectroscopyConfig(**kwargs)
 
 
 def fit_config_from_mapping(data: Mapping[str, Any]) -> FitConfig:
@@ -227,6 +347,17 @@ def fit_config_from_mapping(data: Mapping[str, Any]) -> FitConfig:
     else:
         agn_obj = _coerce_dataclass(AGNConfig, agn_raw)
 
+    spectroscopy_raw = data.get("spectroscopy")
+    if spectroscopy_raw is None:
+        spectroscopy_obj = None
+    elif isinstance(spectroscopy_raw, SequenceABC) and not isinstance(spectroscopy_raw, (str, bytes, bytearray, Mapping, SpectroscopyData)):
+        spectroscopy_obj = [
+            _coerce_dataclass(SpectroscopyData, item)
+            for item in spectroscopy_raw
+        ]
+    else:
+        spectroscopy_obj = _coerce_dataclass(SpectroscopyData, spectroscopy_raw)
+
     cfg = FitConfig(
         observation=_coerce_dataclass(Observation, data["observation"]),
         photometry=_coerce_dataclass(PhotometryData, data["photometry"]),
@@ -234,6 +365,8 @@ def fit_config_from_mapping(data: Mapping[str, Any]) -> FitConfig:
         galaxy=_coerce_dataclass(GalaxyConfig, data.get("galaxy", {})),
         agn=agn_obj,
         likelihood=_coerce_dataclass(LikelihoodConfig, data.get("likelihood", {})),
+        spectroscopy=spectroscopy_obj,
+        spectroscopy_config=_coerce_spectroscopy_config(data.get("spectroscopy_config", {})),
         inference=_coerce_dataclass(InferenceConfig, data.get("inference", {})),
         prior_config=dict(data.get("prior_config", {})),
     )

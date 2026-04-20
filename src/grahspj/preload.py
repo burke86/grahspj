@@ -12,7 +12,7 @@ import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 import jax
 import jax.numpy as jnp
@@ -151,6 +151,15 @@ class ModelContext:
     data_mask: np.ndarray
     positive_detected_mask: np.ndarray
     effective_spatial_scale_arcsec: np.ndarray
+    spec_wave_obs: np.ndarray
+    spec_fluxes: np.ndarray
+    spec_errors: np.ndarray
+    spec_mask: np.ndarray
+    spec_spectrum_index: np.ndarray
+    spec_effective_spatial_scale_arcsec: np.ndarray
+    spec_aperture_diameter_arcsec: np.ndarray
+    spec_instruments: tuple[str, ...]
+    jaxqsofit_prior_config: Mapping[str, Any] | None
     mw_ebv: float
 
 
@@ -408,6 +417,36 @@ def _load_filter_responses(cfg: FitConfig):
         responses.append(_curve_to_speclite_filter(_fetch_database_filter_curve(filter_name), group_name="grahsp"))
     _FILTER_RESPONSE_CACHE[cache_key] = responses
     return responses
+
+
+def _build_jaxqsofit_prior_config(cfg: FitConfig, spec_fluxes: np.ndarray, spec_mask: np.ndarray) -> Mapping[str, Any] | None:
+    """Build standard jaxqsofit data-scale priors for the joint spectral backend."""
+    spec_cfg = cfg.spectroscopy_config
+    if str(spec_cfg.backend).lower() != "jaxqsofit":
+        return None
+    jqf_cfg = spec_cfg.jaxqsofit
+    if jqf_cfg.line_prior_config is not None:
+        return dict(jqf_cfg.line_prior_config)
+    if not bool(jqf_cfg.use_spectral_smart_priors):
+        return None
+    try:
+        from jaxqsofit.defaults import build_default_prior_config
+    except Exception as exc:  # pragma: no cover - exercised only without optional dependency
+        raise ImportError(
+            "SpectroscopyConfig.backend='jaxqsofit' with smart priors requires jaxqsofit on PYTHONPATH."
+        ) from exc
+
+    flux = np.asarray(spec_fluxes, dtype=float)
+    mask = np.asarray(spec_mask, dtype=bool)
+    valid = mask & np.isfinite(flux)
+    flux_for_priors = flux[valid]
+    if flux_for_priors.size == 0:
+        flux_for_priors = np.asarray([max(float(jqf_cfg.line_flux_scale_mjy), 1.0e-8)], dtype=float)
+    return build_default_prior_config(
+        flux_for_priors,
+        include_elg_narrow_lines=bool(jqf_cfg.include_elg_narrow_lines),
+        include_high_ionization_lines=bool(jqf_cfg.include_high_ionization_lines),
+    )
 
 
 def _load_templates(cfg: FitConfig) -> LoadedTemplates:
@@ -795,6 +834,81 @@ def build_model_context(cfg: FitConfig) -> ModelContext:
     errors = np.nan_to_num(errors, nan=1.0e30, posinf=1.0e30, neginf=1.0e30)
     errors = np.clip(np.abs(errors), 1.0e-30, 1.0e30)
 
+    spectra = cfg.spectroscopy_list if cfg.spectroscopy_config.enabled else []
+    spec_instruments = tuple(
+        str(spectrum.instrument) if spectrum.instrument is not None else f"spectrum_{i}"
+        for i, spectrum in enumerate(spectra)
+    )
+    spec_aperture_diameter_arcsec = np.asarray(
+        [
+            float(spectrum.aperture_diameter_arcsec)
+            if spectrum.aperture_diameter_arcsec is not None
+            else np.nan
+            for spectrum in spectra
+        ],
+        dtype=float,
+    )
+    spec_psf_fwhm_arcsec = np.asarray(
+        [
+            float(spectrum.psf_fwhm_arcsec)
+            if spectrum.psf_fwhm_arcsec is not None
+            else np.nan
+            for spectrum in spectra
+        ],
+        dtype=float,
+    )
+    spec_effective_spatial_scale_arcsec = np.where(
+        np.isfinite(spec_aperture_diameter_arcsec) & (spec_aperture_diameter_arcsec > 0.0),
+        spec_aperture_diameter_arcsec,
+        spec_psf_fwhm_arcsec,
+    )
+    if spectra:
+        spec_wave_chunks = []
+        spec_flux_chunks = []
+        spec_error_chunks = []
+        spec_mask_chunks = []
+        spec_index_chunks = []
+        for i, spectrum in enumerate(spectra):
+            wave = np.asarray(spectrum.wave_obs, dtype=float)
+            flux = np.asarray(spectrum.fluxes, dtype=float)
+            err = np.asarray(spectrum.errors, dtype=float)
+            mask = np.asarray(
+                spectrum.mask if spectrum.mask is not None else np.ones_like(wave, dtype=bool),
+                dtype=bool,
+            )
+            mask = (
+                mask
+                & np.isfinite(wave)
+                & np.isfinite(flux)
+                & np.isfinite(err)
+                & (wave > 0.0)
+                & (err > 0.0)
+            )
+            order = np.argsort(wave)
+            spec_wave_chunks.append(wave[order])
+            spec_flux_chunks.append(flux[order])
+            spec_error_chunks.append(err[order])
+            spec_mask_chunks.append(mask[order])
+            spec_index_chunks.append(np.full(wave.size, i, dtype=int)[order])
+        spec_wave_obs = np.concatenate(spec_wave_chunks)
+        spec_fluxes = np.concatenate(spec_flux_chunks)
+        spec_errors = np.concatenate(spec_error_chunks)
+        spec_mask = np.concatenate(spec_mask_chunks)
+        spec_spectrum_index = np.concatenate(spec_index_chunks)
+        spec_fluxes = np.nan_to_num(spec_fluxes, nan=0.0, posinf=1.0e30, neginf=-1.0e30)
+        spec_errors = np.nan_to_num(spec_errors, nan=1.0e30, posinf=1.0e30, neginf=1.0e30)
+        spec_errors = np.clip(np.abs(spec_errors), 1.0e-30, 1.0e30)
+    else:
+        spec_wave_obs = np.array([], dtype=float)
+        spec_fluxes = np.array([], dtype=float)
+        spec_errors = np.array([], dtype=float)
+        spec_mask = np.array([], dtype=bool)
+        spec_spectrum_index = np.array([], dtype=int)
+        spec_effective_spatial_scale_arcsec = np.array([], dtype=float)
+        spec_aperture_diameter_arcsec = np.array([], dtype=float)
+        spec_instruments = ()
+    jaxqsofit_prior_config = _build_jaxqsofit_prior_config(cfg, spec_fluxes, spec_mask)
+
     rest_wave = np.geomspace(cfg.galaxy.rest_wave_min, cfg.galaxy.rest_wave_max, cfg.galaxy.n_wave).astype(float)
     obs_wave = rest_wave * (1.0 + max(cfg.observation.redshift, 0.0))
     ssp_data = load_cached_ssp_data(cfg.galaxy.dsps_ssp_fn)
@@ -872,5 +986,14 @@ def build_model_context(cfg: FitConfig) -> ModelContext:
         data_mask=data_mask,
         positive_detected_mask=positive_detected_mask,
         effective_spatial_scale_arcsec=np.asarray(effective_spatial_scale_arcsec, dtype=float),
+        spec_wave_obs=np.asarray(spec_wave_obs, dtype=float),
+        spec_fluxes=np.asarray(spec_fluxes, dtype=float),
+        spec_errors=np.asarray(spec_errors, dtype=float),
+        spec_mask=np.asarray(spec_mask, dtype=bool),
+        spec_spectrum_index=np.asarray(spec_spectrum_index, dtype=int),
+        spec_effective_spatial_scale_arcsec=np.asarray(spec_effective_spatial_scale_arcsec, dtype=float),
+        spec_aperture_diameter_arcsec=np.asarray(spec_aperture_diameter_arcsec, dtype=float),
+        spec_instruments=spec_instruments,
+        jaxqsofit_prior_config=jaxqsofit_prior_config,
         mw_ebv=mw_ebv,
     )
