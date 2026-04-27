@@ -31,8 +31,8 @@ CHIMERA_FILTER_NAMES = (
     "J_2mass",
     "H_2mass",
     "Ks_2mass",
-    "IRAC1",
-    "IRAC2",
+    "spitzer.irac.I1",
+    "spitzer.irac.I2",
 )
 DEFAULT_RANDOM_SEED = 20231011
 DEFAULT_MAX_WEIGHTED_MAE = 3.0
@@ -46,8 +46,12 @@ DEFAULT_BENCHMARK_NUTS_CHAINS = 1
 DEFAULT_BENCHMARK_FIT_METHOD = "optax+nuts"
 _C_LIGHT_ANG_PER_S = 2.99792458e18
 _CHIMERA_FILTER_FILE_MAP = {
-    "IRAC1": "resources/filters/IRAC1.dat",
-    "IRAC2": "resources/filters/IRAC2.dat",
+    "spitzer.irac.I1": "resources/filters/spitzer/irac/I1.dat",
+    "spitzer.irac.I2": "resources/filters/spitzer/irac/I2.dat",
+}
+_CHIMERA_FILTER_COLUMN_MAP = {
+    "spitzer.irac.I1": "IRAC1",
+    "spitzer.irac.I2": "IRAC2",
 }
 _CHIMERA_SPECLITE_NAME_MAP = {
     "u_sdss": "sdss2010-u",
@@ -67,8 +71,8 @@ _CHIMERA_EFFECTIVE_WAVELENGTHS_A = {
     "J_2mass": 12350.0,
     "H_2mass": 16620.0,
     "Ks_2mass": 21590.0,
-    "IRAC1": 35500.0,
-    "IRAC2": 44930.0,
+    "spitzer.irac.I1": 35500.0,
+    "spitzer.irac.I2": 44930.0,
 }
 _C_MS = 2.99792458e8
 
@@ -231,7 +235,8 @@ def load_chimera_benchmark_dataset(root: str | Path | None = None) -> ChimeraBen
     truth_path = data_dir / "chimeras-fullinfo.fits"
     print(f"[benchmark] Loading Chimera photometry from {phot_path}")
     print(f"[benchmark] Loading Chimera truth table from {truth_path}")
-    phot_cols = ["id", "ID_COSMOS", "redshift", "chimera_QSO_weight", "resample_weight", *CHIMERA_FILTER_NAMES, *[f"{name}_err" for name in CHIMERA_FILTER_NAMES]]
+    phot_filter_cols = [_CHIMERA_FILTER_COLUMN_MAP.get(name, name) for name in CHIMERA_FILTER_NAMES]
+    phot_cols = ["id", "ID_COSMOS", "redshift", "chimera_QSO_weight", "resample_weight", *phot_filter_cols, *[f"{name}_err" for name in phot_filter_cols]]
     truth_cols = ["id", "MASS_MED_GAL", "resample_weight", "chimera_QSO_weight", "ID_COSMOS", "redshift"]
     phot = _fits_rows_by_id(phot_path, phot_cols)
     truth = _fits_rows_by_id(truth_path, truth_cols)
@@ -250,8 +255,9 @@ def load_chimera_benchmark_dataset(root: str | Path | None = None) -> ChimeraBen
             "MASS_MED_GAL": float(trow["MASS_MED_GAL"]),
         }
         for name in CHIMERA_FILTER_NAMES:
-            row[name] = float(prow[name])
-            row[f"{name}_err"] = float(prow[f"{name}_err"])
+            column = _CHIMERA_FILTER_COLUMN_MAP.get(name, name)
+            row[name] = float(prow[column])
+            row[f"{name}_err"] = float(prow[f"{column}_err"])
         rows.append(row)
     print(f"[benchmark] Joined {len(rows)} Chimera rows")
     return ChimeraBenchmarkDataset(rows=rows)

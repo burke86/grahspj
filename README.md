@@ -120,7 +120,7 @@ Some model logic and several bundled resource files are derived from or closely 
 See:
 
 - [LICENSES/CeCILL-v2.txt](/Users/colinburke/research/grahspj/LICENSES/CeCILL-v2.txt)
-- [THIRD_PARTY_NOTICES.md](/Users/colinburke/research/grahspj/THIRD_PARTY_NOTICES.md)
+- [LICENSES/THIRD_PARTY_NOTICES.md](/Users/colinburke/research/grahspj/LICENSES/THIRD_PARTY_NOTICES.md)
 
 Bundled third-party resources under [src/grahspj/resources](/Users/colinburke/research/grahspj/src/grahspj/resources) include per-directory provenance notes.
 

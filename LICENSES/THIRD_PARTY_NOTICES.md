@@ -6,7 +6,7 @@ Portions of `grahspj` are derived from or closely based on code and data from `G
 
 - Upstream project: `GRAHSP`
 - Upstream license: `CeCILL v2`
-- Local copy of license text: [LICENSES/CeCILL-v2.txt](/Users/colinburke/research/grahspj/LICENSES/CeCILL-v2.txt)
+- Local copy of license text: [CeCILL-v2.txt](CeCILL-v2.txt)
 
 Relevant upstream source files include, among others:
 
@@ -23,8 +23,8 @@ This repository contains JAX/NumPyro ports and modifications of selected model b
 
 The following bundled resource categories in `src/grahspj/resources/` originate from upstream `GRAHSP` resources or associated template bundles used by `GRAHSP`:
 
-- `resources/filters/IRAC1.dat`
-- `resources/filters/IRAC2.dat`
+- `resources/filters/filter_registry.txt`
+- `resources/filters/*`
 - `resources/templates/Fe_d11-m20-20.5.txt`
 - `resources/templates/emission_line_table.formatted`
 - `resources/templates/dale2014/*`

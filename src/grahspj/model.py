@@ -10,7 +10,7 @@ from __future__ import annotations
 # - pcigale/creation_modules/redshifting.py
 # - pcigale/creation_modules/galdale2014.py
 # Upstream license: CeCILL v2. See LICENSES/CeCILL-v2.txt and
-# THIRD_PARTY_NOTICES.md in the repository root.
+# LICENSES/THIRD_PARTY_NOTICES.md.
 
 from functools import lru_cache
 from typing import Any

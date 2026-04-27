@@ -3,8 +3,8 @@ from __future__ import annotations
 # This module loads vendored resources and model assets used by grahspj.
 # Some of those bundled resources originate from GRAHSP/pcigale template and
 # filter data distributed under the CeCILL v2 license.
-# See LICENSES/CeCILL-v2.txt, THIRD_PARTY_NOTICES.md, and the README files in
-# src/grahspj/resources/ for provenance details.
+# See LICENSES/CeCILL-v2.txt, LICENSES/THIRD_PARTY_NOTICES.md, and the README
+# files in src/grahspj/resources/ for provenance details.
 
 import importlib.util
 from importlib import resources
@@ -211,16 +211,6 @@ def _package_resource_path(relpath: str) -> Path:
 _registry_path = _package_resource_path("resources/filters/filter_registry.txt")
 data = np.loadtxt(_registry_path, dtype=str, comments="#")
 _VENDORED_FILTER_FILES = dict(zip(data[:, 0].tolist(), data[:, 1].tolist()))
-_VENDORED_FILTER_FILES.update(
-    {
-        "IRAC1": "resources/filters/IRAC1.dat",
-        "IRAC2": "resources/filters/IRAC2.dat",
-        "UKIDSSDR11PLUS_Y": "resources/filters/UKIDSSDR11PLUS_Y.dat",
-        "UKIDSSDR11PLUS_J": "resources/filters/UKIDSSDR11PLUS_J.dat",
-        "UKIDSSDR11PLUS_H": "resources/filters/UKIDSSDR11PLUS_H.dat",
-        "UKIDSSDR11PLUS_K": "resources/filters/UKIDSSDR11PLUS_K.dat",
-    }
-)
 
 
 def _load_ssp_templates(dsps_ssp_fn: str):

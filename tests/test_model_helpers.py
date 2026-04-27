@@ -385,10 +385,10 @@ def test_filter_projection_flat_flambda_to_mjy_units():
 
 def test_ukidss_dr11plus_vendored_filters_load_in_angstroms():
     expected_ranges = {
-        "UKIDSSDR11PLUS_Y": (9000.0, 12000.0),
-        "UKIDSSDR11PLUS_J": (11000.0, 14000.0),
-        "UKIDSSDR11PLUS_H": (14000.0, 19000.0),
-        "UKIDSSDR11PLUS_K": (19000.0, 25000.0),
+        "ukirt.wfcam.Y": (9000.0, 12000.0),
+        "ukirt.wfcam.J": (11000.0, 14000.0),
+        "ukirt.wfcam.H": (14000.0, 19000.0),
+        "ukirt.wfcam.K": (19000.0, 25000.0),
     }
     for name, (lo, hi) in expected_ranges.items():
         curve = _load_vendored_filter_curve(name)
