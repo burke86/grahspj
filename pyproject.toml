@@ -42,4 +42,4 @@ include-package-data = true
 where = ["src"]
 
 [tool.setuptools.package-data]
-grahspj = ["resources/filters/*.dat", "resources/nebular/*.npz", "resources/templates/*", "resources/templates/dale2014/*", "resources/styles/*.mplstyle"]
+grahspj = ["resources/filters/filter_registry.txt", "resources/filters/**/*.dat", "resources/filters/*.dat", "resources/nebular/*.npz", "resources/templates/*", "resources/templates/dale2014/*", "resources/styles/*.mplstyle"]
