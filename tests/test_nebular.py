@@ -1,5 +1,6 @@
 import numpy as np
 from numpyro.handlers import seed, trace
+from pathlib import Path
 
 from grahspj.config import (
     AGNConfig,
@@ -15,7 +16,10 @@ from grahspj.config import (
     PhotometryData,
 )
 from grahspj.model import _cigale_nebular_correction, grahsp_photometric_model
-from grahspj.preload import build_model_context
+from grahspj.preload import _load_nebular_templates_jax, build_model_context
+
+
+REFERENCE = Path(__file__).parent / "fixtures" / "cigale_v2025_1_nebular_reference.npz"
 
 
 def _mock_config():
@@ -66,6 +70,58 @@ def test_cigale_nebular_correction_limits():
     assert np.isclose(float(_cigale_nebular_correction(0.0, 0.0)), 1.0)
     assert np.isclose(float(_cigale_nebular_correction(1.0, 0.0)), 0.0)
     assert 0.0 < float(_cigale_nebular_correction(0.2, 0.1)) < 1.0
+
+
+def test_vendored_nebular_resources_are_cigale_v2025_1():
+    with np.load("src/grahspj/resources/nebular/nebular_lines.npz") as lines, np.load(
+        "src/grahspj/resources/nebular/nebular_continuum.npz"
+    ) as cont:
+        assert str(lines["cigale_version"]) == "2025.1"
+        assert str(cont["cigale_version"]) == "2025.1"
+        assert str(lines["cigale_git_tag"]) == "v2025.1"
+        assert str(lines["cigale_git_commit"]) == "29cb909fe2636800b4acdb1dfc7129d8c8494a24"
+        assert np.array_equal(lines["z_grid"], cont["z_grid"])
+        assert np.array_equal(lines["logu_grid"], cont["logu_grid"])
+        assert np.array_equal(lines["ne_grid"], cont["ne_grid"])
+
+
+def test_nebular_resources_match_cigale_v2025_1_static_reference():
+    with np.load(REFERENCE) as ref, np.load("src/grahspj/resources/nebular/nebular_lines.npz") as lines, np.load(
+        "src/grahspj/resources/nebular/nebular_continuum.npz"
+    ) as cont:
+        z_idx = int(np.where(np.isclose(lines["z_grid"], 0.02))[0][0])
+        u_idx = int(np.where(np.isclose(lines["logu_grid"], -2.0))[0][0])
+        ne_idx = int(np.where(np.isclose(lines["ne_grid"], 100.0))[0][0])
+
+        assert str(ref["cigale_version"]) == "2025.1"
+        assert np.array_equal(lines["z_grid"], ref["z_grid"])
+        assert np.array_equal(lines["logu_grid"], ref["logu_grid"])
+        assert np.array_equal(lines["ne_grid"], ref["ne_grid"])
+        assert np.array_equal(lines["line_name"][ref["line_indices"]], ref["line_names"])
+        assert np.allclose(lines["line_wave_a"][ref["line_indices"]], ref["line_wave_a"], rtol=0.0, atol=1.0e-10)
+        assert np.allclose(
+            lines["line_lumin_per_photon"][z_idx, u_idx, ne_idx, ref["line_indices"]],
+            ref["line_lumin_z002_logu_m2_ne100"],
+            rtol=2.0e-7,
+            atol=0.0,
+        )
+        assert np.allclose(cont["continuum_wave_a"][ref["continuum_indices"]], ref["continuum_wave_a"], rtol=0.0, atol=1.0e-10)
+        assert np.allclose(
+            cont["continuum_lumin_per_a_per_photon"][z_idx, u_idx, ne_idx, ref["continuum_indices"]],
+            ref["continuum_lumin_z002_logu_m2_ne100"],
+            rtol=2.0e-7,
+            atol=0.0,
+        )
+
+
+def test_nebular_template_loader_uses_v2025_1_grid():
+    templates = _load_nebular_templates_jax(True)
+
+    assert np.isclose(np.asarray(templates.z_grid), 0.02).any()
+    assert np.isclose(np.asarray(templates.logu_grid), -2.0).any()
+    assert np.isclose(np.asarray(templates.ne_grid), 100.0).any()
+    assert templates.line_lumin_per_photon.shape == (26, 31, 3, 129)
+    assert templates.continuum_lumin_per_a_per_photon.shape == (26, 31, 3, 1600)
 
 
 def test_host_basis_lyman_rates_are_finite(monkeypatch):

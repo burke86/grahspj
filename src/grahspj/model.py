@@ -33,6 +33,11 @@ ERG_PER_WATT = 1.0e7
 AGN_BOLOMETRIC_CORRECTION_5100 = 9.26
 MPC_TO_M = 3.085677581491367e22
 GRAHSP_BIATTENUATION_BREAK_A = 11000.0
+GRAHSP_TORUS_NORM_A = 120000.0
+GRAHSP_SI_EM_LAM_A = 98410.0
+GRAHSP_SI_ABS_LAM_A = 142240.0
+GRAHSP_SI_EM_WIDTH_A = 10253.0
+GRAHSP_SI_ABS_WIDTH_A = 11635.0
 
 
 def _np_to_jnp(x):
@@ -241,12 +246,12 @@ def _torus_component(wave, fcov, si, cool_lam, cool_width, hot_lam, hot_width, h
     cool = jnp.exp(-((log_wave_um - log_cool) / cool_width) ** 2)
     hot = hot_fcov * 10 ** (log_cool - log_hot) * jnp.exp(-((log_wave_um - log_hot) / hot_width) ** 2)
     total = cool + hot
-    norm_index = jnp.argmin(jnp.abs(wave - 12000.0))
+    norm_index = jnp.argmin(jnp.abs(wave - GRAHSP_TORUS_NORM_A))
     l_torus = 2.5 * l_agn * fcov
-    torus = l_torus / 12000.0 * total / jnp.maximum(total[norm_index], 1e-30)
+    torus = l_torus / GRAHSP_TORUS_NORM_A * total / jnp.maximum(total[norm_index], 1e-30)
     si_em_ampl = 0.4
     si_abs_ampl = si_em_ampl * si_ratio
-    si_spec = l_torus / 12000.0 * si * (
+    si_spec = l_torus / GRAHSP_TORUS_NORM_A * si * (
         si_em_ampl * jnp.exp(-0.5 * ((wave - si_em_lam) / si_em_width) ** 2)
         - si_abs_ampl * jnp.exp(-0.5 * ((wave - si_abs_lam) / si_abs_width) ** 2)
     )
@@ -906,7 +911,22 @@ def grahsp_photometric_model(
         hot_lam = numpyro.sample("hot_lam", dist.LogNormal(*_cfg_norm(prior_config, "log_hot_lam", np.log(2.0), 0.3)))
         hot_width = numpyro.sample("hot_width", dist.LogNormal(*_cfg_norm(prior_config, "log_hot_width", np.log(0.5), 0.2)))
         hot_fcov = numpyro.sample("hot_fcov", dist.LogNormal(*_cfg_norm(prior_config, "log_hot_fcov", np.log(0.1), 0.8)))
-        torus_rest = _torus_component(rest_wave, fcov, si, cool_lam, cool_width, hot_lam, hot_width, hot_fcov, 0.29, 9841.0, 14224.0, 1025.3, 1163.5, agn_amp)
+        torus_rest = _torus_component(
+            rest_wave,
+            fcov,
+            si,
+            cool_lam,
+            cool_width,
+            hot_lam,
+            hot_width,
+            hot_fcov,
+            0.29,
+            GRAHSP_SI_EM_LAM_A,
+            GRAHSP_SI_ABS_LAM_A,
+            GRAHSP_SI_EM_WIDTH_A,
+            GRAHSP_SI_ABS_WIDTH_A,
+            agn_amp,
+        )
 
         if include_sed_agn_features:
             lines_strength = numpyro.sample("lines_strength", dist.LogNormal(*_cfg_norm(prior_config, "log_lines_strength", np.log(max(cfg.agn.lines_strength_default, 1e-3)), 0.5)))
@@ -1053,10 +1073,21 @@ def grahsp_photometric_model(
         GRAHSP_BIATTENUATION_BREAK_A,
     )
     dust_luminosity = dust_luminosity + nebular["dust_luminosity"]
-    gal_att_factor = 10 ** (ebv_gal * _attenuation_curve(rest_wave, -1.2, -3.0, 1.2, GRAHSP_BIATTENUATION_BREAK_A) / -2.5)
+    attenuation_curve = _attenuation_curve(rest_wave, -1.2, -3.0, 1.2, GRAHSP_BIATTENUATION_BREAK_A)
+    gal_att_factor = 10 ** (ebv_gal * attenuation_curve / -2.5)
+    agn_att_factor = 10 ** ((ebv_gal + ebv_agn) * attenuation_curve / -2.5)
+    host_stellar_att_rest = (host_rest + nebular["absorption_rest"]) * gal_att_factor
     nebular_att_rest = nebular["emission_rest"] * gal_att_factor
     nebular_lines_att_rest = nebular["lines_rest"] * gal_att_factor
     nebular_continuum_att_rest = nebular["continuum_rest"] * gal_att_factor
+    disk_att_rest = disk_rest * agn_att_factor
+    torus_att_rest = torus_rest * agn_att_factor
+    feii_att_rest = feii_rest * agn_att_factor
+    line_bl_att_rest = line_bl_rest * agn_att_factor
+    line_nl_att_rest = line_nl_rest * agn_att_factor
+    line_liner_att_rest = line_liner_rest * agn_att_factor
+    line_att_rest = line_rest * agn_att_factor
+    balmer_att_rest = balmer_rest * agn_att_factor
     dust_rest = jnp.where(
         cfg.galaxy.use_energy_balance and fit_host,
         _host_dust_emission(context, dust_luminosity, dust_alpha),
@@ -1177,18 +1208,19 @@ def grahsp_photometric_model(
     need_trans_fluxes = include_components or cfg.likelihood.attenuation_model_uncertainty
     if include_components:
         agn_obs = _redshift_to_obs(rest_wave, agn_rest * igm, obs_wave, redshift, luminosity_distance_m)
+        host_stellar_obs = _redshift_to_obs(rest_wave, host_stellar_att_rest * igm, obs_wave, redshift, luminosity_distance_m)
         dust_obs = _redshift_to_obs(rest_wave, dust_rest * igm, obs_wave, redshift, luminosity_distance_m)
         nebular_obs = _redshift_to_obs(rest_wave, nebular_att_rest * igm, obs_wave, redshift, luminosity_distance_m)
         nebular_lines_obs = _redshift_to_obs(rest_wave, nebular_lines_att_rest * igm, obs_wave, redshift, luminosity_distance_m)
         nebular_continuum_obs = _redshift_to_obs(rest_wave, nebular_continuum_att_rest * igm, obs_wave, redshift, luminosity_distance_m)
-        disk_obs = _redshift_to_obs(rest_wave, disk_rest * igm, obs_wave, redshift, luminosity_distance_m)
-        torus_obs = _redshift_to_obs(rest_wave, torus_rest * igm, obs_wave, redshift, luminosity_distance_m)
-        feii_obs = _redshift_to_obs(rest_wave, feii_rest * igm, obs_wave, redshift, luminosity_distance_m)
-        line_obs = _redshift_to_obs(rest_wave, line_rest * igm, obs_wave, redshift, luminosity_distance_m)
-        line_bl_obs = _redshift_to_obs(rest_wave, line_bl_rest * igm, obs_wave, redshift, luminosity_distance_m)
-        line_nl_obs = _redshift_to_obs(rest_wave, line_nl_rest * igm, obs_wave, redshift, luminosity_distance_m)
-        line_liner_obs = _redshift_to_obs(rest_wave, line_liner_rest * igm, obs_wave, redshift, luminosity_distance_m)
-        balmer_obs = _redshift_to_obs(rest_wave, balmer_rest * igm, obs_wave, redshift, luminosity_distance_m)
+        disk_obs = _redshift_to_obs(rest_wave, disk_att_rest * igm, obs_wave, redshift, luminosity_distance_m)
+        torus_obs = _redshift_to_obs(rest_wave, torus_att_rest * igm, obs_wave, redshift, luminosity_distance_m)
+        feii_obs = _redshift_to_obs(rest_wave, feii_att_rest * igm, obs_wave, redshift, luminosity_distance_m)
+        line_obs = _redshift_to_obs(rest_wave, line_att_rest * igm, obs_wave, redshift, luminosity_distance_m)
+        line_bl_obs = _redshift_to_obs(rest_wave, line_bl_att_rest * igm, obs_wave, redshift, luminosity_distance_m)
+        line_nl_obs = _redshift_to_obs(rest_wave, line_nl_att_rest * igm, obs_wave, redshift, luminosity_distance_m)
+        line_liner_obs = _redshift_to_obs(rest_wave, line_liner_att_rest * igm, obs_wave, redshift, luminosity_distance_m)
+        balmer_obs = _redshift_to_obs(rest_wave, balmer_att_rest * igm, obs_wave, redshift, luminosity_distance_m)
         transmitted_fraction_obs = _redshift_scalar_to_obs(rest_wave, transmitted_fraction, obs_wave, redshift)
         agn_fluxes = _project_filters(agn_obs, context.packed_filters_jax)
         dust_fluxes = _project_filters(dust_obs, context.packed_filters_jax)
@@ -1293,21 +1325,22 @@ def grahsp_photometric_model(
         numpyro.deterministic("gal_smh_table", host_state["gal_smh_table"])
         numpyro.deterministic("total_rest_sed", total_rest)
         numpyro.deterministic("agn_rest_sed", agn_rest)
-        numpyro.deterministic("host_rest_sed", gal_att_rest)
+        numpyro.deterministic("host_rest_sed", host_stellar_att_rest)
+        numpyro.deterministic("host_total_rest_sed", gal_att_rest)
         numpyro.deterministic("host_absorbed_rest_sed", host_absorbed_rest)
         numpyro.deterministic("dust_rest_sed", dust_rest)
         numpyro.deterministic("nebular_rest_sed", nebular_att_rest)
         numpyro.deterministic("nebular_lines_rest_sed", nebular_lines_att_rest)
         numpyro.deterministic("nebular_continuum_rest_sed", nebular_continuum_att_rest)
         numpyro.deterministic("nebular_absorption_rest_sed", nebular["absorption_rest"])
-        numpyro.deterministic("disk_rest_sed", disk_rest)
-        numpyro.deterministic("torus_rest_sed", torus_rest)
-        numpyro.deterministic("feii_rest_sed", feii_rest)
-        numpyro.deterministic("line_rest_sed", line_rest)
-        numpyro.deterministic("line_bl_rest_sed", line_bl_rest)
-        numpyro.deterministic("line_nl_rest_sed", line_nl_rest)
-        numpyro.deterministic("line_liner_rest_sed", line_liner_rest)
-        numpyro.deterministic("balmer_rest_sed", balmer_rest)
+        numpyro.deterministic("disk_rest_sed", disk_att_rest)
+        numpyro.deterministic("torus_rest_sed", torus_att_rest)
+        numpyro.deterministic("feii_rest_sed", feii_att_rest)
+        numpyro.deterministic("line_rest_sed", line_att_rest)
+        numpyro.deterministic("line_bl_rest_sed", line_bl_att_rest)
+        numpyro.deterministic("line_nl_rest_sed", line_nl_att_rest)
+        numpyro.deterministic("line_liner_rest_sed", line_liner_att_rest)
+        numpyro.deterministic("balmer_rest_sed", balmer_att_rest)
         numpyro.deterministic("agn_fluxes", agn_fluxes)
         numpyro.deterministic("host_fluxes", host_fluxes)
         numpyro.deterministic("dust_fluxes", dust_fluxes)
@@ -1324,7 +1357,8 @@ def grahsp_photometric_model(
         numpyro.deterministic("balmer_fluxes", balmer_fluxes)
         numpyro.deterministic("total_obs_sed", total_obs)
         numpyro.deterministic("agn_obs_sed", agn_obs)
-        numpyro.deterministic("host_obs_sed", host_obs)
+        numpyro.deterministic("host_obs_sed", host_stellar_obs)
+        numpyro.deterministic("host_total_obs_sed", host_obs)
         numpyro.deterministic("dust_obs_sed", dust_obs)
         numpyro.deterministic("nebular_obs_sed", nebular_obs)
         numpyro.deterministic("nebular_lines_obs_sed", nebular_lines_obs)

@@ -22,8 +22,29 @@ from grahspj.config import (
     _coerce_spectroscopy_config,
 )
 from grahspj.core import GRAHSPJ
-from grahspj.model import _igm_transmission, _torus_component, grahsp_photometric_model
+from grahspj.model import (
+    GRAHSP_BIATTENUATION_BREAK_A,
+    GRAHSP_SI_ABS_LAM_A,
+    GRAHSP_SI_ABS_WIDTH_A,
+    GRAHSP_SI_EM_LAM_A,
+    GRAHSP_SI_EM_WIDTH_A,
+    GRAHSP_TORUS_NORM_A,
+    _attenuation_curve,
+    _flux_conserving_line_gaussians,
+    _igm_transmission,
+    _powerlaw_jax,
+    _torus_component,
+    grahsp_photometric_model,
+)
 from grahspj.preload import _build_fixed_igm_jax, _build_igm_cache_jax, build_model_context
+from grahspj.preload import (
+    SSPData,
+    _DALE2014_CACHE,
+    _HOST_BASIS_CACHE,
+    _build_host_basis,
+    _lnu_lsun_per_hz_to_llambda_w_per_a_np,
+    _load_vendored_dale2014_templates,
+)
 
 
 def test_likelihood_defaults_include_absolute_flux_scale_prior():
@@ -32,8 +53,83 @@ def test_likelihood_defaults_include_absolute_flux_scale_prior():
     assert cfg.absolute_flux_scale_prior_sigma_dex > 0.0
 
 
+def test_agn_disk_is_normalized_at_5100_angstrom():
+    wave = np.asarray([2500.0, 5100.0, 10000.0])
+    disk = np.asarray(_powerlaw_jax(wave, 2.0, 0.0, -1.0, 5100.0, 1000.0, 10.0, 0.0))
+
+    assert disk[1] == pytest.approx(2.0)
+    assert np.all(np.isfinite(disk))
+    assert np.all(disk > 0.0)
+
+
+def test_flux_conserving_lines_preserve_integrated_luminosity():
+    wave = np.linspace(4500.0, 5500.0, 20001)
+    line = np.asarray(_flux_conserving_line_gaussians(wave, np.asarray([5000.0]), np.asarray([3.0]), 300.0))
+
+    assert np.trapezoid(line, x=wave) == pytest.approx(3.0, rel=2.0e-4)
+
+
+def test_biattenuation_break_is_grahsp_nm_value_converted_to_angstrom():
+    wave = np.asarray([5500.0, GRAHSP_BIATTENUATION_BREAK_A, 22000.0])
+    curve = np.asarray(_attenuation_curve(wave, -1.2, -3.0, 1.2, GRAHSP_BIATTENUATION_BREAK_A))
+
+    assert GRAHSP_BIATTENUATION_BREAK_A == 11000.0
+    assert curve[1] == pytest.approx(1.2)
+    assert curve[0] > curve[1] > curve[2]
+
+
+def test_dale2014_host_dust_matches_cigale_v2025_1_reference():
+    _DALE2014_CACHE.clear()
+    alpha_grid, wave_a, lumin_per_a = _load_vendored_dale2014_templates()
+
+    with np.load("tests/fixtures/cigale_v2025_1_dale2014_reference.npz") as ref:
+        assert str(ref["cigale_version"]) == "2025.1"
+        assert np.array_equal(alpha_grid, ref["alpha_grid"])
+        assert np.allclose(wave_a, ref["wave_a"], rtol=0.0, atol=1.0e-10)
+        assert np.allclose(wave_a[ref["wave_indices"]], ref["wave_targets_a"], rtol=0.0, atol=1.0e-10)
+        assert np.allclose(
+            lumin_per_a[np.ix_(ref["alpha_indices"], ref["wave_indices"])],
+            ref["lumin_samples"],
+            rtol=2.0e-7,
+            atol=0.0,
+        )
+        assert np.allclose(np.trapezoid(lumin_per_a, x=wave_a, axis=1), ref["integrals"], rtol=2.0e-7, atol=1.0e-12)
+
+    assert np.allclose(np.trapezoid(lumin_per_a, x=wave_a, axis=1), 1.0, rtol=2.0e-7, atol=1.0e-12)
+    assert np.all(lumin_per_a[:, wave_a < 20000.0] == 0.0)
+
+
+def test_host_stellar_basis_lnu_to_llambda_units_and_interpolation():
+    _HOST_BASIS_CACHE.clear()
+    ssp_wave = np.asarray([1000.0, 2000.0, 4000.0])
+    ssp_flux = np.asarray([[[1.0, 2.0, 4.0], [0.5, 1.0, 2.0]]])
+    ssp_data = SSPData(
+        ssp_lgmet=np.asarray([0.0]),
+        ssp_lg_age_gyr=np.asarray([-3.0, -1.0]),
+        ssp_wave=ssp_wave,
+        ssp_flux=ssp_flux,
+    )
+    rest_wave = np.asarray([1500.0, 3000.0])
+
+    basis = _build_host_basis(rest_wave, ssp_data)
+    expected_native = _lnu_lsun_per_hz_to_llambda_w_per_a_np(ssp_wave[None, None, :], ssp_flux)
+    expected_rest = np.asarray(
+        [
+            [
+                np.interp(rest_wave, ssp_wave, expected_native[0, 0], left=0.0, right=0.0),
+                np.interp(rest_wave, ssp_wave, expected_native[0, 1], left=0.0, right=0.0),
+            ]
+        ]
+    )
+
+    assert np.allclose(basis.rest_llambda, expected_rest, rtol=1.0e-12, atol=0.0)
+    assert np.all(basis.n_ly_per_msun == 0.0)
+    assert np.all(basis.ly_lum_per_msun == 0.0)
+    assert basis.surviving_frac_by_age.shape == ssp_data.ssp_lg_age_gyr.shape
+
+
 def test_torus_component_wavelengths_are_angstrom_converted_to_micron():
-    wave = np.asarray([2000.0, 20000.0, 170000.0])
+    wave = np.asarray([2000.0, 20000.0, GRAHSP_TORUS_NORM_A, 170000.0])
     torus = np.asarray(
         _torus_component(
             wave,
@@ -55,6 +151,32 @@ def test_torus_component_wavelengths_are_angstrom_converted_to_micron():
 
     assert torus[1] > 100.0 * torus[0]
     assert torus[2] > 100.0 * torus[0]
+    assert torus[3] > 100.0 * torus[0]
+
+
+def test_torus_silicate_features_are_in_mid_ir_angstroms():
+    wave = np.asarray([9841.0, GRAHSP_SI_EM_LAM_A, GRAHSP_SI_ABS_LAM_A])
+    torus = np.asarray(
+        _torus_component(
+            wave,
+            fcov=0.2,
+            si=1.0,
+            cool_lam=17.0,
+            cool_width=0.45,
+            hot_lam=2.0,
+            hot_width=0.2,
+            hot_fcov=0.0,
+            si_ratio=0.29,
+            si_em_lam=GRAHSP_SI_EM_LAM_A,
+            si_abs_lam=GRAHSP_SI_ABS_LAM_A,
+            si_em_width=GRAHSP_SI_EM_WIDTH_A,
+            si_abs_width=GRAHSP_SI_ABS_WIDTH_A,
+            l_agn=1.0,
+        )
+    )
+
+    assert torus[1] > torus[0]
+    assert torus[1] > torus[2]
 
 
 def test_build_context_with_inline_templates(monkeypatch):

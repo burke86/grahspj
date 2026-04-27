@@ -575,7 +575,7 @@ def _load_vendored_dale2014_templates() -> tuple[np.ndarray, np.ndarray, np.ndar
         lumin_nm = np.clip(lumin_nm, 0.0, None)
         lumin_nm[wave_nm < 2.0e3] = 0.0
         norm = float(np.trapezoid(lumin_nm, x=wave_nm))
-        dust_lumin_nm.append(lumin_nm / max(norm, 1.0e-30))
+        dust_lumin_nm.append(lumin_nm / (norm if np.isfinite(norm) and norm > 0.0 else 1.0e-30))
     dust_lumin_nm = np.asarray(dust_lumin_nm, dtype=float)
     wave_ang = wave_nm * 10.0
     dust_lumin_ang = dust_lumin_nm / 10.0
@@ -848,7 +848,7 @@ def _build_rest_template_cache(rest_wave: np.ndarray, templates: LoadedTemplates
 
 
 def _load_nebular_templates_jax(enabled: bool) -> NebularTemplatesJax:
-    """Load compact CIGALE v2022.1 nebular template grids as JAX arrays."""
+    """Load compact CIGALE v2025.1 nebular template grids as JAX arrays."""
     if not enabled:
         z = jnp.asarray([0.02], dtype=jnp.float64)
         u = jnp.asarray([-2.0], dtype=jnp.float64)
@@ -856,7 +856,7 @@ def _load_nebular_templates_jax(enabled: bool) -> NebularTemplatesJax:
         wave = jnp.asarray([5000.0], dtype=jnp.float64)
         zeros4 = jnp.zeros((1, 1, 1, 1), dtype=jnp.float64)
         return NebularTemplatesJax(z, u, ne, wave, zeros4, wave, zeros4)
-    cached = _NEBULAR_TEMPLATE_CACHE.get("cigale-v2022.1")
+    cached = _NEBULAR_TEMPLATE_CACHE.get("cigale-v2025.1")
     if cached is not None:
         return cached
     line_path = _package_resource_path("resources/nebular/nebular_lines.npz")
@@ -871,7 +871,7 @@ def _load_nebular_templates_jax(enabled: bool) -> NebularTemplatesJax:
             continuum_wave_a=jnp.asarray(cont["continuum_wave_a"], dtype=jnp.float64),
             continuum_lumin_per_a_per_photon=jnp.asarray(cont["continuum_lumin_per_a_per_photon"], dtype=jnp.float64),
         )
-    _NEBULAR_TEMPLATE_CACHE["cigale-v2022.1"] = loaded
+    _NEBULAR_TEMPLATE_CACHE["cigale-v2025.1"] = loaded
     return loaded
 
 
