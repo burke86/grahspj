@@ -33,6 +33,9 @@ ERG_PER_WATT = 1.0e7
 AGN_BOLOMETRIC_CORRECTION_5100 = 9.26
 MPC_TO_M = 3.085677581491367e22
 GRAHSP_BIATTENUATION_BREAK_A = 11000.0
+GRAHSP_PL_BEND_LOC_A = 1000.0
+GRAHSP_PL_BEND_WIDTH = 10.0
+GRAHSP_PL_CUTOFF_A = 100000.0
 GRAHSP_TORUS_NORM_A = 120000.0
 GRAHSP_SI_EM_LAM_A = 98410.0
 GRAHSP_SI_ABS_LAM_A = 142240.0
@@ -899,9 +902,9 @@ def grahsp_photometric_model(
     if fit_agn:
         uv_slope = numpyro.sample("uv_slope", dist.Normal(*_cfg_norm(prior_config, "uv_slope", 0.0, 0.5)))
         pl_slope = numpyro.sample("pl_slope", dist.Normal(*_cfg_norm(prior_config, "pl_slope", -1.0, 0.5)))
-        pl_bend_loc = numpyro.sample("pl_bend_loc", dist.LogNormal(*_cfg_norm(prior_config, "log_pl_bend_loc", np.log(100.0), 0.3)))
-        pl_bend_width = numpyro.sample("pl_bend_width", dist.LogNormal(*_cfg_norm(prior_config, "log_pl_bend_width", np.log(10.0), 0.4)))
-        pl_cutoff = numpyro.sample("pl_cutoff", dist.LogNormal(*_cfg_norm(prior_config, "log_pl_cutoff", np.log(10000.0), 0.6)))
+        pl_bend_loc = numpyro.sample("pl_bend_loc", dist.LogNormal(*_cfg_norm(prior_config, "log_pl_bend_loc", np.log(GRAHSP_PL_BEND_LOC_A), 0.3)))
+        pl_bend_width = numpyro.sample("pl_bend_width", dist.LogNormal(*_cfg_norm(prior_config, "log_pl_bend_width", np.log(GRAHSP_PL_BEND_WIDTH), 0.4)))
+        pl_cutoff = numpyro.sample("pl_cutoff", dist.LogNormal(*_cfg_norm(prior_config, "log_pl_cutoff", np.log(GRAHSP_PL_CUTOFF_A), 0.6)))
         disk_rest = _powerlaw_jax(rest_wave, agn_amp / 5100.0, uv_slope, pl_slope, 5100.0, pl_bend_loc, pl_bend_width, pl_cutoff)
 
         fcov = numpyro.sample("fcov", dist.Beta(2.0, 8.0))
@@ -990,9 +993,9 @@ def grahsp_photometric_model(
     else:
         uv_slope = jnp.asarray(0.0, dtype=jnp.float64)
         pl_slope = jnp.asarray(-1.0, dtype=jnp.float64)
-        pl_bend_loc = jnp.asarray(100.0, dtype=jnp.float64)
-        pl_bend_width = jnp.asarray(10.0, dtype=jnp.float64)
-        pl_cutoff = jnp.asarray(10000.0, dtype=jnp.float64)
+        pl_bend_loc = jnp.asarray(GRAHSP_PL_BEND_LOC_A, dtype=jnp.float64)
+        pl_bend_width = jnp.asarray(GRAHSP_PL_BEND_WIDTH, dtype=jnp.float64)
+        pl_cutoff = jnp.asarray(GRAHSP_PL_CUTOFF_A, dtype=jnp.float64)
         disk_rest = jnp.zeros_like(rest_wave)
         fcov = jnp.asarray(0.0, dtype=jnp.float64)
         si = jnp.asarray(0.0, dtype=jnp.float64)
