@@ -20,6 +20,7 @@ from grahspj.config import (
     SpectroscopyConfig,
     SpectroscopyData,
     _coerce_spectroscopy_config,
+    fit_config_from_mapping,
 )
 from grahspj.core import GRAHSPJ
 from grahspj.model import (
@@ -519,6 +520,24 @@ def test_spectroscopy_config_migrates_legacy_jaxqsofit_flags():
     assert cfg.jaxqsofit.use_spectral_feii is True
     assert cfg.jaxqsofit.use_spectral_balmer_continuum is True
     assert cfg.jaxqsofit.line_flux_scale_mjy == 0.1
+
+
+def test_fit_config_mapping_coerces_balmer_continuum_gate():
+    cfg = fit_config_from_mapping(
+        {
+            "observation": {"object_id": "obj", "redshift": 0.1},
+            "photometry": {"filter_names": ["f1"], "fluxes": [1.0], "errors": [0.1]},
+            "agn": {
+                "fit_feii_broadening": True,
+                "fit_balmer_continuum": True,
+                "balmer_continuum_default": 0.2,
+            },
+        }
+    )
+
+    assert cfg.agn.fit_feii_broadening is True
+    assert cfg.agn.fit_balmer_continuum is True
+    assert cfg.agn.balmer_continuum_default == 0.2
 
 
 def test_jaxqsofit_joint_backend_builds_flux_scaled_smart_priors(monkeypatch):

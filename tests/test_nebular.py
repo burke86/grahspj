@@ -1,5 +1,5 @@
 import numpy as np
-from numpyro.handlers import seed, trace
+from numpyro.handlers import seed, substitute, trace
 from pathlib import Path
 
 from grahspj.config import (
@@ -158,6 +158,48 @@ def test_nebular_enabled_adds_finite_component(monkeypatch):
     assert np.any(nebular_rest > 0.0)
     assert "nebular_logU" in tr
     assert "nebular_logU_fit" in tr
+
+
+def test_fixed_nebular_line_profile_cache_matches_dynamic_path(monkeypatch):
+    _patch_ssp(monkeypatch)
+    fixed_cfg = _mock_config()
+    fixed_cfg.nebular = NebularConfig(enabled=True, f_esc=0.0, f_dust=0.0, zgas=0.02, logU=-2.0, ne=100.0, lines_width=300.0)
+    dynamic_cfg = _mock_config()
+    dynamic_cfg.nebular = NebularConfig(enabled=True, f_esc=0.0, f_dust=0.0, zgas=0.02, logU=-2.0, ne=100.0, lines_width=300.0)
+    dynamic_cfg.prior_config["nebular_lines_width"] = {"loc": 300.0, "scale": 1.0}
+
+    fixed_context = build_model_context(fixed_cfg)
+    dynamic_context = build_model_context(dynamic_cfg)
+    assert fixed_context.fixed_nebular_line_profile_jax is not None
+    assert dynamic_context.fixed_nebular_line_profile_jax is None
+
+    data = {"nebular_lines_width": np.array(300.0)}
+    fixed_tr = trace(seed(lambda: grahsp_photometric_model(fixed_context, include_components=True), 3)).get_trace()
+    dynamic_model = substitute(lambda: grahsp_photometric_model(dynamic_context, include_components=True), data=data)
+    dynamic_tr = trace(seed(dynamic_model, 3)).get_trace()
+
+    np.testing.assert_allclose(
+        np.asarray(fixed_tr["nebular_lines_rest_sed"]["value"]),
+        np.asarray(dynamic_tr["nebular_lines_rest_sed"]["value"]),
+        rtol=2.0e-10,
+        atol=1.0e-30,
+    )
+
+
+def test_fixed_nebular_line_profile_skips_dynamic_gaussian(monkeypatch):
+    _patch_ssp(monkeypatch)
+    cfg = _mock_config()
+    cfg.nebular = NebularConfig(enabled=True, f_esc=0.0, f_dust=0.0, zgas=0.02, logU=-2.0, ne=100.0, lines_width=300.0)
+    context = build_model_context(cfg)
+    assert context.fixed_nebular_line_profile_jax is not None
+
+    def _raise_if_called(*args, **kwargs):
+        raise AssertionError("Fixed nebular line profile should skip dynamic Gaussian construction.")
+
+    monkeypatch.setattr("grahspj.model._flux_conserving_line_gaussians", _raise_if_called)
+    tr = trace(seed(lambda: grahsp_photometric_model(context, include_components=True), 4)).get_trace()
+
+    assert np.any(np.asarray(tr["nebular_lines_rest_sed"]["value"]) > 0.0)
 
 
 def test_nebular_escape_fraction_one_suppresses_emission(monkeypatch):

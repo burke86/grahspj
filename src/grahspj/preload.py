@@ -159,6 +159,7 @@ class ModelContext:
     feii_template_on_rest_jax: jnp.ndarray
     dust_alpha_grid_jax: jnp.ndarray
     dust_lumin_rest_jax: jnp.ndarray
+    fixed_nebular_line_profile_jax: jnp.ndarray | None
     fixed_redshift_jax: jnp.ndarray | None
     fixed_luminosity_distance_m_jax: jnp.ndarray | None
     fixed_igm_jax: jnp.ndarray | None
@@ -190,6 +191,7 @@ _DALE2014_CACHE: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
 _HOST_BASIS_CACHE: dict[tuple[str, float, float, int], HostBasis] = {}
 _REST_TEMPLATE_CACHE: dict[tuple[Any, ...], tuple[np.ndarray, np.ndarray]] = {}
 _NEBULAR_TEMPLATE_CACHE: dict[str, NebularTemplatesJax] = {}
+_FIXED_NEBULAR_LINE_PROFILE_CACHE: dict[tuple[Any, ...], np.ndarray] = {}
 _DEFAULT_SPECLITE_NAME_MAP = {
     "u_sdss": "sdss2010-u",
     "g_sdss": "sdss2010-g",
@@ -941,6 +943,74 @@ def _load_nebular_templates_jax(enabled: bool) -> NebularTemplatesJax:
     return loaded
 
 
+def _nearest_index_np(grid: np.ndarray, value: float) -> int:
+    """Return the index of the nearest tabulated grid value."""
+    return int(np.argmin(np.abs(np.asarray(grid, dtype=float) - float(value))))
+
+
+def _flux_conserving_line_gaussians_np(
+    wave: np.ndarray,
+    line_wave: np.ndarray,
+    line_lumin: np.ndarray,
+    width_kms: float,
+) -> np.ndarray:
+    """Evaluate CIGALE-style Gaussian line profiles preserving integrated luminosity."""
+    wave = np.asarray(wave, dtype=float)
+    line_wave = np.asarray(line_wave, dtype=float)
+    line_lumin = np.asarray(line_lumin, dtype=float)
+    fwhm_wave = np.maximum(line_wave * float(width_kms) / 299792.458, 1.0e-8)
+    sigma = fwhm_wave / (2.0 * np.sqrt(2.0 * np.log(2.0)))
+    z = (wave[:, None] - line_wave[None, :]) / np.maximum(sigma[None, :], 1.0e-12)
+    profile = np.exp(-0.5 * z * z) / np.maximum(sigma[None, :] * np.sqrt(2.0 * np.pi), 1.0e-30)
+    return np.sum(line_lumin[None, :] * profile, axis=1)
+
+
+def _build_fixed_nebular_line_profile(
+    rest_wave: np.ndarray,
+    cfg: FitConfig,
+    templates: NebularTemplatesJax,
+) -> np.ndarray | None:
+    """Precompute fixed nebular line profile per ionizing photon when shape is static."""
+    neb = cfg.nebular
+    if not (cfg.galaxy.fit_host and neb.enabled and neb.emission):
+        return np.zeros_like(rest_wave, dtype=float)
+    if neb.zgas is None:
+        return None
+    prior_config = cfg.prior_config
+    shape_keys = {"nebular_logU", "nebular_zgas", "nebular_ne", "nebular_lines_width"}
+    if any(key in prior_config for key in shape_keys):
+        return None
+
+    z_grid = np.asarray(templates.z_grid, dtype=float)
+    logu_grid = np.asarray(templates.logu_grid, dtype=float)
+    ne_grid = np.asarray(templates.ne_grid, dtype=float)
+    line_wave = np.asarray(templates.line_wave_a, dtype=float)
+    line_lumin_per_photon = np.asarray(templates.line_lumin_per_photon, dtype=float)
+    z_idx = _nearest_index_np(z_grid, float(neb.zgas))
+    u_idx = _nearest_index_np(logu_grid, float(neb.logU))
+    ne_idx = _nearest_index_np(ne_grid, float(neb.ne))
+    cache_key = (
+        float(rest_wave[0]),
+        float(rest_wave[-1]),
+        int(rest_wave.size),
+        z_idx,
+        u_idx,
+        ne_idx,
+        float(neb.lines_width),
+    )
+    cached = _FIXED_NEBULAR_LINE_PROFILE_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+    profile = _flux_conserving_line_gaussians_np(
+        rest_wave,
+        line_wave,
+        line_lumin_per_photon[z_idx, u_idx, ne_idx],
+        float(neb.lines_width),
+    ).astype(float)
+    _FIXED_NEBULAR_LINE_PROFILE_CACHE[cache_key] = profile
+    return profile
+
+
 def build_model_context(cfg: FitConfig) -> ModelContext:
     """Construct the static context consumed by the grahspj NumPyro model."""
     cfg.validate()
@@ -1065,12 +1135,18 @@ def build_model_context(cfg: FitConfig) -> ModelContext:
     templates = _load_templates(cfg)
     nebular_templates_jax = _load_nebular_templates_jax(bool(cfg.nebular.enabled))
     feii_template_on_rest, dust_lumin_rest = _build_rest_template_cache(rest_wave, templates)
+    fixed_nebular_line_profile = _build_fixed_nebular_line_profile(rest_wave, cfg, nebular_templates_jax)
     rest_wave_jax = jnp.asarray(rest_wave, dtype=jnp.float64)
     obs_wave_jax = jnp.asarray(obs_wave, dtype=jnp.float64)
     filter_effective_wavelength_jax = jnp.asarray(np.array([f.effective_wavelength for f in loaded_filters], dtype=float), dtype=jnp.float64)
     dust_alpha_grid_jax = jnp.asarray(templates.dust_alpha_grid, dtype=jnp.float64)
     feii_template_on_rest_jax = jnp.asarray(feii_template_on_rest, dtype=jnp.float64)
     dust_lumin_rest_jax = jnp.asarray(dust_lumin_rest, dtype=jnp.float64)
+    fixed_nebular_line_profile_jax = (
+        None
+        if fixed_nebular_line_profile is None
+        else jnp.asarray(fixed_nebular_line_profile, dtype=jnp.float64)
+    )
     if cfg.observation.fit_redshift:
         fixed_redshift_jax = None
         fixed_luminosity_distance_m_jax = None
@@ -1124,6 +1200,7 @@ def build_model_context(cfg: FitConfig) -> ModelContext:
         feii_template_on_rest_jax=feii_template_on_rest_jax,
         dust_alpha_grid_jax=dust_alpha_grid_jax,
         dust_lumin_rest_jax=dust_lumin_rest_jax,
+        fixed_nebular_line_profile_jax=fixed_nebular_line_profile_jax,
         fixed_redshift_jax=fixed_redshift_jax,
         fixed_luminosity_distance_m_jax=fixed_luminosity_distance_m_jax,
         fixed_igm_jax=fixed_igm_jax,

@@ -166,6 +166,8 @@ class AGNConfig:
     line_width_kms_default: float = 3000.0
     lines_strength_default: float = 1.0
     feii_strength_default: float = 5.0
+    fit_feii_broadening: bool = False
+    fit_balmer_continuum: bool = False
     balmer_continuum_default: float = 0.0
 
 
@@ -378,6 +380,8 @@ def fit_config_from_mapping(data: Mapping[str, Any]) -> FitConfig:
             line_width_kms_default=float(agn_raw.get("line_width_kms_default", 3000.0)),
             lines_strength_default=float(agn_raw.get("lines_strength_default", 1.0)),
             feii_strength_default=float(agn_raw.get("feii_strength_default", 5.0)),
+            fit_feii_broadening=bool(agn_raw.get("fit_feii_broadening", False)),
+            fit_balmer_continuum=bool(agn_raw.get("fit_balmer_continuum", False)),
             balmer_continuum_default=float(agn_raw.get("balmer_continuum_default", 0.0)),
         )
     else:

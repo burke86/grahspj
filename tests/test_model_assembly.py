@@ -31,7 +31,16 @@ def _patch_ssp(monkeypatch):
     monkeypatch.setattr("grahspj.preload._HOST_BASIS_CACHE", {})
 
 
-def _cfg(*, fit_host=True, fit_agn=True, fit_host_kinematics=False, rest_wave_max=3.0e6, n_wave=512):
+def _cfg(
+    *,
+    fit_host=True,
+    fit_agn=True,
+    fit_host_kinematics=False,
+    fit_feii_broadening=False,
+    fit_balmer_continuum=False,
+    rest_wave_max=3.0e6,
+    n_wave=512,
+):
     return FitConfig(
         observation=Observation(object_id="assembly", redshift=0.05),
         photometry=PhotometryData(filter_names=["f1"], fluxes=[1.0], errors=[0.1]),
@@ -52,6 +61,8 @@ def _cfg(*, fit_host=True, fit_agn=True, fit_host_kinematics=False, rest_wave_ma
         ),
         agn=AGNConfig(
             fit_agn=fit_agn,
+            fit_feii_broadening=fit_feii_broadening,
+            fit_balmer_continuum=fit_balmer_continuum,
             balmer_continuum_default=0.2,
             feii_template=FeIITemplate(name="fe", wave=[1000.0, 2000.0, 3000.0], lumin=[0.0, 1.0, 0.0]),
             emission_line_template=EmissionLineTemplate(
@@ -120,7 +131,7 @@ def _fixed_component_data():
 
 def test_component_rest_and_observed_seds_sum_to_total(monkeypatch):
     _patch_ssp(monkeypatch)
-    context = build_model_context(_cfg())
+    context = build_model_context(_cfg(fit_balmer_continuum=True))
     tr = _deterministic_trace(
         context,
         {
@@ -245,6 +256,72 @@ def test_host_kinematics_enabled_samples_and_broadens(monkeypatch):
     assert calls["n"] == 1
     assert "gal_v_kms" in tr
     assert "gal_sigma_kms" in tr
+
+
+def test_balmer_continuum_default_off_skips_balmer_kernel(monkeypatch):
+    _patch_ssp(monkeypatch)
+
+    def _raise_if_called(*args, **kwargs):
+        raise AssertionError("Balmer continuum should be skipped unless fit_balmer_continuum=True")
+
+    monkeypatch.setattr("grahspj.model._balmer_continuum_jax", _raise_if_called)
+    context = build_model_context(_cfg(fit_balmer_continuum=False))
+    tr = _deterministic_trace(
+        context,
+        {
+            **_fixed_component_data(),
+            "balmer_norm": np.array(0.2),
+            "balmer_tau": np.array(1.0),
+            "balmer_vel": np.array(3000.0),
+        },
+    )
+
+    assert "balmer_norm" not in tr
+    assert "balmer_tau" not in tr
+    assert "balmer_vel" not in tr
+    assert np.allclose(_site(tr, "balmer_rest_sed"), 0.0)
+    assert np.allclose(_site(tr, "balmer_obs_sed"), 0.0)
+
+
+def test_feii_broadening_default_off_uses_direct_template(monkeypatch):
+    _patch_ssp(monkeypatch)
+
+    def _raise_if_called(*args, **kwargs):
+        raise AssertionError("FeII broadening should be skipped unless fit_feii_broadening=True")
+
+    monkeypatch.setattr("grahspj.model._feii_component", _raise_if_called)
+    context = build_model_context(_cfg(fit_feii_broadening=False))
+    tr = _deterministic_trace(
+        context,
+        {
+            **_fixed_component_data(),
+            "feii_norm": np.array(1.0),
+            "feii_fwhm": np.array(3000.0),
+            "feii_shift": np.array(0.0),
+        },
+    )
+
+    assert "feii_norm" in tr
+    assert "feii_fwhm" not in tr
+    assert "feii_shift" not in tr
+    assert np.any(_site(tr, "feii_rest_sed") > 0.0)
+
+
+def test_feii_broadening_enabled_samples_and_calls_kernel(monkeypatch):
+    _patch_ssp(monkeypatch)
+    calls = {"n": 0}
+
+    def _identity_feii(wave, template_flux_on_wave, norm, fwhm_kms, shift_frac):
+        calls["n"] += 1
+        return norm * template_flux_on_wave
+
+    monkeypatch.setattr("grahspj.model._feii_component", _identity_feii)
+    context = build_model_context(_cfg(fit_feii_broadening=True))
+    tr = _deterministic_trace(context, _fixed_component_data())
+
+    assert calls["n"] == 1
+    assert "feii_fwhm" in tr
+    assert "feii_shift" in tr
 
 
 def test_plotted_component_sites_are_attenuated_likelihood_components(monkeypatch):
