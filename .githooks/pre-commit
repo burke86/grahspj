@@ -1,0 +1,14 @@
+#!/usr/bin/env sh
+set -eu
+
+branch="$(git symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
+
+if [ "$branch" = "main" ]; then
+  cat >&2 <<'EOF'
+Direct commits to main are blocked.
+
+Create a feature branch and open a pull request instead:
+  git switch -c <branch-name>
+EOF
+  exit 1
+fi

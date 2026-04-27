@@ -1,0 +1,15 @@
+#!/usr/bin/env sh
+set -eu
+
+protected_branch="refs/heads/main"
+
+while read -r local_ref local_sha remote_ref remote_sha; do
+  if [ "$remote_ref" = "$protected_branch" ]; then
+    cat >&2 <<'EOF'
+Direct pushes to main are blocked.
+
+Push a feature branch and open a pull request instead.
+EOF
+    exit 1
+  fi
+done
