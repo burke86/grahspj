@@ -15,7 +15,7 @@ from grahspj.config import (
     Observation,
     PhotometryData,
 )
-from grahspj.model import _project_filters, _redshift_to_obs, grahsp_photometric_model
+from grahspj.model import GRAHSP_PL_BEND_LOC_A, GRAHSP_PL_BEND_WIDTH, GRAHSP_PL_CUTOFF_A, _project_filters, _redshift_to_obs, grahsp_photometric_model
 from grahspj.preload import build_model_context
 
 
@@ -94,9 +94,9 @@ def test_component_rest_and_observed_seds_sum_to_total(monkeypatch):
             "log_agn_amp": np.array(np.log(1.0e34)),
             "uv_slope": np.array(0.0),
             "pl_slope": np.array(-1.0),
-            "pl_bend_loc": np.array(100.0),
-            "pl_bend_width": np.array(10.0),
-            "pl_cutoff": np.array(10000.0),
+            "pl_bend_loc": np.array(GRAHSP_PL_BEND_LOC_A),
+            "pl_bend_width": np.array(GRAHSP_PL_BEND_WIDTH),
+            "pl_cutoff": np.array(GRAHSP_PL_CUTOFF_A),
             "fcov": np.array(0.2),
             "si": np.array(0.0),
             "cool_lam": np.array(17.0),

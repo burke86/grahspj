@@ -24,6 +24,9 @@ from grahspj.config import (
 from grahspj.core import GRAHSPJ
 from grahspj.model import (
     GRAHSP_BIATTENUATION_BREAK_A,
+    GRAHSP_PL_BEND_LOC_A,
+    GRAHSP_PL_BEND_WIDTH,
+    GRAHSP_PL_CUTOFF_A,
     GRAHSP_SI_ABS_LAM_A,
     GRAHSP_SI_ABS_WIDTH_A,
     GRAHSP_SI_EM_LAM_A,
@@ -83,6 +86,50 @@ def test_agn_disk_powerlaw_slopes_and_cutoff_are_in_wavelength_space():
     assert red[1] < red[0]
     assert cutoff[0] > no_cutoff[0] * 0.8
     assert cutoff[1] < no_cutoff[1]
+
+
+def _grahsp_activatepl_sbpl_nm(wave_nm, norm, lam1, lam2, x0_nm, xbrk_nm, bend_width_nm):
+    q = np.log(wave_nm / xbrk_nm) / bend_width_nm
+    qpiv = np.log(x0_nm / xbrk_nm) / bend_width_nm
+    return (
+        norm
+        * (wave_nm / x0_nm) ** ((lam1 + lam2 + 2.0) / 2.0)
+        * ((np.exp(q) + np.exp(-q)) / (np.exp(qpiv) + np.exp(-qpiv))) ** ((lam2 - lam1) / 2.0 * bend_width_nm)
+        * (x0_nm / wave_nm)
+    )
+
+
+def test_agn_disk_grahsp_default_wavelength_parameters_are_converted_to_angstroms():
+    assert GRAHSP_PL_BEND_LOC_A == pytest.approx(100.0 * 10.0)
+    assert GRAHSP_PL_BEND_WIDTH == pytest.approx(10.0)
+    assert GRAHSP_PL_CUTOFF_A == pytest.approx(10000.0 * 10.0)
+
+    wave_a = np.asarray([700.0, 1000.0, 2500.0, 5100.0, 20000.0, 100000.0])
+    wave_nm = wave_a / 10.0
+    grahsp_nm = _grahsp_activatepl_sbpl_nm(
+        wave_nm,
+        norm=2.0,
+        lam1=0.0,
+        lam2=-1.0,
+        x0_nm=510.0,
+        xbrk_nm=100.0,
+        bend_width_nm=10.0,
+    )
+    grahsp_nm *= -np.expm1(-(10000.0 / wave_nm))
+    grahspj_a = np.asarray(
+        _powerlaw_jax(
+            wave_a,
+            norm=2.0,
+            lam1=0.0,
+            lam2=-1.0,
+            x0=5100.0,
+            xbrk=GRAHSP_PL_BEND_LOC_A,
+            bend_width=GRAHSP_PL_BEND_WIDTH,
+            cutoff=GRAHSP_PL_CUTOFF_A,
+        )
+    )
+
+    np.testing.assert_allclose(grahspj_a, grahsp_nm, rtol=1.0e-12, atol=0.0)
 
 
 def test_flux_conserving_lines_preserve_integrated_luminosity():
@@ -559,9 +606,9 @@ def test_grahspj_model_can_call_jaxqsofit_backend(monkeypatch):
         "log_agn_amp": np.array(30.0),
         "uv_slope": np.array(0.0),
         "pl_slope": np.array(-1.0),
-        "pl_bend_loc": np.array(100.0),
-        "pl_bend_width": np.array(10.0),
-        "pl_cutoff": np.array(10000.0),
+        "pl_bend_loc": np.array(GRAHSP_PL_BEND_LOC_A),
+        "pl_bend_width": np.array(GRAHSP_PL_BEND_WIDTH),
+        "pl_cutoff": np.array(GRAHSP_PL_CUTOFF_A),
         "fcov": np.array(0.1),
         "si": np.array(0.0),
         "cool_lam": np.array(17.0),
@@ -638,9 +685,9 @@ def test_grahspj_jaxqsofit_backend_uses_nested_tied_line_config(monkeypatch):
         "log_agn_amp": np.array(30.0),
         "uv_slope": np.array(0.0),
         "pl_slope": np.array(-1.0),
-        "pl_bend_loc": np.array(100.0),
-        "pl_bend_width": np.array(10.0),
-        "pl_cutoff": np.array(10000.0),
+        "pl_bend_loc": np.array(GRAHSP_PL_BEND_LOC_A),
+        "pl_bend_width": np.array(GRAHSP_PL_BEND_WIDTH),
+        "pl_cutoff": np.array(GRAHSP_PL_CUTOFF_A),
         "fcov": np.array(0.1),
         "si": np.array(0.0),
         "cool_lam": np.array(17.0),
