@@ -104,6 +104,7 @@ class EmissionLineTemplate:
 class GalaxyConfig:
     """Host-galaxy model, cosmology, and wavelength-grid settings."""
     fit_host: bool = True
+    fit_host_kinematics: bool = False
     dsps_ssp_fn: str = "tempdata.h5"
     age_grid_gyr: Sequence[float] = (0.1, 0.3, 1.0, 3.0, 10.0)
     logzsol_grid: Sequence[float] = (-1.0, -0.5, 0.0, 0.2)
@@ -182,6 +183,7 @@ class LikelihoodConfig:
     use_absolute_flux_scale_prior: bool = True
     absolute_flux_scale_prior_sigma_dex: float = 0.5
     use_host_capture_model: bool = False
+    use_fast_photometry_projection: bool = True
 
 
 @dataclass

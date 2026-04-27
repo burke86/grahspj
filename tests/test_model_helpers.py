@@ -55,6 +55,7 @@ from grahspj.preload import (
     _HOST_BASIS_CACHE,
     _build_host_basis,
     _lnu_lsun_per_hz_to_llambda_w_per_a_np,
+    _load_vendored_filter_curve,
     _load_vendored_dale2014_templates,
 )
 
@@ -380,6 +381,23 @@ def test_filter_projection_flat_flambda_to_mjy_units():
     expected = 1.0e-10 / 299792458.0 * 1.0e29 * 5000.0**2 * 2.0e-20
 
     assert projected[0] == pytest.approx(expected)
+
+
+def test_ukidss_dr11plus_vendored_filters_load_in_angstroms():
+    expected_ranges = {
+        "UKIDSSDR11PLUS_Y": (9000.0, 12000.0),
+        "UKIDSSDR11PLUS_J": (11000.0, 14000.0),
+        "UKIDSSDR11PLUS_H": (14000.0, 19000.0),
+        "UKIDSSDR11PLUS_K": (19000.0, 25000.0),
+    }
+    for name, (lo, hi) in expected_ranges.items():
+        curve = _load_vendored_filter_curve(name)
+        wave = np.asarray(curve.wave, dtype=float)
+        trans = np.asarray(curve.transmission, dtype=float)
+        assert wave.ndim == 1
+        assert wave.size == trans.size
+        assert lo < wave[np.argmax(trans)] < hi
+        assert np.nanmax(trans) > 0.0
 
 
 def test_build_context_with_inline_templates(monkeypatch):

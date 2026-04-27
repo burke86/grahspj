@@ -411,6 +411,26 @@ def _project_filters(obs_flux, packed_filters):
     return 1e-10 / 299792458.0 * 1e29 * effective_wavelength * effective_wavelength * f_lambda
 
 
+def _can_use_fixed_filter_projection(context: ModelContext, cfg) -> bool:
+    """Return whether cached fixed-z photometric projection matrices are valid."""
+    return bool(
+        cfg.likelihood.use_fast_photometry_projection
+        and not cfg.observation.fit_redshift
+        and context.fixed_filter_projection_jax is not None
+        and context.fixed_scalar_filter_projection_jax is not None
+    )
+
+
+def _project_rest_luminosity_filters(context: ModelContext, rest_lum):
+    """Project fixed-redshift rest luminosity density directly into filter mJy."""
+    return context.fixed_filter_projection_jax @ rest_lum
+
+
+def _project_rest_scalar_filters(context: ModelContext, rest_value):
+    """Project fixed-redshift scalar rest quantity through filters like legacy code."""
+    return context.fixed_scalar_filter_projection_jax @ rest_value
+
+
 def _interp_rest_sed(target_wave, source_wave, source_sed):
     """Interpolate one rest-frame SED onto a new wavelength grid."""
     return jnp.interp(target_wave, source_wave, source_sed, left=0.0, right=0.0)
@@ -861,13 +881,13 @@ def grahsp_photometric_model(
     )
     host_state = _build_diffstar_host(context, prior_config, full_output=include_components) if fit_host else _empty_host_state(context)
     host_rest = host_state["host_rest"]
-    if fit_host:
+    if fit_host and bool(cfg.galaxy.fit_host_kinematics):
         gal_v_kms = numpyro.sample("gal_v_kms", dist.Normal(*_cfg_norm(prior_config, "gal_v_kms", 0.0, 150.0)))
         gal_sigma_kms = numpyro.sample("gal_sigma_kms", dist.HalfNormal(_cfg_halfnorm(prior_config, "gal_sigma_kms", 150.0)))
         host_rest = _shift_and_broaden_single_spectrum_lnlam(jnp.log(rest_wave), host_rest, gal_v_kms, gal_sigma_kms)
     else:
         gal_v_kms = jnp.asarray(0.0, dtype=jnp.float64)
-        gal_sigma_kms = jnp.asarray(1.0, dtype=jnp.float64)
+        gal_sigma_kms = jnp.asarray(0.0, dtype=jnp.float64)
 
     host_llambda_5100 = jnp.interp(5100.0, rest_wave, host_rest, left=0.0, right=0.0) if fit_host else jnp.asarray(0.0, dtype=jnp.float64)
     if fit_agn:
@@ -1099,11 +1119,16 @@ def grahsp_photometric_model(
     total_rest = gal_att_rest + dust_rest + agn_att_rest
     agn_rest = agn_att_rest
     transmitted_fraction = jnp.clip(total_rest / jnp.maximum(host_with_nebular_rest + disk_rest + torus_rest + feii_rest + line_rest + balmer_rest, 1e-30), 1e-4, 1.0)
-    total_obs = _redshift_to_obs(rest_wave, total_rest * igm, obs_wave, redshift, luminosity_distance_m)
-    pred_fluxes_raw = _project_filters(total_obs, context.packed_filters_jax)
+    fast_projection_enabled = _can_use_fixed_filter_projection(context, cfg) and not include_components
+    if fast_projection_enabled:
+        total_obs = _redshift_to_obs(rest_wave, total_rest * igm, obs_wave, redshift, luminosity_distance_m) if spectroscopy_enabled else jnp.zeros_like(obs_wave)
+        pred_fluxes_raw = _project_rest_luminosity_filters(context, total_rest)
+    else:
+        total_obs = _redshift_to_obs(rest_wave, total_rest * igm, obs_wave, redshift, luminosity_distance_m)
+        pred_fluxes_raw = _project_filters(total_obs, context.packed_filters_jax)
     if host_capture_enabled or include_components or spectroscopy_enabled:
         host_obs = _redshift_to_obs(rest_wave, gal_att_rest * igm, obs_wave, redshift, luminosity_distance_m)
-        host_fluxes_total = _project_filters(host_obs, context.packed_filters_jax)
+        host_fluxes_total = _project_rest_luminosity_filters(context, gal_att_rest) if fast_projection_enabled else _project_filters(host_obs, context.packed_filters_jax)
     else:
         host_obs = jnp.zeros_like(total_obs)
         host_fluxes_total = jnp.zeros_like(pred_fluxes_raw)
@@ -1207,7 +1232,7 @@ def grahsp_photometric_model(
     else:
         log_spectrum_scale = jnp.asarray(0.0, dtype=jnp.float64)
         spec_logl = jnp.asarray(0.0, dtype=jnp.float64)
-    need_agn_fluxes = include_components or cfg.likelihood.variability_uncertainty
+    need_agn_fluxes = fit_agn and (include_components or cfg.likelihood.variability_uncertainty)
     need_trans_fluxes = include_components or cfg.likelihood.attenuation_model_uncertainty
     if include_components:
         agn_obs = _redshift_to_obs(rest_wave, agn_rest * igm, obs_wave, redshift, luminosity_distance_m)
@@ -1241,13 +1266,19 @@ def grahsp_photometric_model(
         trans_fluxes = _project_filters(transmitted_fraction_obs, context.packed_filters_jax)
     else:
         if need_agn_fluxes:
-            agn_obs = _redshift_to_obs(rest_wave, agn_rest * igm, obs_wave, redshift, luminosity_distance_m)
-            agn_fluxes = _project_filters(agn_obs, context.packed_filters_jax)
+            if fast_projection_enabled:
+                agn_fluxes = _project_rest_luminosity_filters(context, agn_rest)
+            else:
+                agn_obs = _redshift_to_obs(rest_wave, agn_rest * igm, obs_wave, redshift, luminosity_distance_m)
+                agn_fluxes = _project_filters(agn_obs, context.packed_filters_jax)
         else:
             agn_fluxes = jnp.zeros_like(pred_fluxes)
         if need_trans_fluxes:
-            transmitted_fraction_obs = _redshift_scalar_to_obs(rest_wave, transmitted_fraction, obs_wave, redshift)
-            trans_fluxes = _project_filters(transmitted_fraction_obs, context.packed_filters_jax)
+            if fast_projection_enabled:
+                trans_fluxes = _project_rest_scalar_filters(context, transmitted_fraction)
+            else:
+                transmitted_fraction_obs = _redshift_scalar_to_obs(rest_wave, transmitted_fraction, obs_wave, redshift)
+                trans_fluxes = _project_filters(transmitted_fraction_obs, context.packed_filters_jax)
         else:
             trans_fluxes = jnp.ones_like(pred_fluxes)
 

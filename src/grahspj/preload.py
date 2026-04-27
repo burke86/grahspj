@@ -162,6 +162,8 @@ class ModelContext:
     fixed_redshift_jax: jnp.ndarray | None
     fixed_luminosity_distance_m_jax: jnp.ndarray | None
     fixed_igm_jax: jnp.ndarray | None
+    fixed_filter_projection_jax: jnp.ndarray | None
+    fixed_scalar_filter_projection_jax: jnp.ndarray | None
     fluxes: np.ndarray
     errors: np.ndarray
     upper_limits: np.ndarray
@@ -205,6 +207,10 @@ _DEFAULT_SPECLITE_NAME_MAP = {
 _VENDORED_FILTER_FILES = {
     "IRAC1": "resources/filters/IRAC1.dat",
     "IRAC2": "resources/filters/IRAC2.dat",
+    "UKIDSSDR11PLUS_Y": "resources/filters/UKIDSSDR11PLUS_Y.dat",
+    "UKIDSSDR11PLUS_J": "resources/filters/UKIDSSDR11PLUS_J.dat",
+    "UKIDSSDR11PLUS_H": "resources/filters/UKIDSSDR11PLUS_H.dat",
+    "UKIDSSDR11PLUS_K": "resources/filters/UKIDSSDR11PLUS_K.dat",
 }
 
 
@@ -680,6 +686,51 @@ def _pack_loaded_filters_jax(packed_filters: PackedFilters) -> PackedFiltersJax:
     )
 
 
+def _trapezoid_weights(x: np.ndarray) -> np.ndarray:
+    """Return linear weights equivalent to ``np.trapezoid(y, x)``."""
+    x = np.asarray(x, dtype=float)
+    weights = np.zeros_like(x, dtype=float)
+    if x.size < 2:
+        return weights
+    dx = np.diff(x)
+    weights[:-1] += 0.5 * dx
+    weights[1:] += 0.5 * dx
+    return weights
+
+
+def _build_fixed_filter_projection_matrices(
+    rest_wave: np.ndarray,
+    packed_filters: PackedFilters,
+    fixed_igm: np.ndarray,
+    luminosity_distance_m: float,
+    redshift: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Build fixed-z matrices matching redshift/interpolate/filter projection."""
+    n_filters = packed_filters.interp_indices.shape[0]
+    n_rest = len(rest_wave)
+    lum_matrix = np.zeros((n_filters, n_rest), dtype=float)
+    scalar_matrix = np.zeros((n_filters, n_rest), dtype=float)
+    distance_scale = 4.0 * np.pi * max(float(luminosity_distance_m), 1.0e-12) ** 2 * max(1.0 + float(redshift), 1.0e-8)
+    fixed_igm = np.asarray(fixed_igm, dtype=float)
+
+    for i in range(n_filters):
+        weighted_trans = np.where(packed_filters.valid_mask[i], packed_filters.transmission[i], 0.0)
+        weighted_wave = np.where(packed_filters.valid_mask[i], packed_filters.work_wave[i], 0.0)
+        denom = max(float(np.trapezoid(weighted_trans, weighted_wave)), 1.0e-30)
+        coeff = _trapezoid_weights(weighted_wave) * weighted_trans / denom
+        coeff *= 1.0e-10 / 299792458.0 * 1.0e29 * float(packed_filters.effective_wavelength[i]) ** 2
+        for idx, weight, c in zip(packed_filters.interp_indices[i], packed_filters.interp_weight[i], coeff):
+            left = int(np.clip(idx, 0, n_rest - 1))
+            right = int(np.clip(idx + 1, 0, n_rest - 1))
+            wl = 1.0 - float(weight)
+            wr = float(weight)
+            lum_matrix[i, left] += c * wl * fixed_igm[left] / distance_scale
+            lum_matrix[i, right] += c * wr * fixed_igm[right] / distance_scale
+            scalar_matrix[i, left] += c * wl
+            scalar_matrix[i, right] += c * wr
+    return lum_matrix, scalar_matrix
+
+
 def _build_igm_cache_jax(rest_wave: np.ndarray) -> IGMCacheJax:
     """Build JAX-native wavelength-only helper arrays for the IGM model."""
     wavelength = jnp.asarray(rest_wave, dtype=jnp.float64)
@@ -1009,10 +1060,21 @@ def build_model_context(cfg: FitConfig) -> ModelContext:
         fixed_redshift_jax = None
         fixed_luminosity_distance_m_jax = None
         fixed_igm_jax = None
+        fixed_filter_projection_jax = None
+        fixed_scalar_filter_projection_jax = None
     else:
         fixed_redshift_jax = jnp.asarray(float(cfg.observation.redshift), dtype=jnp.float64)
         fixed_luminosity_distance_m_jax = jnp.asarray(luminosity_distance_m, dtype=jnp.float64)
         fixed_igm_jax = _build_fixed_igm_jax(igm_cache_jax, float(cfg.observation.redshift))
+        filter_projection, scalar_projection = _build_fixed_filter_projection_matrices(
+            rest_wave,
+            packed_filters,
+            np.asarray(fixed_igm_jax, dtype=float),
+            luminosity_distance_m,
+            float(cfg.observation.redshift),
+        )
+        fixed_filter_projection_jax = jnp.asarray(filter_projection, dtype=jnp.float64)
+        fixed_scalar_filter_projection_jax = jnp.asarray(scalar_projection, dtype=jnp.float64)
 
     mw_ebv = 0.0
     if cfg.observation.apply_mw_deredden and cfg.observation.ra is not None and cfg.observation.dec is not None:
@@ -1050,6 +1112,8 @@ def build_model_context(cfg: FitConfig) -> ModelContext:
         fixed_redshift_jax=fixed_redshift_jax,
         fixed_luminosity_distance_m_jax=fixed_luminosity_distance_m_jax,
         fixed_igm_jax=fixed_igm_jax,
+        fixed_filter_projection_jax=fixed_filter_projection_jax,
+        fixed_scalar_filter_projection_jax=fixed_scalar_filter_projection_jax,
         fluxes=fluxes,
         errors=errors,
         upper_limits=upper_limits,

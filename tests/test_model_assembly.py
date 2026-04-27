@@ -31,7 +31,7 @@ def _patch_ssp(monkeypatch):
     monkeypatch.setattr("grahspj.preload._HOST_BASIS_CACHE", {})
 
 
-def _cfg(*, fit_host=True, fit_agn=True, rest_wave_max=3.0e6, n_wave=512):
+def _cfg(*, fit_host=True, fit_agn=True, fit_host_kinematics=False, rest_wave_max=3.0e6, n_wave=512):
     return FitConfig(
         observation=Observation(object_id="assembly", redshift=0.05),
         photometry=PhotometryData(filter_names=["f1"], fluxes=[1.0], errors=[0.1]),
@@ -42,6 +42,7 @@ def _cfg(*, fit_host=True, fit_agn=True, rest_wave_max=3.0e6, n_wave=512):
         galaxy=GalaxyConfig(
             fit_host=fit_host,
             dsps_ssp_fn="fake-assembly.h5",
+            fit_host_kinematics=fit_host_kinematics,
             rest_wave_min=100.0,
             rest_wave_max=rest_wave_max,
             n_wave=n_wave,
@@ -78,8 +79,43 @@ def _deterministic_trace(context, data=None):
     return trace(seed(model, 0)).get_trace()
 
 
+def _deterministic_likelihood_trace(context, data=None):
+    data = {} if data is None else data
+    model = substitute(lambda: grahsp_photometric_model(context, include_components=False), data=data)
+    return trace(seed(model, 0)).get_trace()
+
+
 def _site(tr, key):
     return np.asarray(tr[key]["value"], dtype=float)
+
+
+def _fixed_component_data():
+    return {
+        "ebv_gal": np.array(0.2),
+        "ebv_agn": np.array(0.1),
+        "dust_alpha": np.array(2.0),
+        "log_agn_amp": np.array(np.log(1.0e34)),
+        "uv_slope": np.array(0.0),
+        "pl_slope": np.array(-1.0),
+        "pl_bend_loc": np.array(GRAHSP_PL_BEND_LOC_A),
+        "pl_bend_width": np.array(GRAHSP_PL_BEND_WIDTH),
+        "pl_cutoff": np.array(GRAHSP_PL_CUTOFF_A),
+        "fcov": np.array(0.2),
+        "si": np.array(0.0),
+        "cool_lam": np.array(17.0),
+        "cool_width": np.array(0.45),
+        "hot_lam": np.array(2.0),
+        "hot_width": np.array(0.5),
+        "hot_fcov": np.array(0.1),
+        "lines_strength": np.array(1.0),
+        "line_width_kms": np.array(3000.0),
+        "feii_norm": np.array(1.0),
+        "feii_fwhm": np.array(3000.0),
+        "feii_shift": np.array(0.0),
+        "balmer_norm": np.array(0.2),
+        "balmer_tau": np.array(1.0),
+        "balmer_vel": np.array(3000.0),
+    }
 
 
 def test_component_rest_and_observed_seds_sum_to_total(monkeypatch):
@@ -171,6 +207,46 @@ def test_host_off_mode_has_zero_host_components_and_no_total_leak(monkeypatch):
     assert np.allclose(_site(tr, "pred_fluxes"), _site(tr, "agn_fluxes"))
 
 
+def test_host_kinematics_default_off_skips_broadening_call(monkeypatch):
+    _patch_ssp(monkeypatch)
+
+    def _raise_if_called(*args, **kwargs):
+        raise AssertionError("host broadening should be skipped when fit_host_kinematics=False")
+
+    monkeypatch.setattr("grahspj.model._shift_and_broaden_single_spectrum_lnlam", _raise_if_called)
+    context = build_model_context(_cfg(fit_agn=False))
+    tr = _deterministic_trace(context, {"ebv_gal": np.array(0.2), "dust_alpha": np.array(2.0)})
+
+    assert "gal_v_kms" not in tr
+    assert "gal_sigma_kms" not in tr
+    assert np.all(np.isfinite(_site(tr, "pred_fluxes")))
+
+
+def test_host_kinematics_enabled_samples_and_broadens(monkeypatch):
+    _patch_ssp(monkeypatch)
+    calls = {"n": 0}
+
+    def _identity_broaden(lnwave, spectrum, v_kms, sigma_kms):
+        calls["n"] += 1
+        return spectrum
+
+    monkeypatch.setattr("grahspj.model._shift_and_broaden_single_spectrum_lnlam", _identity_broaden)
+    context = build_model_context(_cfg(fit_agn=False, fit_host_kinematics=True))
+    tr = _deterministic_trace(
+        context,
+        {
+            "gal_v_kms": np.array(0.0),
+            "gal_sigma_kms": np.array(150.0),
+            "ebv_gal": np.array(0.2),
+            "dust_alpha": np.array(2.0),
+        },
+    )
+
+    assert calls["n"] == 1
+    assert "gal_v_kms" in tr
+    assert "gal_sigma_kms" in tr
+
+
 def test_plotted_component_sites_are_attenuated_likelihood_components(monkeypatch):
     _patch_ssp(monkeypatch)
     context = build_model_context(_cfg())
@@ -197,3 +273,18 @@ def test_plotted_component_sites_are_attenuated_likelihood_components(monkeypatc
 
     projected_total = np.asarray(_project_filters(_site(tr, "total_obs_sed"), context.packed_filters_jax))
     assert np.allclose(_site(tr, "pred_fluxes"), projected_total, rtol=2.0e-10, atol=1.0e-30)
+
+
+def test_fast_fixed_filter_projection_matches_legacy_photometry(monkeypatch):
+    _patch_ssp(monkeypatch)
+    fast_cfg = _cfg(n_wave=256)
+    slow_cfg = _cfg(n_wave=256)
+    fast_cfg.likelihood.use_fast_photometry_projection = True
+    slow_cfg.likelihood.use_fast_photometry_projection = False
+    fast_context = build_model_context(fast_cfg)
+    slow_context = build_model_context(slow_cfg)
+
+    fast_tr = _deterministic_likelihood_trace(fast_context, _fixed_component_data())
+    slow_tr = _deterministic_likelihood_trace(slow_context, _fixed_component_data())
+
+    np.testing.assert_allclose(_site(fast_tr, "pred_fluxes"), _site(slow_tr, "pred_fluxes"), rtol=2.0e-12, atol=1.0e-30)

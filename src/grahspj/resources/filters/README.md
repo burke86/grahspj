@@ -10,6 +10,10 @@ Vendored files:
 
 - `IRAC1.dat`
 - `IRAC2.dat`
+- `UKIDSSDR11PLUS_Y.dat`
+- `UKIDSSDR11PLUS_J.dat`
+- `UKIDSSDR11PLUS_H.dat`
+- `UKIDSSDR11PLUS_K.dat`
 
 Original upstream location:
 
