@@ -30,14 +30,23 @@ from grahspj.model import (
     GRAHSP_SI_EM_WIDTH_A,
     GRAHSP_TORUS_NORM_A,
     _attenuation_curve,
+    _apply_biattenuation,
+    _balmer_continuum_jax,
+    _feii_component,
     _flux_conserving_line_gaussians,
+    _host_dust_emission,
     _igm_transmission,
+    _line_gaussians,
     _powerlaw_jax,
+    _project_filters,
+    _redshift_to_obs,
     _torus_component,
     grahsp_photometric_model,
 )
 from grahspj.preload import _build_fixed_igm_jax, _build_igm_cache_jax, build_model_context
 from grahspj.preload import (
+    ModelContext,
+    PackedFiltersJax,
     SSPData,
     _DALE2014_CACHE,
     _HOST_BASIS_CACHE,
@@ -62,11 +71,35 @@ def test_agn_disk_is_normalized_at_5100_angstrom():
     assert np.all(disk > 0.0)
 
 
+def test_agn_disk_powerlaw_slopes_and_cutoff_are_in_wavelength_space():
+    blue_wave = np.asarray([2500.0, 5000.0])
+    red_wave = np.asarray([10000.0, 20000.0])
+    blue = np.asarray(_powerlaw_jax(blue_wave, 1.0, -0.5, -2.0, 5100.0, 7000.0, 1000.0, 0.0))
+    red = np.asarray(_powerlaw_jax(red_wave, 1.0, -0.5, -2.0, 5100.0, 7000.0, 1000.0, 0.0))
+    cutoff = np.asarray(_powerlaw_jax(np.asarray([500.0, 5000.0]), 1.0, -0.5, -2.0, 5100.0, 7000.0, 1000.0, 1000.0))
+    no_cutoff = np.asarray(_powerlaw_jax(np.asarray([500.0, 5000.0]), 1.0, -0.5, -2.0, 5100.0, 7000.0, 1000.0, 0.0))
+
+    assert blue[1] < blue[0]
+    assert red[1] < red[0]
+    assert cutoff[0] > no_cutoff[0] * 0.8
+    assert cutoff[1] < no_cutoff[1]
+
+
 def test_flux_conserving_lines_preserve_integrated_luminosity():
     wave = np.linspace(4500.0, 5500.0, 20001)
     line = np.asarray(_flux_conserving_line_gaussians(wave, np.asarray([5000.0]), np.asarray([3.0]), 300.0))
 
     assert np.trapezoid(line, x=wave) == pytest.approx(3.0, rel=2.0e-4)
+
+
+def test_native_agn_lines_use_5100_scaled_normalization():
+    wave = np.linspace(4900.0, 5100.0, 20001)
+    line_wave = np.asarray([5000.0])
+    line_lumin = np.asarray([2.0])
+    line = np.asarray(_line_gaussians(wave, line_wave, line_lumin, 300.0))
+
+    assert wave[np.argmax(line)] == pytest.approx(5000.0, abs=0.05)
+    assert np.trapezoid(line, x=wave) == pytest.approx(np.sqrt(2.0) * 5100.0 * line_lumin[0], rel=2.0e-4)
 
 
 def test_biattenuation_break_is_grahsp_nm_value_converted_to_angstrom():
@@ -76,6 +109,33 @@ def test_biattenuation_break_is_grahsp_nm_value_converted_to_angstrom():
     assert GRAHSP_BIATTENUATION_BREAK_A == 11000.0
     assert curve[1] == pytest.approx(1.2)
     assert curve[0] > curve[1] > curve[2]
+
+
+def test_biattenuation_routes_host_and_agn_extinction_and_dust_budget():
+    wave = np.asarray([1000.0, 2000.0, 4000.0])
+    host = np.asarray([3.0, 3.0, 3.0])
+    agn = np.asarray([5.0, 5.0, 5.0])
+    ebv_gal = 0.2
+    ebv_agn = 0.3
+    gal_att, agn_att, host_absorbed, dust_luminosity = _apply_biattenuation(
+        wave,
+        host,
+        agn,
+        ebv_gal,
+        ebv_agn,
+        -1.2,
+        -3.0,
+        1.2,
+        GRAHSP_BIATTENUATION_BREAK_A,
+    )
+    curve = np.asarray(_attenuation_curve(wave, -1.2, -3.0, 1.2, GRAHSP_BIATTENUATION_BREAK_A))
+    expected_host = host * 10 ** (ebv_gal * curve / -2.5)
+    expected_agn = agn * 10 ** ((ebv_gal + ebv_agn) * curve / -2.5)
+
+    assert np.allclose(np.asarray(gal_att), expected_host)
+    assert np.allclose(np.asarray(agn_att), expected_agn)
+    assert np.allclose(np.asarray(host_absorbed), host - expected_host)
+    assert float(dust_luminosity) == pytest.approx(np.trapezoid(host - expected_host, x=wave))
 
 
 def test_dale2014_host_dust_matches_cigale_v2025_1_reference():
@@ -97,6 +157,19 @@ def test_dale2014_host_dust_matches_cigale_v2025_1_reference():
 
     assert np.allclose(np.trapezoid(lumin_per_a, x=wave_a, axis=1), 1.0, rtol=2.0e-7, atol=1.0e-12)
     assert np.all(lumin_per_a[:, wave_a < 20000.0] == 0.0)
+
+
+def test_host_dust_emission_integrates_to_absorbed_luminosity_on_broad_grid():
+    _DALE2014_CACHE.clear()
+    alpha_grid, wave_a, lumin_per_a = _load_vendored_dale2014_templates()
+    context = SimpleNamespace(
+        dust_alpha_grid_jax=np.asarray(alpha_grid),
+        dust_lumin_rest_jax=np.asarray(lumin_per_a),
+    )
+
+    dust = np.asarray(_host_dust_emission(context, 7.5, 2.0))
+
+    assert np.trapezoid(dust, x=wave_a) == pytest.approx(7.5, rel=2.0e-7)
 
 
 def test_host_stellar_basis_lnu_to_llambda_units_and_interpolation():
@@ -154,6 +227,43 @@ def test_torus_component_wavelengths_are_angstrom_converted_to_micron():
     assert torus[3] > 100.0 * torus[0]
 
 
+def test_torus_normalization_scales_with_covering_fraction_and_agn_luminosity():
+    wave = np.asarray([GRAHSP_TORUS_NORM_A])
+    torus = np.asarray(
+        _torus_component(
+            wave,
+            fcov=0.2,
+            si=0.0,
+            cool_lam=17.0,
+            cool_width=0.45,
+            hot_lam=2.0,
+            hot_width=0.2,
+            hot_fcov=0.1,
+            si_ratio=0.29,
+            si_em_lam=GRAHSP_SI_EM_LAM_A,
+            si_abs_lam=GRAHSP_SI_ABS_LAM_A,
+            si_em_width=GRAHSP_SI_EM_WIDTH_A,
+            si_abs_width=GRAHSP_SI_ABS_WIDTH_A,
+            l_agn=10.0,
+        )
+    )
+
+    assert torus[0] == pytest.approx(2.5 * 10.0 * 0.2 / GRAHSP_TORUS_NORM_A)
+
+
+def test_torus_hot_and_cool_components_peak_in_micron_space():
+    wave = np.logspace(np.log10(10000.0), np.log10(300000.0), 2000)
+    cool_only = np.asarray(
+        _torus_component(wave, 0.2, 0.0, 17.0, 0.15, 2.0, 0.1, 0.0, 0.29, GRAHSP_SI_EM_LAM_A, GRAHSP_SI_ABS_LAM_A, GRAHSP_SI_EM_WIDTH_A, GRAHSP_SI_ABS_WIDTH_A, 1.0)
+    )
+    hot_only = np.asarray(
+        _torus_component(wave, 0.2, 0.0, 17.0, 0.15, 2.0, 0.1, 1.0, 0.29, GRAHSP_SI_EM_LAM_A, GRAHSP_SI_ABS_LAM_A, GRAHSP_SI_EM_WIDTH_A, GRAHSP_SI_ABS_WIDTH_A, 1.0)
+    ) - cool_only
+
+    assert wave[np.argmax(cool_only)] == pytest.approx(170000.0, rel=0.02)
+    assert wave[np.argmax(hot_only)] == pytest.approx(20000.0, rel=0.02)
+
+
 def test_torus_silicate_features_are_in_mid_ir_angstroms():
     wave = np.asarray([9841.0, GRAHSP_SI_EM_LAM_A, GRAHSP_SI_ABS_LAM_A])
     torus = np.asarray(
@@ -177,6 +287,52 @@ def test_torus_silicate_features_are_in_mid_ir_angstroms():
 
     assert torus[1] > torus[0]
     assert torus[1] > torus[2]
+
+
+def test_feii_velocity_shift_moves_template_feature_by_fractional_wavelength():
+    wave = np.linspace(2400.0, 2800.0, 4001)
+    template = np.exp(-0.5 * ((wave - 2600.0) / 5.0) ** 2)
+    shifted = np.asarray(_feii_component(wave, template, norm=1.0, fwhm_kms=10.0, shift_frac=0.01))
+    unshifted = np.asarray(_feii_component(wave, template, norm=1.0, fwhm_kms=10.0, shift_frac=0.0))
+
+    assert wave[np.argmax(unshifted)] == pytest.approx(2600.0, abs=0.5)
+    assert wave[np.argmax(shifted)] == pytest.approx(2600.0 * 1.01, abs=1.0)
+    assert np.trapezoid(shifted, x=wave) == pytest.approx(np.trapezoid(unshifted, x=wave), rel=0.05)
+
+
+def test_balmer_continuum_has_3646_angstrom_edge_and_blueward_emission():
+    wave = np.linspace(2500.0, 4500.0, 2001)
+    balmer = np.asarray(_balmer_continuum_jax(wave, balmer_norm=2.0, balmer_te=15000.0, balmer_tau=1.0, balmer_vel=10.0))
+
+    assert np.nanmax(balmer[wave > 3800.0]) < 1.0e-4 * np.nanmax(balmer)
+    assert balmer[np.argmin(np.abs(wave - 3646.0))] > 0.0
+    assert np.all(np.isfinite(balmer))
+
+
+def test_redshift_projection_uses_luminosity_distance_and_one_plus_z():
+    rest_wave = np.asarray([1000.0, 2000.0, 3000.0])
+    rest_lum = np.asarray([4.0, 4.0, 4.0])
+    obs_wave = rest_wave * 2.0
+    d_l = 10.0
+    obs = np.asarray(_redshift_to_obs(rest_wave, rest_lum, obs_wave, redshift=1.0, luminosity_distance_m=d_l))
+
+    assert np.allclose(obs, rest_lum / (4.0 * np.pi * d_l**2 * 2.0))
+
+
+def test_filter_projection_flat_flambda_to_mjy_units():
+    packed = PackedFiltersJax(
+        interp_indices=np.asarray([[0, 1, 2]], dtype=np.int32),
+        interp_weight=np.asarray([[0.0, 0.0, 0.0]], dtype=float),
+        transmission=np.asarray([[1.0, 1.0, 1.0]], dtype=float),
+        work_wave=np.asarray([[4000.0, 5000.0, 6000.0]], dtype=float),
+        effective_wavelength=np.asarray([5000.0], dtype=float),
+        valid_mask=np.asarray([[True, True, True]], dtype=bool),
+    )
+    obs_flux = np.asarray([2.0e-20, 2.0e-20, 2.0e-20, 2.0e-20])
+    projected = np.asarray(_project_filters(obs_flux, packed))
+    expected = 1.0e-10 / 299792458.0 * 1.0e29 * 5000.0**2 * 2.0e-20
+
+    assert projected[0] == pytest.approx(expected)
 
 
 def test_build_context_with_inline_templates(monkeypatch):
