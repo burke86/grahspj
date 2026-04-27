@@ -32,6 +32,7 @@ L_SUN_W = 3.828e26
 ERG_PER_WATT = 1.0e7
 AGN_BOLOMETRIC_CORRECTION_5100 = 9.26
 MPC_TO_M = 3.085677581491367e22
+GRAHSP_BIATTENUATION_BREAK_A = 11000.0
 
 
 def _np_to_jnp(x):
@@ -100,6 +101,27 @@ def _cfg_halfnorm(prior_config: dict[str, Any], key: str, default_scale: float):
 def _cfg_mean_scale(prior_config: dict[str, Any], key: str, default_loc: float, default_scale: float):
     """Alias for reading mean/scale prior settings from prior_config."""
     return _cfg_norm(prior_config, key, default_loc, default_scale)
+
+
+def _sample_optional_normal(prior_config: dict[str, Any], key: str, default: float, scale: float):
+    """Return a fixed default unless a Normal-like prior is explicitly configured."""
+    if key not in prior_config:
+        return jnp.asarray(default, dtype=jnp.float64)
+    return numpyro.sample(key, dist.Normal(*_cfg_norm(prior_config, key, default, scale)))
+
+
+def _sample_optional_truncnorm(prior_config: dict[str, Any], key: str, default: float, scale: float, low: float, high: float):
+    """Return a fixed default unless a truncated Normal-like prior is explicitly configured."""
+    if key not in prior_config:
+        return jnp.asarray(default, dtype=jnp.float64)
+    return numpyro.sample(
+        key,
+        dist.TruncatedNormal(
+            *_cfg_norm(prior_config, key, default, scale),
+            low=jnp.asarray(low, dtype=jnp.float64),
+            high=jnp.asarray(high, dtype=jnp.float64),
+        ),
+    )
 
 
 def _safe_log10(x):
@@ -245,6 +267,28 @@ def _line_gaussians(wave, line_wave, line_lumin, width_kms):
     z = (wave[:, None] - line_wave[None, :]) / jnp.maximum(sigma[None, :], 1e-12)
     norm = 5100.0 / jnp.sqrt(jnp.pi * sigma**2)
     return jnp.sum(line_lumin[None, :] * jnp.exp(-0.5 * z * z) * norm[None, :], axis=1)
+
+
+def _flux_conserving_line_gaussians(wave, line_wave, line_lumin, width_kms):
+    """Evaluate CIGALE-style nebular lines preserving integrated luminosity."""
+    fwhm_wave = jnp.maximum(line_wave * width_kms / C_KMS, 1.0e-8)
+    sigma = fwhm_wave / (2.0 * jnp.sqrt(2.0 * jnp.log(2.0)))
+    z = (wave[:, None] - line_wave[None, :]) / jnp.maximum(sigma[None, :], 1.0e-12)
+    profile = jnp.exp(-0.5 * z * z) / jnp.maximum(sigma[None, :] * jnp.sqrt(2.0 * jnp.pi), 1.0e-30)
+    return jnp.sum(line_lumin[None, :] * profile, axis=1)
+
+
+def _nearest_index(grid, value):
+    """Return the index of the nearest tabulated grid value."""
+    return jnp.argmin(jnp.abs(grid - jnp.asarray(value, dtype=jnp.float64)))
+
+
+def _cigale_nebular_correction(f_esc, f_dust):
+    """CIGALE nebular escape/dust correction factor."""
+    alpha_b = jnp.asarray(2.58e-19, dtype=jnp.float64)
+    alpha_1 = jnp.asarray(1.54e-19, dtype=jnp.float64)
+    escaped_or_dust = f_esc + f_dust
+    return jnp.clip((1.0 - escaped_or_dust) / (1.0 + alpha_1 / alpha_b * escaped_or_dust), 0.0, 1.0)
 
 
 def _balmer_continuum_jax(wave, balmer_norm, balmer_te, balmer_tau, balmer_vel):
@@ -440,6 +484,11 @@ def _build_diffstar_host(context: ModelContext, prior_config: dict[str, Any], *,
         "gal_lgmet": gal_lgmet,
         "gal_lgmet_scatter": gal_lgmet_scatter,
         "mass_metallicity_relation_logprior": mmr_logprior,
+        "host_age_weights": host_weights_info.age_weights,
+        "host_lgmet_weights": host_weights_info.lgmet_weights,
+        "host_ssp_weights": host_weights,
+        "ssp_lg_age_gyr": ssp_lg_age_gyr,
+        "ssp_lgmet": ssp_lgmet,
     }
     if not full_output:
         return state
@@ -452,8 +501,6 @@ def _build_diffstar_host(context: ModelContext, prior_config: dict[str, Any], *,
             "host_ssp_weights": host_weights,
             "gal_sfr_table": scaled_sfh,
             "gal_smh_table": scaled_smh,
-            "ssp_lg_age_gyr": ssp_lg_age_gyr,
-            "ssp_lgmet": ssp_lgmet,
         }
     )
     return state
@@ -481,6 +528,89 @@ def _empty_host_state(context: ModelContext):
         "gal_smh_table": jnp.zeros_like(gal_t_table),
         "ssp_lg_age_gyr": ssp_lg_age_gyr,
         "ssp_lgmet": ssp_lgmet,
+    }
+
+
+def _build_nebular_components(context: ModelContext, host_state: dict[str, Any], host_rest, prior_config: dict[str, Any]):
+    """Build CIGALE/GRAHSP-style host nebular absorption, lines, and continuum."""
+    rest_wave = context.rest_wave_jax
+    cfg = context.fit_config.nebular
+    zeros = jnp.zeros_like(rest_wave)
+    if not (context.fit_config.galaxy.fit_host and cfg.enabled):
+        return {
+            "absorption_rest": zeros,
+            "lines_rest": zeros,
+            "continuum_rest": zeros,
+            "emission_rest": zeros,
+            "dust_luminosity": jnp.asarray(0.0, dtype=jnp.float64),
+            "n_ly_young": jnp.asarray(0.0, dtype=jnp.float64),
+            "n_ly_old": jnp.asarray(0.0, dtype=jnp.float64),
+            "ly_lum_young": jnp.asarray(0.0, dtype=jnp.float64),
+            "ly_lum_old": jnp.asarray(0.0, dtype=jnp.float64),
+            "logU": jnp.asarray(float(cfg.logU), dtype=jnp.float64),
+            "zgas": jnp.asarray(float(cfg.zgas) if cfg.zgas is not None else 0.02, dtype=jnp.float64),
+            "ne": jnp.asarray(float(cfg.ne), dtype=jnp.float64),
+            "f_esc": jnp.asarray(float(cfg.f_esc), dtype=jnp.float64),
+            "f_dust": jnp.asarray(float(cfg.f_dust), dtype=jnp.float64),
+            "lines_width": jnp.asarray(float(cfg.lines_width), dtype=jnp.float64),
+            "corr": jnp.asarray(0.0, dtype=jnp.float64),
+        }
+
+    logu = _sample_optional_normal(prior_config, "nebular_logU", float(cfg.logU), 0.3)
+    default_zgas = float(cfg.zgas) if cfg.zgas is not None else None
+    host_zgas = jnp.power(10.0, host_state["gal_lgmet"])
+    zgas_default = host_zgas if default_zgas is None else jnp.asarray(default_zgas, dtype=jnp.float64)
+    zgas = _sample_optional_normal(prior_config, "nebular_zgas", float(default_zgas) if default_zgas is not None else 0.02, 0.01)
+    zgas = jnp.where(default_zgas is None and "nebular_zgas" not in prior_config, zgas_default, jnp.clip(zgas, 1.0e-6, 1.0))
+    ne = jnp.clip(_sample_optional_normal(prior_config, "nebular_ne", float(cfg.ne), 100.0), 1.0e-6, 1.0e8)
+    f_esc = _sample_optional_truncnorm(prior_config, "nebular_f_esc", float(cfg.f_esc), 0.1, 0.0, 1.0)
+    f_dust_raw = _sample_optional_truncnorm(prior_config, "nebular_f_dust", float(cfg.f_dust), 0.1, 0.0, 1.0)
+    f_dust = jnp.minimum(f_dust_raw, jnp.maximum(1.0 - f_esc, 0.0))
+    lines_width = jnp.clip(_sample_optional_normal(prior_config, "nebular_lines_width", float(cfg.lines_width), 100.0), 0.0, 1.0e5)
+
+    weights = host_state["formed_mass"] * host_state["host_ssp_weights"]
+    young_mask = (jnp.power(10.0, context.host_basis_jax.ssp_lg_age_gyr) * 1.0e3) <= float(cfg.young_age_cut_myr)
+    young_mask_2d = young_mask[None, :]
+    old_mask_2d = ~young_mask_2d
+    n_basis = context.host_basis_jax.n_ly_per_msun
+    l_basis = context.host_basis_jax.ly_lum_per_msun
+    n_ly_young = jnp.sum(weights * n_basis * young_mask_2d)
+    n_ly_old = jnp.sum(weights * n_basis * old_mask_2d)
+    ly_lum_young = jnp.sum(weights * l_basis * young_mask_2d)
+    ly_lum_old = jnp.sum(weights * l_basis * old_mask_2d)
+    n_ly_total = jnp.clip(n_ly_young + n_ly_old, 0.0, 1.0e300)
+    ly_lum_total = jnp.clip(ly_lum_young + ly_lum_old, 0.0, 1.0e300)
+
+    templates = context.nebular_templates_jax
+    z_idx = _nearest_index(templates.z_grid, zgas)
+    u_idx = _nearest_index(templates.logu_grid, logu)
+    ne_idx = _nearest_index(templates.ne_grid, ne)
+    corr = _cigale_nebular_correction(f_esc, f_dust)
+    line_lumin = templates.line_lumin_per_photon[z_idx, u_idx, ne_idx] * n_ly_total * corr
+    cont_template = templates.continuum_lumin_per_a_per_photon[z_idx, u_idx, ne_idx]
+    continuum_rest = jnp.interp(rest_wave, templates.continuum_wave_a, cont_template, left=0.0, right=0.0) * n_ly_total * corr
+    lines_rest = _flux_conserving_line_gaussians(rest_wave, templates.line_wave_a, line_lumin, lines_width)
+    emission_scale = jnp.asarray(1.0 if cfg.emission else 0.0, dtype=jnp.float64)
+    lines_rest = lines_rest * emission_scale
+    continuum_rest = continuum_rest * emission_scale
+    absorption_rest = jnp.where(rest_wave < 912.0, -host_rest * (1.0 - f_esc), 0.0)
+    return {
+        "absorption_rest": absorption_rest,
+        "lines_rest": lines_rest,
+        "continuum_rest": continuum_rest,
+        "emission_rest": lines_rest + continuum_rest,
+        "dust_luminosity": ly_lum_total * f_dust,
+        "n_ly_young": n_ly_young,
+        "n_ly_old": n_ly_old,
+        "ly_lum_young": ly_lum_young,
+        "ly_lum_old": ly_lum_old,
+        "logU": logu,
+        "zgas": zgas,
+        "ne": ne,
+        "f_esc": f_esc,
+        "f_dust": f_dust,
+        "lines_width": lines_width,
+        "corr": corr,
     }
 
 
@@ -909,17 +1039,24 @@ def grahsp_photometric_model(
         redshift = context.fixed_redshift_jax
         luminosity_distance_m = context.fixed_luminosity_distance_m_jax
         igm = context.fixed_igm_jax
+    nebular = _build_nebular_components(context, host_state, host_rest, prior_config)
+    host_with_nebular_rest = host_rest + nebular["absorption_rest"] + nebular["emission_rest"]
     gal_att_rest, agn_att_rest, host_absorbed_rest, dust_luminosity = _apply_biattenuation(
         rest_wave,
-        host_rest,
+        host_with_nebular_rest,
         disk_rest + torus_rest + feii_rest + line_rest + balmer_rest,
         ebv_gal,
         ebv_agn,
         -1.2,
         -3.0,
         1.2,
-        1100.0,
+        GRAHSP_BIATTENUATION_BREAK_A,
     )
+    dust_luminosity = dust_luminosity + nebular["dust_luminosity"]
+    gal_att_factor = 10 ** (ebv_gal * _attenuation_curve(rest_wave, -1.2, -3.0, 1.2, GRAHSP_BIATTENUATION_BREAK_A) / -2.5)
+    nebular_att_rest = nebular["emission_rest"] * gal_att_factor
+    nebular_lines_att_rest = nebular["lines_rest"] * gal_att_factor
+    nebular_continuum_att_rest = nebular["continuum_rest"] * gal_att_factor
     dust_rest = jnp.where(
         cfg.galaxy.use_energy_balance and fit_host,
         _host_dust_emission(context, dust_luminosity, dust_alpha),
@@ -927,7 +1064,7 @@ def grahsp_photometric_model(
     )
     total_rest = gal_att_rest + dust_rest + agn_att_rest
     agn_rest = agn_att_rest
-    transmitted_fraction = jnp.clip(total_rest / jnp.maximum(host_rest + disk_rest + torus_rest + feii_rest + line_rest + balmer_rest, 1e-30), 1e-4, 1.0)
+    transmitted_fraction = jnp.clip(total_rest / jnp.maximum(host_with_nebular_rest + disk_rest + torus_rest + feii_rest + line_rest + balmer_rest, 1e-30), 1e-4, 1.0)
     total_obs = _redshift_to_obs(rest_wave, total_rest * igm, obs_wave, redshift, luminosity_distance_m)
     pred_fluxes_raw = _project_filters(total_obs, context.packed_filters_jax)
     if host_capture_enabled or include_components or spectroscopy_enabled:
@@ -1041,6 +1178,9 @@ def grahsp_photometric_model(
     if include_components:
         agn_obs = _redshift_to_obs(rest_wave, agn_rest * igm, obs_wave, redshift, luminosity_distance_m)
         dust_obs = _redshift_to_obs(rest_wave, dust_rest * igm, obs_wave, redshift, luminosity_distance_m)
+        nebular_obs = _redshift_to_obs(rest_wave, nebular_att_rest * igm, obs_wave, redshift, luminosity_distance_m)
+        nebular_lines_obs = _redshift_to_obs(rest_wave, nebular_lines_att_rest * igm, obs_wave, redshift, luminosity_distance_m)
+        nebular_continuum_obs = _redshift_to_obs(rest_wave, nebular_continuum_att_rest * igm, obs_wave, redshift, luminosity_distance_m)
         disk_obs = _redshift_to_obs(rest_wave, disk_rest * igm, obs_wave, redshift, luminosity_distance_m)
         torus_obs = _redshift_to_obs(rest_wave, torus_rest * igm, obs_wave, redshift, luminosity_distance_m)
         feii_obs = _redshift_to_obs(rest_wave, feii_rest * igm, obs_wave, redshift, luminosity_distance_m)
@@ -1052,6 +1192,9 @@ def grahsp_photometric_model(
         transmitted_fraction_obs = _redshift_scalar_to_obs(rest_wave, transmitted_fraction, obs_wave, redshift)
         agn_fluxes = _project_filters(agn_obs, context.packed_filters_jax)
         dust_fluxes = _project_filters(dust_obs, context.packed_filters_jax)
+        nebular_fluxes = _project_filters(nebular_obs, context.packed_filters_jax)
+        nebular_lines_fluxes = _project_filters(nebular_lines_obs, context.packed_filters_jax)
+        nebular_continuum_fluxes = _project_filters(nebular_continuum_obs, context.packed_filters_jax)
         disk_fluxes = _project_filters(disk_obs, context.packed_filters_jax)
         torus_fluxes = _project_filters(torus_obs, context.packed_filters_jax)
         feii_fluxes = _project_filters(feii_obs, context.packed_filters_jax)
@@ -1127,6 +1270,15 @@ def grahsp_photometric_model(
     numpyro.deterministic("mass_metallicity_relation_logprior", host_state["mass_metallicity_relation_logprior"])
     numpyro.deterministic("log_dust_luminosity_fit", _safe_log10(dust_luminosity))
     numpyro.deterministic("dust_alpha_fit", dust_alpha)
+    numpyro.deterministic("nebular_logU_fit", nebular["logU"])
+    numpyro.deterministic("nebular_zgas_fit", nebular["zgas"])
+    numpyro.deterministic("nebular_ne_fit", nebular["ne"])
+    numpyro.deterministic("nebular_f_esc_fit", nebular["f_esc"])
+    numpyro.deterministic("nebular_f_dust_fit", nebular["f_dust"])
+    numpyro.deterministic("nebular_lines_width_fit", nebular["lines_width"])
+    numpyro.deterministic("nebular_corr_fit", nebular["corr"])
+    numpyro.deterministic("nebular_n_ly_young_fit", nebular["n_ly_young"])
+    numpyro.deterministic("nebular_n_ly_old_fit", nebular["n_ly_old"])
     numpyro.deterministic("absolute_flux_scale_logprior", abs_flux_scale_logprior)
     numpyro.deterministic("rest_wave", rest_wave)
     numpyro.deterministic("obs_wave", obs_wave)
@@ -1144,6 +1296,10 @@ def grahsp_photometric_model(
         numpyro.deterministic("host_rest_sed", gal_att_rest)
         numpyro.deterministic("host_absorbed_rest_sed", host_absorbed_rest)
         numpyro.deterministic("dust_rest_sed", dust_rest)
+        numpyro.deterministic("nebular_rest_sed", nebular_att_rest)
+        numpyro.deterministic("nebular_lines_rest_sed", nebular_lines_att_rest)
+        numpyro.deterministic("nebular_continuum_rest_sed", nebular_continuum_att_rest)
+        numpyro.deterministic("nebular_absorption_rest_sed", nebular["absorption_rest"])
         numpyro.deterministic("disk_rest_sed", disk_rest)
         numpyro.deterministic("torus_rest_sed", torus_rest)
         numpyro.deterministic("feii_rest_sed", feii_rest)
@@ -1155,6 +1311,9 @@ def grahsp_photometric_model(
         numpyro.deterministic("agn_fluxes", agn_fluxes)
         numpyro.deterministic("host_fluxes", host_fluxes)
         numpyro.deterministic("dust_fluxes", dust_fluxes)
+        numpyro.deterministic("nebular_fluxes", nebular_fluxes)
+        numpyro.deterministic("nebular_lines_fluxes", nebular_lines_fluxes)
+        numpyro.deterministic("nebular_continuum_fluxes", nebular_continuum_fluxes)
         numpyro.deterministic("disk_fluxes", disk_fluxes)
         numpyro.deterministic("torus_fluxes", torus_fluxes)
         numpyro.deterministic("feii_fluxes", feii_fluxes)
@@ -1167,6 +1326,9 @@ def grahsp_photometric_model(
         numpyro.deterministic("agn_obs_sed", agn_obs)
         numpyro.deterministic("host_obs_sed", host_obs)
         numpyro.deterministic("dust_obs_sed", dust_obs)
+        numpyro.deterministic("nebular_obs_sed", nebular_obs)
+        numpyro.deterministic("nebular_lines_obs_sed", nebular_lines_obs)
+        numpyro.deterministic("nebular_continuum_obs_sed", nebular_continuum_obs)
         numpyro.deterministic("disk_obs_sed", disk_obs)
         numpyro.deterministic("torus_obs_sed", torus_obs)
         numpyro.deterministic("feii_obs_sed", feii_obs)

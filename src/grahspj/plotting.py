@@ -11,6 +11,7 @@ from .mplstyle import use_style
 
 _COMPONENT_STYLE = [
     ("host_obs_sed", "Host stellar", "#2b6cb0", 1.6),
+    ("nebular_obs_sed", "Nebular emission", "#319795", 1.1),
     ("dust_obs_sed", "Host dust", "#b7791f", 1.5),
     ("disk_obs_sed", "AGN disk", "#c05621", 1.2),
     ("torus_obs_sed", "Torus", "#805ad5", 1.2),

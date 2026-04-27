@@ -94,6 +94,18 @@ class LoadedTemplates:
 
 
 @dataclass
+class NebularTemplatesJax:
+    """JAX-native CIGALE nebular line and continuum template grids."""
+    z_grid: jnp.ndarray
+    logu_grid: jnp.ndarray
+    ne_grid: jnp.ndarray
+    line_wave_a: jnp.ndarray
+    line_lumin_per_photon: jnp.ndarray
+    continuum_wave_a: jnp.ndarray
+    continuum_lumin_per_a_per_photon: jnp.ndarray
+
+
+@dataclass
 class SSPData:
     """Raw DSPS SSP grids cached for repeated host-model construction."""
     ssp_lgmet: np.ndarray
@@ -107,6 +119,8 @@ class HostBasis:
     """Precomputed SSP basis arrays on the model rest-wavelength grid."""
     rest_llambda: np.ndarray
     surviving_frac_by_age: np.ndarray
+    n_ly_per_msun: np.ndarray
+    ly_lum_per_msun: np.ndarray
 
 
 @dataclass
@@ -116,6 +130,8 @@ class HostBasisJax:
     ssp_lg_age_gyr: jnp.ndarray
     rest_llambda: jnp.ndarray
     surviving_frac_by_age: jnp.ndarray
+    n_ly_per_msun: jnp.ndarray
+    ly_lum_per_msun: jnp.ndarray
     gal_t_table: jnp.ndarray
 
 
@@ -136,6 +152,7 @@ class ModelContext:
     packed_filters_jax: PackedFiltersJax
     igm_cache_jax: IGMCacheJax
     templates: LoadedTemplates
+    nebular_templates_jax: NebularTemplatesJax
     rest_wave_jax: jnp.ndarray
     obs_wave_jax: jnp.ndarray
     filter_effective_wavelength_jax: jnp.ndarray
@@ -170,6 +187,7 @@ _TEMPLATE_CACHE: dict[tuple[Any, ...], LoadedTemplates] = {}
 _DALE2014_CACHE: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
 _HOST_BASIS_CACHE: dict[tuple[str, float, float, int], HostBasis] = {}
 _REST_TEMPLATE_CACHE: dict[tuple[Any, ...], tuple[np.ndarray, np.ndarray]] = {}
+_NEBULAR_TEMPLATE_CACHE: dict[str, NebularTemplatesJax] = {}
 _DEFAULT_SPECLITE_NAME_MAP = {
     "u_sdss": "sdss2010-u",
     "g_sdss": "sdss2010-g",
@@ -598,6 +616,23 @@ def _lnu_lsun_per_hz_to_llambda_w_per_a_np(wave_a: np.ndarray, lnu_lsun_per_hz: 
     return lnu_w_per_hz * 2.99792458e8 / (wave_m * wave_m) * 1.0e-10
 
 
+def _ssp_lyman_basis_np(ssp_wave: np.ndarray, ssp_llambda_w_per_a: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Integrate SSP Lyman-continuum photon rates and luminosities per solar mass."""
+    wave = np.asarray(ssp_wave, dtype=float)
+    mask = wave < 912.0
+    nmet, nage = ssp_llambda_w_per_a.shape[:2]
+    if np.count_nonzero(mask) < 2:
+        return np.zeros((nmet, nage), dtype=float), np.zeros((nmet, nage), dtype=float)
+    wave_ly = wave[mask]
+    llambda_ly = np.clip(np.asarray(ssp_llambda_w_per_a[:, :, mask], dtype=float), 0.0, None)
+    h_j_s = 6.62607015e-34
+    c_m_s = 2.99792458e8
+    photon_kernel = wave_ly[None, None, :] * 1.0e-10 / (h_j_s * c_m_s)
+    n_ly = np.trapezoid(llambda_ly * photon_kernel, x=wave_ly, axis=-1)
+    ly_lum = np.trapezoid(llambda_ly, x=wave_ly, axis=-1)
+    return np.nan_to_num(n_ly, nan=0.0, posinf=0.0, neginf=0.0), np.nan_to_num(ly_lum, nan=0.0, posinf=0.0, neginf=0.0)
+
+
 def _pack_loaded_filters(filters: Sequence[LoadedFilter]) -> PackedFilters:
     """Pack per-filter interpolation arrays into padded matrices."""
     if not filters:
@@ -749,6 +784,7 @@ def _build_host_basis(rest_wave: np.ndarray, ssp_data: SSPData) -> HostBasis:
         ssp_data.ssp_wave[None, None, :],
         ssp_data.ssp_flux,
     )
+    n_ly_per_msun, ly_lum_per_msun = _ssp_lyman_basis_np(ssp_data.ssp_wave, ssp_llambda)
     rest_llambda = np.empty(
         (ssp_data.ssp_flux.shape[0], ssp_data.ssp_flux.shape[1], rest_wave.size),
         dtype=float,
@@ -768,6 +804,8 @@ def _build_host_basis(rest_wave: np.ndarray, ssp_data: SSPData) -> HostBasis:
     loaded = HostBasis(
         rest_llambda=rest_llambda,
         surviving_frac_by_age=surviving_frac_by_age,
+        n_ly_per_msun=n_ly_per_msun,
+        ly_lum_per_msun=ly_lum_per_msun,
     )
     _HOST_BASIS_CACHE[cache_key] = loaded
     return loaded
@@ -780,6 +818,8 @@ def _build_host_basis_jax(ssp_data: SSPData, host_basis: HostBasis, gal_t_table:
         ssp_lg_age_gyr=jnp.asarray(ssp_data.ssp_lg_age_gyr, dtype=jnp.float64),
         rest_llambda=jnp.asarray(host_basis.rest_llambda, dtype=jnp.float64),
         surviving_frac_by_age=jnp.asarray(host_basis.surviving_frac_by_age, dtype=jnp.float64),
+        n_ly_per_msun=jnp.asarray(host_basis.n_ly_per_msun, dtype=jnp.float64),
+        ly_lum_per_msun=jnp.asarray(host_basis.ly_lum_per_msun, dtype=jnp.float64),
         gal_t_table=jnp.asarray(gal_t_table, dtype=jnp.float64),
     )
 
@@ -804,6 +844,34 @@ def _build_rest_template_cache(rest_wave: np.ndarray, templates: LoadedTemplates
         dust_lumin_rest[i] = np.interp(rest_wave, templates.dust_wave, templates.dust_lumin[i], left=0.0, right=0.0)
     loaded = (feii_template_on_rest.astype(float), dust_lumin_rest.astype(float))
     _REST_TEMPLATE_CACHE[cache_key] = loaded
+    return loaded
+
+
+def _load_nebular_templates_jax(enabled: bool) -> NebularTemplatesJax:
+    """Load compact CIGALE v2022.1 nebular template grids as JAX arrays."""
+    if not enabled:
+        z = jnp.asarray([0.02], dtype=jnp.float64)
+        u = jnp.asarray([-2.0], dtype=jnp.float64)
+        ne = jnp.asarray([100.0], dtype=jnp.float64)
+        wave = jnp.asarray([5000.0], dtype=jnp.float64)
+        zeros4 = jnp.zeros((1, 1, 1, 1), dtype=jnp.float64)
+        return NebularTemplatesJax(z, u, ne, wave, zeros4, wave, zeros4)
+    cached = _NEBULAR_TEMPLATE_CACHE.get("cigale-v2022.1")
+    if cached is not None:
+        return cached
+    line_path = _package_resource_path("resources/nebular/nebular_lines.npz")
+    cont_path = _package_resource_path("resources/nebular/nebular_continuum.npz")
+    with np.load(line_path) as lines, np.load(cont_path) as cont:
+        loaded = NebularTemplatesJax(
+            z_grid=jnp.asarray(lines["z_grid"], dtype=jnp.float64),
+            logu_grid=jnp.asarray(lines["logu_grid"], dtype=jnp.float64),
+            ne_grid=jnp.asarray(lines["ne_grid"], dtype=jnp.float64),
+            line_wave_a=jnp.asarray(lines["line_wave_a"], dtype=jnp.float64),
+            line_lumin_per_photon=jnp.asarray(lines["line_lumin_per_photon"], dtype=jnp.float64),
+            continuum_wave_a=jnp.asarray(cont["continuum_wave_a"], dtype=jnp.float64),
+            continuum_lumin_per_a_per_photon=jnp.asarray(cont["continuum_lumin_per_a_per_photon"], dtype=jnp.float64),
+        )
+    _NEBULAR_TEMPLATE_CACHE["cigale-v2022.1"] = loaded
     return loaded
 
 
@@ -929,6 +997,7 @@ def build_model_context(cfg: FitConfig) -> ModelContext:
     packed_filters_jax = _pack_loaded_filters_jax(packed_filters)
     igm_cache_jax = _build_igm_cache_jax(rest_wave)
     templates = _load_templates(cfg)
+    nebular_templates_jax = _load_nebular_templates_jax(bool(cfg.nebular.enabled))
     feii_template_on_rest, dust_lumin_rest = _build_rest_template_cache(rest_wave, templates)
     rest_wave_jax = jnp.asarray(rest_wave, dtype=jnp.float64)
     obs_wave_jax = jnp.asarray(obs_wave, dtype=jnp.float64)
@@ -971,6 +1040,7 @@ def build_model_context(cfg: FitConfig) -> ModelContext:
         packed_filters_jax=packed_filters_jax,
         igm_cache_jax=igm_cache_jax,
         templates=templates,
+        nebular_templates_jax=nebular_templates_jax,
         rest_wave_jax=rest_wave_jax,
         obs_wave_jax=obs_wave_jax,
         filter_effective_wavelength_jax=filter_effective_wavelength_jax,

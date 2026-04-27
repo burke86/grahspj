@@ -123,6 +123,38 @@ class GalaxyConfig:
 
 
 @dataclass
+class NebularConfig:
+    """CIGALE/GRAHSP-style host-galaxy nebular emission configuration."""
+    enabled: bool = True
+    emission: bool = True
+    logU: float = -2.0
+    zgas: float | None = None
+    ne: float = 100.0
+    f_esc: float = 0.0
+    f_dust: float = 0.0
+    lines_width: float = 300.0
+    young_age_cut_myr: float = 10.0
+
+    def validate(self) -> None:
+        if self.zgas is not None and (not np.isfinite(float(self.zgas)) or float(self.zgas) <= 0.0):
+            raise ValueError("nebular.zgas must be a positive finite metallicity when set.")
+        if not np.isfinite(float(self.logU)):
+            raise ValueError("nebular.logU must be finite.")
+        if not np.isfinite(float(self.ne)) or float(self.ne) <= 0.0:
+            raise ValueError("nebular.ne must be positive and finite.")
+        if not np.isfinite(float(self.lines_width)) or float(self.lines_width) < 0.0:
+            raise ValueError("nebular.lines_width must be finite and non-negative.")
+        if not np.isfinite(float(self.young_age_cut_myr)) or float(self.young_age_cut_myr) < 0.0:
+            raise ValueError("nebular.young_age_cut_myr must be finite and non-negative.")
+        if not 0.0 <= float(self.f_esc) <= 1.0:
+            raise ValueError("nebular.f_esc must be between 0 and 1.")
+        if not 0.0 <= float(self.f_dust) <= 1.0:
+            raise ValueError("nebular.f_dust must be between 0 and 1.")
+        if float(self.f_esc) + float(self.f_dust) > 1.0:
+            raise ValueError("nebular.f_esc + nebular.f_dust must be <= 1.")
+
+
+@dataclass
 class AGNConfig:
     """AGN component configuration, templates, and fixed branch settings."""
     fit_agn: bool = True
@@ -204,6 +236,7 @@ class FitConfig:
     photometry: PhotometryData
     filters: FilterSet = field(default_factory=FilterSet)
     galaxy: GalaxyConfig = field(default_factory=GalaxyConfig)
+    nebular: NebularConfig = field(default_factory=NebularConfig)
     agn: AGNConfig = field(default_factory=AGNConfig)
     likelihood: LikelihoodConfig = field(default_factory=LikelihoodConfig)
     spectroscopy: SpectroscopyData | Sequence[SpectroscopyData] | None = None
@@ -214,6 +247,7 @@ class FitConfig:
     def validate(self) -> None:
         """Validate nested config components that require runtime checks."""
         self.photometry.validate()
+        self.nebular.validate()
         for spectrum in self.spectroscopy_list:
             spectrum.validate()
         if not self.galaxy.fit_host and not self.agn.fit_agn:
@@ -363,6 +397,7 @@ def fit_config_from_mapping(data: Mapping[str, Any]) -> FitConfig:
         photometry=_coerce_dataclass(PhotometryData, data["photometry"]),
         filters=filters_obj,
         galaxy=_coerce_dataclass(GalaxyConfig, data.get("galaxy", {})),
+        nebular=_coerce_dataclass(NebularConfig, data.get("nebular", {})),
         agn=agn_obj,
         likelihood=_coerce_dataclass(LikelihoodConfig, data.get("likelihood", {})),
         spectroscopy=spectroscopy_obj,
