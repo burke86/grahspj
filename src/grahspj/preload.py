@@ -204,14 +204,23 @@ _DEFAULT_SPECLITE_NAME_MAP = {
     "W3": "wise2010-W3",
     "W4": "wise2010-W4",
 }
-_VENDORED_FILTER_FILES = {
-    "IRAC1": "resources/filters/IRAC1.dat",
-    "IRAC2": "resources/filters/IRAC2.dat",
-    "UKIDSSDR11PLUS_Y": "resources/filters/UKIDSSDR11PLUS_Y.dat",
-    "UKIDSSDR11PLUS_J": "resources/filters/UKIDSSDR11PLUS_J.dat",
-    "UKIDSSDR11PLUS_H": "resources/filters/UKIDSSDR11PLUS_H.dat",
-    "UKIDSSDR11PLUS_K": "resources/filters/UKIDSSDR11PLUS_K.dat",
-}
+def _package_resource_path(relpath: str) -> Path:
+    """Return an absolute path to a packaged grahspj resource."""
+    return Path(str(resources.files("grahspj").joinpath(relpath)))
+
+_registry_path = _package_resource_path("resources/filters/filter_registry.txt")
+data = np.loadtxt(_registry_path, dtype=str, comments="#")
+_VENDORED_FILTER_FILES = dict(zip(data[:, 0].tolist(), data[:, 1].tolist()))
+_VENDORED_FILTER_FILES.update(
+    {
+        "IRAC1": "resources/filters/IRAC1.dat",
+        "IRAC2": "resources/filters/IRAC2.dat",
+        "UKIDSSDR11PLUS_Y": "resources/filters/UKIDSSDR11PLUS_Y.dat",
+        "UKIDSSDR11PLUS_J": "resources/filters/UKIDSSDR11PLUS_J.dat",
+        "UKIDSSDR11PLUS_H": "resources/filters/UKIDSSDR11PLUS_H.dat",
+        "UKIDSSDR11PLUS_K": "resources/filters/UKIDSSDR11PLUS_K.dat",
+    }
+)
 
 
 def _load_ssp_templates(dsps_ssp_fn: str):
@@ -251,11 +260,6 @@ def _scalar_angstrom_value(value) -> float:
     if hasattr(value, "to_value"):
         return float(value.to_value(u.AA))
     return float(value)
-
-
-def _package_resource_path(relpath: str) -> Path:
-    """Return an absolute path to a packaged grahspj resource."""
-    return Path(str(resources.files("grahspj").joinpath(relpath)))
 
 
 def _mw_band_attenuation_factor(wave_obs, filt_trans, ebv, r_v=3.1):
@@ -373,6 +377,17 @@ def _fetch_database_filter_curve(filter_name: str) -> FilterCurve:
     )
 
 
+def _load_filter_type(path: str) -> str:
+    """Read the # photon / # energy header line from a .dat filter file."""
+    with open(path) as f:
+        for line in f:
+            if line.startswith("#"):
+                stripped = line.lstrip("#").strip()
+                if stripped in ("energy", "photon"):
+                    return stripped
+    return "energy"  # default: no conversion
+
+
 def _load_vendored_filter_curve(filter_name: str) -> FilterCurve | None:
     """Load one vendored filter curve if grahspj ships it locally."""
     relpath = _VENDORED_FILTER_FILES.get(filter_name)
@@ -382,12 +397,22 @@ def _load_vendored_filter_curve(filter_name: str) -> FilterCurve | None:
     data = np.loadtxt(path, comments="#")
     if data.ndim != 2 or data.shape[1] < 2:
         raise ValueError(f"Vendored filter file {path} does not contain two-column transmission data.")
-    wave = np.asarray(data[:, 0], dtype=float)
-    trans = np.asarray(data[:, 1], dtype=float)
-    if trans[0] != 0.0 or trans[-1] != 0.0:
-        trans = trans.copy()
-        trans[0] = 0.0
-        trans[-1] = 0.0
+
+    wave = np.array(data[:, 0], dtype = float)  # always owns its memory
+    trans = np.array(data[:, 1], dtype = float)  # always owns its memory
+    if _load_filter_type(path) == "photon":
+        trans *= wave
+    trans = np.clip(trans, 0.0, None)
+
+    # ensure strictly increasing wavelength (speclite requirement)
+    order = np.argsort(wave, kind="stable")
+    wave, trans = wave[order], trans[order]
+    unique = np.concatenate(([True], np.diff(wave) > 0))
+    wave, trans = wave[unique], trans[unique]
+
+    trans[0] = 0.0
+    trans[-1] = 0.0
+
     return FilterCurve(name=filter_name, wave=wave, transmission=trans)
 
 

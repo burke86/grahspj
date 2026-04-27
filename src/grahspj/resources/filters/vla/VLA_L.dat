@@ -1,0 +1,8 @@
+# vla.L
+# energy
+# L-band VLA 1.49 GHz - 20 cm https://science.nrao.edu/facilities/vla/docs/manuals/oss2013B/performance/bands
+1000000000 0.0
+1001000000 1.0
+2013000000 1.0
+2999000000 1.0
+3000000000 0.0
