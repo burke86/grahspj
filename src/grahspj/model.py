@@ -832,13 +832,16 @@ def _evaluate_jaxqsofit_backend(
     )
 
 
-def grahsp_photometric_model(
+def evaluate_photometric_state(
     context: ModelContext,
     include_components: bool = False,
     include_sed_agn_features: bool = True,
     include_spectral_features: bool = True,
+    add_likelihood: bool = True,
+    return_state: bool = True,
+    force_component_fluxes: bool = False,
 ):
-    """NumPyro model for one grahspj photometric fit or predictive expansion."""
+    """Evaluate one grahspj photometric model state inside a NumPyro trace."""
     cfg = context.fit_config
     prior_config = cfg.prior_config
     rest_wave = context.rest_wave_jax
@@ -1237,11 +1240,12 @@ def grahsp_photometric_model(
             cfg.spectroscopy_config.systematics_width,
             cfg.spectroscopy_config.student_t_df,
         )
-        numpyro.factor("spectroscopy_loglike_factor", spec_logl)
+        if add_likelihood:
+            numpyro.factor("spectroscopy_loglike_factor", spec_logl)
     else:
         log_spectrum_scale = jnp.asarray(0.0, dtype=jnp.float64)
         spec_logl = jnp.asarray(0.0, dtype=jnp.float64)
-    need_agn_fluxes = fit_agn and (include_components or cfg.likelihood.variability_uncertainty)
+    need_agn_fluxes = fit_agn and (include_components or force_component_fluxes or cfg.likelihood.variability_uncertainty)
     need_trans_fluxes = include_components or cfg.likelihood.attenuation_model_uncertainty
     if include_components:
         agn_obs = _redshift_to_obs(rest_wave, agn_rest * igm, obs_wave, redshift, luminosity_distance_m)
@@ -1310,7 +1314,8 @@ def grahsp_photometric_model(
         filter_wavelength=filter_wavelength,
         redshift=redshift,
     )
-    numpyro.factor("photometry_loglike", logl)
+    if add_likelihood:
+        numpyro.factor("photometry_loglike", logl)
     abs_flux_scale_logprior = jnp.asarray(0.0, dtype=jnp.float64)
     if cfg.likelihood.use_absolute_flux_scale_prior:
         abs_flux_scale_logprior = _absolute_flux_scale_logprior(
@@ -1319,7 +1324,8 @@ def grahsp_photometric_model(
             valid_mask=positive_detected_mask,
             sigma_dex=cfg.likelihood.absolute_flux_scale_prior_sigma_dex,
         )
-        numpyro.factor("absolute_flux_scale_prior", abs_flux_scale_logprior)
+        if add_likelihood:
+            numpyro.factor("absolute_flux_scale_prior", abs_flux_scale_logprior)
 
     numpyro.deterministic("pred_fluxes", pred_fluxes)
     numpyro.deterministic("pred_spectrum_fluxes", spec_model_fluxes)
@@ -1414,3 +1420,68 @@ def grahsp_photometric_model(
         numpyro.deterministic("line_nl_obs_sed", line_nl_obs)
         numpyro.deterministic("line_liner_obs_sed", line_liner_obs)
         numpyro.deterministic("balmer_obs_sed", balmer_obs)
+
+    if not return_state:
+        return None
+
+    state = {
+        "pred_fluxes": pred_fluxes,
+        "pred_spectrum_fluxes": spec_model_fluxes,
+        "agn_fluxes": agn_fluxes,
+        "host_fluxes": host_fluxes,
+        "host_total_fluxes": host_fluxes_total,
+        "dust_fluxes": dust_fluxes if include_components else jnp.zeros_like(pred_fluxes),
+        "nebular_fluxes": nebular_fluxes if include_components else jnp.zeros_like(pred_fluxes),
+        "nebular_lines_fluxes": nebular_lines_fluxes if include_components else jnp.zeros_like(pred_fluxes),
+        "nebular_continuum_fluxes": nebular_continuum_fluxes if include_components else jnp.zeros_like(pred_fluxes),
+        "rest_wave": rest_wave,
+        "obs_wave": obs_wave,
+        "redshift_fit": redshift,
+        "photometry_loglike": logl,
+        "spectroscopy_loglike": spec_logl,
+    }
+    if include_components:
+        state.update(
+            {
+                "total_rest_sed": total_rest,
+                "agn_rest_sed": agn_rest,
+                "host_rest_sed": host_stellar_att_rest,
+                "host_total_rest_sed": gal_att_rest,
+                "dust_rest_sed": dust_rest,
+                "nebular_rest_sed": nebular_att_rest,
+                "total_obs_sed": total_obs,
+                "agn_obs_sed": agn_obs,
+                "host_obs_sed": host_stellar_obs,
+                "host_total_obs_sed": host_obs,
+                "dust_obs_sed": dust_obs,
+                "nebular_obs_sed": nebular_obs,
+                "nebular_lines_obs_sed": nebular_lines_obs,
+                "nebular_continuum_obs_sed": nebular_continuum_obs,
+                "disk_obs_sed": disk_obs,
+                "torus_obs_sed": torus_obs,
+                "feii_obs_sed": feii_obs,
+                "line_obs_sed": line_obs,
+                "line_bl_obs_sed": line_bl_obs,
+                "line_nl_obs_sed": line_nl_obs,
+                "line_liner_obs_sed": line_liner_obs,
+                "balmer_obs_sed": balmer_obs,
+            }
+        )
+    return state
+
+
+def grahsp_photometric_model(
+    context: ModelContext,
+    include_components: bool = False,
+    include_sed_agn_features: bool = True,
+    include_spectral_features: bool = True,
+):
+    """NumPyro model for one grahspj photometric fit or predictive expansion."""
+    return evaluate_photometric_state(
+        context,
+        include_components=include_components,
+        include_sed_agn_features=include_sed_agn_features,
+        include_spectral_features=include_spectral_features,
+        add_likelihood=True,
+        return_state=False,
+    )
