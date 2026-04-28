@@ -34,6 +34,12 @@ ctio.mosaicii.B resources/filters/ctio/mosaicii/CTIO_MosaicII.B.dat
 ctio.mosaicii.V resources/filters/ctio/mosaicii/CTIO_MosaicII.V.dat
 ctio.mosaicii.R resources/filters/ctio/mosaicii/CTIO_MosaicII.R.dat
 ctio.mosaicii.I resources/filters/ctio/mosaicii/CTIO_MosaicII.I.dat
+ctio.decam.u resources/filters/ctio/decam/CTIO_DECam.u.dat
+ctio.decam.g resources/filters/ctio/decam/CTIO_DECam.g.dat
+ctio.decam.r resources/filters/ctio/decam/CTIO_DECam.r.dat
+ctio.decam.i resources/filters/ctio/decam/CTIO_DECam.i.dat
+ctio.decam.z resources/filters/ctio/decam/CTIO_DECam.z.dat
+ctio.decam.Y resources/filters/ctio/decam/CTIO_DECam.Y.dat
 euclid.nisp.Y resources/filters/euclid/nisp/Euclid_NISP.Y.dat
 euclid.nisp.J resources/filters/euclid/nisp/Euclid_NISP.J.dat
 euclid.nisp.H resources/filters/euclid/nisp/Euclid_NISP.H.dat
