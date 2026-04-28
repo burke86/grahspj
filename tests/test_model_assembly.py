@@ -15,7 +15,7 @@ from grahspj.config import (
     Observation,
     PhotometryData,
 )
-from grahspj.model import GRAHSP_PL_BEND_LOC_A, GRAHSP_PL_BEND_WIDTH, GRAHSP_PL_CUTOFF_A, _project_filters, _redshift_to_obs, grahsp_photometric_model
+from grahspj.model import GRAHSP_PL_BEND_LOC_A, GRAHSP_PL_BEND_WIDTH, GRAHSP_PL_CUTOFF_A, _project_filters, _redshift_to_obs, evaluate_photometric_state, grahsp_photometric_model
 from grahspj.preload import build_model_context
 
 
@@ -179,6 +179,39 @@ def test_component_rest_and_observed_seds_sum_to_total(monkeypatch):
     assert np.allclose(_site(tr, "total_obs_sed"), total_obs_parts, rtol=2.0e-10, atol=1.0e-40)
 
 
+def test_evaluate_photometric_state_matches_deterministic_sites(monkeypatch):
+    _patch_ssp(monkeypatch)
+    context = build_model_context(_cfg())
+    data = {"ebv_gal": np.array(0.2), "ebv_agn": np.array(0.1), "dust_alpha": np.array(2.0)}
+    model = substitute(lambda: evaluate_photometric_state(context, include_components=True), data=data)
+    trace_handler = trace(seed(model, 0))
+    state = trace_handler()
+    tr = trace_handler.trace
+
+    for key in ("pred_fluxes", "agn_fluxes", "host_fluxes", "dust_fluxes", "nebular_fluxes", "total_rest_sed"):
+        np.testing.assert_allclose(np.asarray(state[key], dtype=float), _site(tr, key))
+
+
+def test_evaluate_photometric_state_can_return_component_fluxes_without_full_components(monkeypatch):
+    _patch_ssp(monkeypatch)
+    context = build_model_context(_cfg())
+    data = {"ebv_gal": np.array(0.2), "ebv_agn": np.array(0.1), "dust_alpha": np.array(2.0)}
+    model = substitute(
+        lambda: evaluate_photometric_state(
+            context,
+            include_components=False,
+            force_component_fluxes=True,
+        ),
+        data=data,
+    )
+    state = trace(seed(model, 0))()
+
+    assert "total_rest_sed" not in state
+    assert np.all(np.isfinite(np.asarray(state["pred_fluxes"], dtype=float)))
+    assert np.all(np.isfinite(np.asarray(state["agn_fluxes"], dtype=float)))
+    assert np.all(np.isfinite(np.asarray(state["host_fluxes"], dtype=float)))
+
+
 def test_energy_balance_dust_sed_integrates_to_absorbed_luminosity(monkeypatch):
     _patch_ssp(monkeypatch)
     context = build_model_context(_cfg(rest_wave_max=2.3e9, n_wave=4096))
@@ -256,6 +289,36 @@ def test_host_kinematics_enabled_samples_and_broadens(monkeypatch):
     assert calls["n"] == 1
     assert "gal_v_kms" in tr
     assert "gal_sigma_kms" in tr
+
+
+def test_agn_only_context_skips_host_ssp_loading(monkeypatch):
+    monkeypatch.setattr("grahspj.preload._SSP_DATA_CACHE", {})
+    monkeypatch.setattr("grahspj.preload._HOST_BASIS_CACHE", {})
+
+    def _raise_if_called(*args, **kwargs):
+        raise AssertionError("AGN-only contexts should not load host SSP templates")
+
+    monkeypatch.setattr("grahspj.preload._load_ssp_templates", _raise_if_called)
+    context = build_model_context(_cfg(fit_host=False))
+
+    assert context.ssp_data.ssp_flux.shape == (1, 1, 1)
+    assert context.host_basis.rest_llambda.shape[-1] == context.rest_wave.size
+    assert np.allclose(context.host_basis.rest_llambda, 0.0)
+
+
+def test_host_only_context_skips_agn_template_loading(monkeypatch):
+    _patch_ssp(monkeypatch)
+    monkeypatch.setattr("grahspj.preload._TEMPLATE_CACHE", {})
+    monkeypatch.setattr("grahspj.preload._REST_TEMPLATE_CACHE", {})
+
+    def _raise_loadtxt(*args, **kwargs):
+        raise AssertionError("Host-only contexts should not load FeII or AGN emission-line templates")
+
+    monkeypatch.setattr("grahspj.preload.np.loadtxt", _raise_loadtxt)
+    context = build_model_context(_cfg(fit_agn=False))
+
+    assert np.allclose(np.asarray(context.feii_template_on_rest_jax, dtype=float), 0.0)
+    assert np.asarray(context.templates.line_wave, dtype=float).size == 1
 
 
 def test_balmer_continuum_default_off_skips_balmer_kernel(monkeypatch):

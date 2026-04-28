@@ -135,6 +135,43 @@ class HostBasisJax:
     gal_t_table: jnp.ndarray
 
 
+def _empty_ssp_data() -> SSPData:
+    """Return a minimal SSP payload for contexts without a host component."""
+
+    return SSPData(
+        ssp_lgmet=np.asarray([0.0], dtype=float),
+        ssp_lg_age_gyr=np.asarray([0.0], dtype=float),
+        ssp_wave=np.asarray([1.0], dtype=float),
+        ssp_flux=np.zeros((1, 1, 1), dtype=float),
+    )
+
+
+def _empty_host_basis(rest_wave: np.ndarray) -> HostBasis:
+    """Return a zero host basis for AGN-only contexts."""
+
+    return HostBasis(
+        rest_llambda=np.zeros((1, 1, rest_wave.size), dtype=float),
+        surviving_frac_by_age=np.ones(1, dtype=float),
+        n_ly_per_msun=np.zeros((1, 1), dtype=float),
+        ly_lum_per_msun=np.zeros((1, 1), dtype=float),
+    )
+
+
+def _empty_host_basis_jax(rest_wave: np.ndarray, gal_t_table: np.ndarray) -> HostBasisJax:
+    """Return a zero JAX host basis for AGN-only contexts."""
+
+    host_basis = _empty_host_basis(rest_wave)
+    return HostBasisJax(
+        ssp_lgmet=jnp.asarray([0.0], dtype=jnp.float64),
+        ssp_lg_age_gyr=jnp.asarray([0.0], dtype=jnp.float64),
+        rest_llambda=jnp.asarray(host_basis.rest_llambda, dtype=jnp.float64),
+        surviving_frac_by_age=jnp.asarray(host_basis.surviving_frac_by_age, dtype=jnp.float64),
+        n_ly_per_msun=jnp.asarray(host_basis.n_ly_per_msun, dtype=jnp.float64),
+        ly_lum_per_msun=jnp.asarray(host_basis.ly_lum_per_msun, dtype=jnp.float64),
+        gal_t_table=jnp.asarray(gal_t_table, dtype=jnp.float64),
+    )
+
+
 @dataclass
 class ModelContext:
     """Static arrays and metadata required by one grahspj model evaluation."""
@@ -492,9 +529,16 @@ def _build_jaxqsofit_prior_config(cfg: FitConfig, spec_fluxes: np.ndarray, spec_
 
 def _load_templates(cfg: FitConfig) -> LoadedTemplates:
     """Load AGN and host-dust template arrays required by the current config."""
+    need_agn_templates = bool(cfg.agn.fit_agn) or (
+        bool(cfg.spectroscopy_config.enabled)
+        and str(cfg.spectroscopy_config.backend).lower() == "jaxqsofit"
+    )
+    need_dust_templates = bool(cfg.galaxy.fit_host and cfg.galaxy.use_energy_balance)
     feii = cfg.agn.feii_template
     em = cfg.agn.emission_line_template
     cache_key = (
+        need_agn_templates,
+        need_dust_templates,
         feii.name,
         id(feii.wave),
         id(feii.lumin),
@@ -506,7 +550,26 @@ def _load_templates(cfg: FitConfig) -> LoadedTemplates:
     cached = _TEMPLATE_CACHE.get(cache_key)
     if cached is not None:
         return cached
-    dust_alpha_grid, dust_wave, dust_lumin = _load_vendored_dale2014_templates()
+    if need_dust_templates:
+        dust_alpha_grid, dust_wave, dust_lumin = _load_vendored_dale2014_templates()
+    else:
+        dust_alpha_grid = np.asarray([float(cfg.galaxy.dust_alpha)], dtype=float)
+        dust_wave = np.asarray([1.0], dtype=float)
+        dust_lumin = np.zeros((1, 1), dtype=float)
+    if not need_agn_templates:
+        loaded = LoadedTemplates(
+            feii_wave=np.asarray([1.0], dtype=float),
+            feii_lumin=np.asarray([0.0], dtype=float),
+            line_wave=np.asarray([1.0], dtype=float),
+            line_blagn=np.asarray([0.0], dtype=float),
+            line_sy2=np.asarray([0.0], dtype=float),
+            line_liner=np.asarray([0.0], dtype=float),
+            dust_alpha_grid=dust_alpha_grid,
+            dust_wave=dust_wave,
+            dust_lumin=dust_lumin,
+        )
+        _TEMPLATE_CACHE[cache_key] = loaded
+        return loaded
     if feii.wave is not None and em.wave is not None:
         loaded = LoadedTemplates(
             feii_wave=np.asarray(feii.wave, dtype=float),
@@ -1115,8 +1178,6 @@ def build_model_context(cfg: FitConfig) -> ModelContext:
 
     rest_wave = np.geomspace(cfg.galaxy.rest_wave_min, cfg.galaxy.rest_wave_max, cfg.galaxy.n_wave).astype(float)
     obs_wave = rest_wave * (1.0 + max(cfg.observation.redshift, 0.0))
-    ssp_data = load_cached_ssp_data(cfg.galaxy.dsps_ssp_fn)
-    host_basis = _build_host_basis(rest_wave, ssp_data)
     cosmology = FlatLambdaCDM(H0=cfg.galaxy.cosmology_h0, Om0=cfg.galaxy.cosmology_om0)
     t_obs_gyr = float(cosmology.age(max(cfg.observation.redshift, 0.0)).value)
     luminosity_distance_m = float(cosmology.luminosity_distance(max(cfg.observation.redshift, 0.0)).to_value(u.m))
@@ -1125,7 +1186,14 @@ def build_model_context(cfg: FitConfig) -> ModelContext:
         max(t_obs_gyr, cfg.galaxy.sfh_t_min_gyr * 1.01),
         int(cfg.galaxy.sfh_n_steps),
     ).astype(float)
-    host_basis_jax = _build_host_basis_jax(ssp_data, host_basis, gal_t_table)
+    if cfg.galaxy.fit_host:
+        ssp_data = load_cached_ssp_data(cfg.galaxy.dsps_ssp_fn)
+        host_basis = _build_host_basis(rest_wave, ssp_data)
+        host_basis_jax = _build_host_basis_jax(ssp_data, host_basis, gal_t_table)
+    else:
+        ssp_data = _empty_ssp_data()
+        host_basis = _empty_host_basis(rest_wave)
+        host_basis_jax = _empty_host_basis_jax(rest_wave, gal_t_table)
 
     filter_responses = _load_filter_responses(cfg)
     loaded_filters = [_prepare_loaded_filter(obs_wave, response) for response in filter_responses]
@@ -1133,7 +1201,7 @@ def build_model_context(cfg: FitConfig) -> ModelContext:
     packed_filters_jax = _pack_loaded_filters_jax(packed_filters)
     igm_cache_jax = _build_igm_cache_jax(rest_wave)
     templates = _load_templates(cfg)
-    nebular_templates_jax = _load_nebular_templates_jax(bool(cfg.nebular.enabled))
+    nebular_templates_jax = _load_nebular_templates_jax(bool(cfg.galaxy.fit_host and cfg.nebular.enabled))
     feii_template_on_rest, dust_lumin_rest = _build_rest_template_cache(rest_wave, templates)
     fixed_nebular_line_profile = _build_fixed_nebular_line_profile(rest_wave, cfg, nebular_templates_jax)
     rest_wave_jax = jnp.asarray(rest_wave, dtype=jnp.float64)
