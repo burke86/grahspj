@@ -454,6 +454,116 @@ def _project_rest_scalar_filters(context: ModelContext, rest_value):
     return context.fixed_scalar_filter_projection_jax @ rest_value
 
 
+def _interp_redshift_projection_matrix(redshift, grid, matrices):
+    """Linearly interpolate a redshift-tabulated projection matrix."""
+    z = jnp.asarray(redshift, dtype=jnp.float64)
+    idx_hi = jnp.searchsorted(grid, z, side="right")
+    idx_hi = jnp.clip(idx_hi, 1, grid.shape[0] - 1)
+    idx_lo = idx_hi - 1
+    z_lo = grid[idx_lo]
+    z_hi = grid[idx_hi]
+    weight = jnp.clip((z - z_lo) / jnp.maximum(z_hi - z_lo, 1.0e-30), 0.0, 1.0)
+    return matrices[idx_lo] * (1.0 - weight) + matrices[idx_hi] * weight
+
+
+def _can_use_redshift_filter_projection(context: ModelContext, cfg) -> bool:
+    """Return whether cached variable-redshift photometric matrices are valid."""
+    return bool(
+        cfg.likelihood.use_redshift_projection_cache
+        and cfg.observation.fit_redshift
+        and context.redshift_projection_cache_jax is not None
+    )
+
+
+def _project_redshift_luminosity_filters(context: ModelContext, rest_lum, redshift):
+    """Project rest luminosity density through redshift-interpolated matrices."""
+    cache = context.redshift_projection_cache_jax
+    matrix = _interp_redshift_projection_matrix(redshift, cache.redshift_grid, cache.filter_projection)
+    return matrix @ rest_lum
+
+
+def _project_redshift_scalar_filters(context: ModelContext, rest_value, redshift):
+    """Project rest-frame scalar values through redshift-interpolated matrices."""
+    cache = context.redshift_projection_cache_jax
+    matrix = _interp_redshift_projection_matrix(redshift, cache.redshift_grid, cache.scalar_projection)
+    return matrix @ rest_value
+
+
+def _local_line_gaussian_grid(line_wave, line_lumin, width_kms, *, n_local: int = 9):
+    """Evaluate CIGALE-style line profiles on per-line local grids."""
+    line_wave = jnp.asarray(line_wave, dtype=jnp.float64)
+    line_lumin = jnp.asarray(line_lumin, dtype=jnp.float64)
+    offsets = jnp.linspace(-3.0, 3.0, int(n_local), dtype=jnp.float64)
+    fwhm_wave = jnp.maximum(line_wave * (width_kms * 1000.0) / 299792458.0, 1.0e-8)
+    sigma = fwhm_wave / (2.0 * jnp.sqrt(2.0 * jnp.log(2.0)))
+    wave = line_wave[:, None] + offsets[None, :] * fwhm_wave[:, None]
+    z = (wave - line_wave[:, None]) / jnp.maximum(sigma[:, None], 1.0e-12)
+    norm = 5100.0 / jnp.sqrt(jnp.pi * sigma * sigma)
+    lumin = line_lumin[:, None] * jnp.exp(-0.5 * z * z) * norm[:, None]
+    return wave, lumin
+
+
+def _project_local_line_filters(
+    context: ModelContext,
+    line_wave,
+    line_lumin,
+    width_kms,
+    ebv_total,
+    redshift,
+    luminosity_distance_m,
+    igm,
+):
+    """Project Gaussian line emission through filters using local line grids."""
+    line_lumin = jnp.asarray(line_lumin, dtype=jnp.float64)
+    rest_line_wave, rest_lumin = _local_line_gaussian_grid(line_wave, line_lumin, width_kms)
+    rest_line_wave = jnp.maximum(rest_line_wave, 1.0e-6)
+    redshift = jnp.asarray(redshift, dtype=jnp.float64)
+    luminosity_distance_m = jnp.asarray(luminosity_distance_m, dtype=jnp.float64)
+    distance_scale = 4.0 * jnp.pi * jnp.maximum(luminosity_distance_m, 1.0e-12) ** 2 * jnp.maximum(1.0 + redshift, 1.0e-8)
+    obs_line_wave = rest_line_wave * (1.0 + redshift)
+    igm = jnp.interp(rest_line_wave, context.rest_wave_jax, igm, left=0.0, right=0.0)
+    attenuation_curve = _attenuation_curve(rest_line_wave, -1.2, -3.0, 1.2, GRAHSP_BIATTENUATION_BREAK_A)
+    attenuation_factor = 10 ** (jnp.asarray(ebv_total, dtype=jnp.float64) * attenuation_curve / -2.5)
+    flux_lambda = rest_lumin * attenuation_factor * igm / distance_scale
+    curves = context.packed_filter_curves_jax
+
+    def _one_filter(filt_wave, filt_trans, denom, eff_wave):
+        trans = jnp.interp(obs_line_wave, filt_wave, filt_trans, left=0.0, right=0.0)
+        numer = jnp.sum(jnp.trapezoid(trans * flux_lambda, obs_line_wave, axis=1))
+        f_lambda = numer / jnp.maximum(denom, 1.0e-30)
+        return 1.0e-10 / 299792458.0 * 1.0e29 * eff_wave * eff_wave * f_lambda
+
+    return jax.vmap(_one_filter)(
+        curves.wave,
+        curves.transmission,
+        curves.denom,
+        context.filter_effective_wavelength_jax,
+    )
+
+
+def _interp_fixed_local_line_terms(width_kms, cache):
+    """Interpolate cached fixed-z local line projection terms in log width."""
+    log_width = jnp.log(jnp.maximum(jnp.asarray(width_kms, dtype=jnp.float64), 1.0e-12))
+    grid = cache.log_width_grid
+    idx_hi = jnp.searchsorted(grid, log_width, side="right")
+    idx_hi = jnp.clip(idx_hi, 1, grid.shape[0] - 1)
+    idx_lo = idx_hi - 1
+    w = jnp.clip((log_width - grid[idx_lo]) / jnp.maximum(grid[idx_hi] - grid[idx_lo], 1.0e-30), 0.0, 1.0)
+    profile_norm = cache.profile_norm[idx_lo] * (1.0 - w) + cache.profile_norm[idx_hi] * w
+    attenuation_curve = cache.attenuation_curve[idx_lo] * (1.0 - w) + cache.attenuation_curve[idx_hi] * w
+    projection_weight = cache.projection_weight[idx_lo] * (1.0 - w) + cache.projection_weight[idx_hi] * w
+    return profile_norm, attenuation_curve, projection_weight
+
+
+def _project_fixed_cached_local_line_filters(context: ModelContext, line_lumin, width_kms, ebv_total):
+    """Project local AGN lines with fixed-z cached filter overlap terms."""
+    cache = context.fixed_local_line_projection_cache_jax
+    profile_norm, attenuation_curve, projection_weight = _interp_fixed_local_line_terms(width_kms, cache)
+    attenuation_factor = 10 ** (jnp.asarray(ebv_total, dtype=jnp.float64) * attenuation_curve / -2.5)
+    line_flux_density = jnp.asarray(line_lumin, dtype=jnp.float64)[:, None] * profile_norm * attenuation_factor
+    return jnp.sum(projection_weight * line_flux_density[None, :, :], axis=(1, 2))
+
+
 def _interp_rest_sed(target_wave, source_wave, source_sed):
     """Interpolate one rest-frame SED onto a new wavelength grid."""
     return jnp.interp(target_wave, source_wave, source_sed, left=0.0, right=0.0)
@@ -644,10 +754,12 @@ def _build_nebular_components(context: ModelContext, host_state: dict[str, Any],
     u_idx = _nearest_index(templates.logu_grid, logu)
     ne_idx = _nearest_index(templates.ne_grid, ne)
     corr = _cigale_nebular_correction(f_esc, f_dust)
-    cont_template = templates.continuum_lumin_per_a_per_photon[z_idx, u_idx, ne_idx]
-    continuum_rest = jnp.interp(rest_wave, templates.continuum_wave_a, cont_template, left=0.0, right=0.0) * n_ly_total * corr
+    rest_templates = context.nebular_rest_templates_jax
+    continuum_rest = rest_templates.continuum_lumin_per_a_per_photon[z_idx, u_idx, ne_idx] * n_ly_total * corr
     if context.fixed_nebular_line_profile_jax is not None:
         lines_rest = context.fixed_nebular_line_profile_jax * n_ly_total * corr
+    elif rest_templates.line_profile_per_photon is not None:
+        lines_rest = rest_templates.line_profile_per_photon[z_idx, u_idx, ne_idx] * n_ly_total * corr
     else:
         line_lumin = templates.line_lumin_per_photon[z_idx, u_idx, ne_idx] * n_ly_total * corr
         lines_rest = _flux_conserving_line_gaussians(rest_wave, templates.line_wave_a, line_lumin, lines_width)
@@ -915,6 +1027,14 @@ def evaluate_photometric_state(
         and cfg.likelihood.use_host_capture_model
         and (has_phot_spatial_scale or has_spec_spatial_scale)
     )
+    skip_coarse_agn_line_grid = bool(
+        fit_agn
+        and include_sed_agn_features
+        and cfg.likelihood.use_local_line_photometry
+        and not include_components
+        and not spectroscopy_enabled
+        and not cfg.likelihood.attenuation_model_uncertainty
+    )
     host_state = _build_diffstar_host(context, prior_config, full_output=include_components) if fit_host else _empty_host_state(context)
     host_rest = host_state["host_rest"]
     if fit_host and bool(cfg.galaxy.fit_host_kinematics):
@@ -1014,22 +1134,28 @@ def evaluate_photometric_state(
         l_broadlines = 0.02 * l_agn_lambda_5100 * lines_strength
         l_narrowlines = 0.002 * l_agn_lambda_5100 * lines_strength
 
-        line_bl_rest = jnp.where(
-            agn_type == 1,
-            _line_gaussians(rest_wave, line_wave, l_broadlines * line_blagn, line_width),
-            jnp.zeros_like(rest_wave),
-        )
-        line_nl_rest = jnp.where(
-            agn_type in (1, 2),
-            _line_gaussians(rest_wave, line_wave, l_narrowlines * line_sy2, line_width),
-            jnp.zeros_like(rest_wave),
-        )
-        line_liner_rest = jnp.where(
-            agn_type == 3,
-            _line_gaussians(rest_wave, line_wave, l_narrowlines * line_liner, line_width),
-            jnp.zeros_like(rest_wave),
-        )
-        line_rest = line_bl_rest + line_nl_rest + line_liner_rest
+        if skip_coarse_agn_line_grid:
+            line_bl_rest = jnp.zeros_like(rest_wave)
+            line_nl_rest = jnp.zeros_like(rest_wave)
+            line_liner_rest = jnp.zeros_like(rest_wave)
+            line_rest = jnp.zeros_like(rest_wave)
+        else:
+            line_bl_rest = jnp.where(
+                agn_type == 1,
+                _line_gaussians(rest_wave, line_wave, l_broadlines * line_blagn, line_width),
+                jnp.zeros_like(rest_wave),
+            )
+            line_nl_rest = jnp.where(
+                agn_type in (1, 2),
+                _line_gaussians(rest_wave, line_wave, l_narrowlines * line_sy2, line_width),
+                jnp.zeros_like(rest_wave),
+            )
+            line_liner_rest = jnp.where(
+                agn_type == 3,
+                _line_gaussians(rest_wave, line_wave, l_narrowlines * line_liner, line_width),
+                jnp.zeros_like(rest_wave),
+            )
+            line_rest = line_bl_rest + line_nl_rest + line_liner_rest
 
         if include_sed_agn_features and agn_type == 1:
             feii_norm = numpyro.sample("feii_norm", dist.LogNormal(*_cfg_norm(prior_config, "log_feii_norm", np.log(max(cfg.agn.feii_strength_default, 1e-3)), 0.8)))
@@ -1162,15 +1288,75 @@ def evaluate_photometric_state(
     agn_rest = agn_att_rest
     transmitted_fraction = jnp.clip(total_rest / jnp.maximum(host_with_nebular_rest + disk_rest + torus_rest + feii_rest + line_rest + balmer_rest, 1e-30), 1e-4, 1.0)
     fast_projection_enabled = _can_use_fixed_filter_projection(context, cfg) and not include_components
+    redshift_projection_enabled = (
+        _can_use_redshift_filter_projection(context, cfg)
+        and not include_components
+        and not spectroscopy_enabled
+    )
     if fast_projection_enabled:
         total_obs = _redshift_to_obs(rest_wave, total_rest * igm, obs_wave, redshift, luminosity_distance_m) if spectroscopy_enabled else jnp.zeros_like(obs_wave)
         pred_fluxes_raw = _project_rest_luminosity_filters(context, total_rest)
+    elif redshift_projection_enabled:
+        total_obs = jnp.zeros_like(obs_wave)
+        pred_fluxes_raw = _project_redshift_luminosity_filters(context, total_rest, redshift)
     else:
         total_obs = _redshift_to_obs(rest_wave, total_rest * igm, obs_wave, redshift, luminosity_distance_m)
         pred_fluxes_raw = _project_filters(total_obs, context.packed_filters_jax)
+    local_agn_line_fluxes = jnp.zeros_like(pred_fluxes_raw)
+    coarse_agn_line_fluxes = jnp.zeros_like(pred_fluxes_raw)
+    correct_agn_line_photometry = (
+        fit_agn
+        and include_sed_agn_features
+        and bool(cfg.likelihood.use_local_line_photometry)
+        and not include_components
+    )
+    if correct_agn_line_photometry:
+        if agn_type == 1:
+            local_line_lumin = l_broadlines * line_blagn + l_narrowlines * line_sy2
+        elif agn_type == 2:
+            local_line_lumin = l_narrowlines * line_sy2
+        elif agn_type == 3:
+            local_line_lumin = l_narrowlines * line_liner
+        else:
+            local_line_lumin = jnp.zeros_like(line_wave)
+        if context.fixed_local_line_projection_cache_jax is not None and not cfg.observation.fit_redshift:
+            local_agn_line_fluxes = _project_fixed_cached_local_line_filters(
+                context,
+                local_line_lumin,
+                line_width,
+                ebv_gal + ebv_agn,
+            )
+        else:
+            local_agn_line_fluxes = _project_local_line_filters(
+                context,
+                line_wave,
+                local_line_lumin,
+                line_width,
+                ebv_gal + ebv_agn,
+                redshift,
+                luminosity_distance_m,
+                igm,
+            )
+        if fast_projection_enabled:
+            coarse_agn_line_fluxes = _project_rest_luminosity_filters(context, line_att_rest)
+        elif redshift_projection_enabled:
+            coarse_agn_line_fluxes = _project_redshift_luminosity_filters(context, line_att_rest, redshift)
+        else:
+            coarse_line_obs = _redshift_to_obs(rest_wave, line_att_rest * igm, obs_wave, redshift, luminosity_distance_m)
+            coarse_agn_line_fluxes = _project_filters(coarse_line_obs, context.packed_filters_jax)
+        pred_fluxes_raw = pred_fluxes_raw - coarse_agn_line_fluxes + local_agn_line_fluxes
     if host_capture_enabled or include_components or spectroscopy_enabled:
-        host_obs = _redshift_to_obs(rest_wave, gal_att_rest * igm, obs_wave, redshift, luminosity_distance_m)
-        host_fluxes_total = _project_rest_luminosity_filters(context, gal_att_rest) if fast_projection_enabled else _project_filters(host_obs, context.packed_filters_jax)
+        host_obs = (
+            jnp.zeros_like(obs_wave)
+            if redshift_projection_enabled and not (include_components or spectroscopy_enabled)
+            else _redshift_to_obs(rest_wave, gal_att_rest * igm, obs_wave, redshift, luminosity_distance_m)
+        )
+        if fast_projection_enabled:
+            host_fluxes_total = _project_rest_luminosity_filters(context, gal_att_rest)
+        elif redshift_projection_enabled:
+            host_fluxes_total = _project_redshift_luminosity_filters(context, gal_att_rest, redshift)
+        else:
+            host_fluxes_total = _project_filters(host_obs, context.packed_filters_jax)
     else:
         host_obs = jnp.zeros_like(total_obs)
         host_fluxes_total = jnp.zeros_like(pred_fluxes_raw)
@@ -1311,14 +1497,24 @@ def evaluate_photometric_state(
         if need_agn_fluxes:
             if fast_projection_enabled:
                 agn_fluxes = _project_rest_luminosity_filters(context, agn_rest)
+                if correct_agn_line_photometry:
+                    agn_fluxes = agn_fluxes - coarse_agn_line_fluxes + local_agn_line_fluxes
+            elif redshift_projection_enabled:
+                agn_fluxes = _project_redshift_luminosity_filters(context, agn_rest, redshift)
+                if correct_agn_line_photometry:
+                    agn_fluxes = agn_fluxes - coarse_agn_line_fluxes + local_agn_line_fluxes
             else:
                 agn_obs = _redshift_to_obs(rest_wave, agn_rest * igm, obs_wave, redshift, luminosity_distance_m)
                 agn_fluxes = _project_filters(agn_obs, context.packed_filters_jax)
+                if correct_agn_line_photometry:
+                    agn_fluxes = agn_fluxes - coarse_agn_line_fluxes + local_agn_line_fluxes
         else:
             agn_fluxes = jnp.zeros_like(pred_fluxes)
         if need_trans_fluxes:
             if fast_projection_enabled:
                 trans_fluxes = _project_rest_scalar_filters(context, transmitted_fraction)
+            elif redshift_projection_enabled:
+                trans_fluxes = _project_redshift_scalar_filters(context, transmitted_fraction, redshift)
             else:
                 transmitted_fraction_obs = _redshift_scalar_to_obs(rest_wave, transmitted_fraction, obs_wave, redshift)
                 trans_fluxes = _project_filters(transmitted_fraction_obs, context.packed_filters_jax)

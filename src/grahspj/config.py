@@ -186,6 +186,14 @@ class LikelihoodConfig:
     absolute_flux_scale_prior_sigma_dex: float = 0.5
     use_host_capture_model: bool = False
     use_fast_photometry_projection: bool = True
+    use_local_line_photometry: bool = True
+    use_fixed_local_line_cache: bool = True
+    fixed_local_line_cache_n_width: int = 128
+    fixed_local_line_cache_min_width_kms: float = 200.0
+    fixed_local_line_cache_max_width_kms: float = 30000.0
+    use_redshift_projection_cache: bool = True
+    redshift_projection_n_grid: int = 128
+    redshift_projection_sigma: float = 6.0
 
 
 @dataclass

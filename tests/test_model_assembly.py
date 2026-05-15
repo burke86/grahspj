@@ -420,6 +420,7 @@ def test_fast_fixed_filter_projection_matches_legacy_photometry(monkeypatch):
     fast_cfg = _cfg(n_wave=256)
     slow_cfg = _cfg(n_wave=256)
     fast_cfg.likelihood.use_fast_photometry_projection = True
+    fast_cfg.likelihood.use_local_line_photometry = False
     slow_cfg.likelihood.use_fast_photometry_projection = False
     fast_context = build_model_context(fast_cfg)
     slow_context = build_model_context(slow_cfg)
@@ -428,3 +429,143 @@ def test_fast_fixed_filter_projection_matches_legacy_photometry(monkeypatch):
     slow_tr = _deterministic_likelihood_trace(slow_context, _fixed_component_data())
 
     np.testing.assert_allclose(_site(fast_tr, "pred_fluxes"), _site(slow_tr, "pred_fluxes"), rtol=2.0e-12, atol=1.0e-30)
+
+
+def test_local_line_photometry_improves_coarse_grid_line_projection(monkeypatch):
+    _patch_ssp(monkeypatch)
+
+    def _line_cfg(n_wave, *, local_lines):
+        cfg = _cfg(fit_host=False, n_wave=n_wave, rest_wave_max=2000.0)
+        cfg.photometry = PhotometryData(filter_names=["ha"], fluxes=[1.0], errors=[0.1])
+        cfg.filters = FilterSet(
+            curves=[
+                FilterCurve(
+                    name="ha",
+                    wave=[650.0, 690.0, 730.0],
+                    transmission=[0.0, 1.0, 0.0],
+                )
+            ],
+            use_grahsp_database=False,
+        )
+        cfg.likelihood.use_fast_photometry_projection = True
+        cfg.likelihood.use_local_line_photometry = local_lines
+        cfg.likelihood.variability_uncertainty = False
+        cfg.nebular.enabled = False
+        cfg.agn.fit_balmer_continuum = False
+        cfg.agn.feii_strength_default = 0.0
+        return cfg
+
+    data = _fixed_component_data()
+    data["line_width_kms"] = np.array(1200.0)
+    data["feii_norm"] = np.array(0.0)
+
+    coarse_legacy = _site(
+        _deterministic_likelihood_trace(build_model_context(_line_cfg(64, local_lines=False)), data),
+        "pred_fluxes",
+    )
+    coarse_local = _site(
+        _deterministic_likelihood_trace(build_model_context(_line_cfg(64, local_lines=True)), data),
+        "pred_fluxes",
+    )
+    fine_reference = _site(
+        _deterministic_likelihood_trace(build_model_context(_line_cfg(4096, local_lines=False)), data),
+        "pred_fluxes",
+    )
+
+    legacy_error = np.abs(coarse_legacy - fine_reference)
+    local_error = np.abs(coarse_local - fine_reference)
+
+    assert not np.allclose(coarse_local, coarse_legacy)
+    assert np.all(local_error < legacy_error)
+
+
+def test_fixed_local_line_cache_matches_exact_local_line_projection(monkeypatch):
+    _patch_ssp(monkeypatch)
+
+    def _line_cfg(*, use_cache):
+        cfg = _cfg(fit_host=False, n_wave=64, rest_wave_max=2000.0)
+        cfg.photometry = PhotometryData(filter_names=["ha"], fluxes=[1.0], errors=[0.1])
+        cfg.filters = FilterSet(
+            curves=[
+                FilterCurve(
+                    name="ha",
+                    wave=[650.0, 690.0, 730.0],
+                    transmission=[0.0, 1.0, 0.0],
+                )
+            ],
+            use_grahsp_database=False,
+        )
+        cfg.likelihood.use_fast_photometry_projection = True
+        cfg.likelihood.use_local_line_photometry = True
+        cfg.likelihood.use_fixed_local_line_cache = use_cache
+        cfg.likelihood.variability_uncertainty = False
+        cfg.nebular.enabled = False
+        cfg.agn.fit_balmer_continuum = False
+        cfg.agn.feii_strength_default = 0.0
+        return cfg
+
+    data = _fixed_component_data()
+    data["line_width_kms"] = np.array(1200.0)
+    data["feii_norm"] = np.array(0.0)
+
+    cached = _site(
+        _deterministic_likelihood_trace(build_model_context(_line_cfg(use_cache=True)), data),
+        "pred_fluxes",
+    )
+    exact = _site(
+        _deterministic_likelihood_trace(build_model_context(_line_cfg(use_cache=False)), data),
+        "pred_fluxes",
+    )
+
+    np.testing.assert_allclose(cached, exact, rtol=5.0e-4, atol=1.0e-30)
+
+
+def test_local_line_photometry_improves_redshift_fit_line_projection(monkeypatch):
+    _patch_ssp(monkeypatch)
+
+    def _line_cfg(n_wave, *, local_lines):
+        cfg = _cfg(fit_host=False, n_wave=n_wave, rest_wave_max=2000.0)
+        cfg.observation.fit_redshift = True
+        cfg.observation.redshift_err = 0.01
+        cfg.photometry = PhotometryData(filter_names=["ha"], fluxes=[1.0], errors=[0.1])
+        cfg.filters = FilterSet(
+            curves=[
+                FilterCurve(
+                    name="ha",
+                    wave=[650.0, 690.0, 730.0],
+                    transmission=[0.0, 1.0, 0.0],
+                )
+            ],
+            use_grahsp_database=False,
+        )
+        cfg.likelihood.use_fast_photometry_projection = True
+        cfg.likelihood.use_local_line_photometry = local_lines
+        cfg.likelihood.variability_uncertainty = False
+        cfg.nebular.enabled = False
+        cfg.agn.fit_balmer_continuum = False
+        cfg.agn.feii_strength_default = 0.0
+        return cfg
+
+    data = _fixed_component_data()
+    data["redshift"] = np.array(0.05)
+    data["line_width_kms"] = np.array(1200.0)
+    data["feii_norm"] = np.array(0.0)
+
+    coarse_legacy = _site(
+        _deterministic_likelihood_trace(build_model_context(_line_cfg(64, local_lines=False)), data),
+        "pred_fluxes",
+    )
+    coarse_local = _site(
+        _deterministic_likelihood_trace(build_model_context(_line_cfg(64, local_lines=True)), data),
+        "pred_fluxes",
+    )
+    fine_reference = _site(
+        _deterministic_likelihood_trace(build_model_context(_line_cfg(4096, local_lines=False)), data),
+        "pred_fluxes",
+    )
+
+    legacy_error = np.abs(coarse_legacy - fine_reference)
+    local_error = np.abs(coarse_local - fine_reference)
+
+    assert not np.allclose(coarse_local, coarse_legacy)
+    assert np.all(local_error < legacy_error)
