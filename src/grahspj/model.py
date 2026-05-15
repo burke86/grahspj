@@ -20,6 +20,8 @@ import jax.numpy as jnp
 import numpy as np
 from diffmah.diffmah_kernels import DEFAULT_MAH_PARAMS
 from diffstar import DEFAULT_DIFFSTAR_U_PARAMS, DiffstarUParams, calc_sfh_singlegal, get_bounded_diffstar_params
+from diffstar.defaults import FB as DIFFSTAR_FB
+from diffstar.defaults import LGT0 as DIFFSTAR_LGT0
 from dsps.sed.ssp_weights import calc_ssp_weights_sfh_table_lognormal_mdf
 import numpyro
 import numpyro.distributions as dist
@@ -74,15 +76,36 @@ def _get_jax_cosmo_backend(h0: float, om0: float):
     return bg, cosmo
 
 
+def _flat_lcdm_luminosity_distance_m_jax(redshift, h0: float, om0: float):
+    """Fallback flat-LCDM luminosity distance when jax_cosmo is unavailable."""
+    z = jnp.maximum(jnp.asarray(redshift, dtype=jnp.float64), 0.0)
+    grid = jnp.linspace(0.0, 1.0, 256, dtype=jnp.float64)
+    z_grid = z[..., None] * grid
+    e_z = jnp.sqrt(float(om0) * (1.0 + z_grid) ** 3 + (1.0 - float(om0)))
+    integrand = 1.0 / jnp.maximum(e_z, 1.0e-30)
+    dt = 1.0 / (grid.size - 1)
+    integral_unit = dt * (
+        0.5 * integrand[..., 0] + jnp.sum(integrand[..., 1:-1], axis=-1) + 0.5 * integrand[..., -1]
+    )
+    comoving_mpc = (C_KMS / float(h0)) * z * integral_unit
+    return (1.0 + z) * comoving_mpc * MPC_TO_M
+
+
 def _luminosity_distance_m_jax(redshift, h0: float, om0: float):
-    """Return luminosity distance in meters using jax_cosmo."""
+    """Return luminosity distance in meters using a JAX-native flat LCDM path."""
     redshift = jnp.asarray(redshift, dtype=jnp.float64)
     scalar_input = redshift.ndim == 0
-    bg, cosmo = _get_jax_cosmo_backend(float(h0), float(om0))
-    a = 1.0 / (1.0 + jnp.maximum(redshift, 0.0))
-    d_a_mpc_over_h = bg.angular_diameter_distance(cosmo, a)
-    d_l_mpc_over_h = d_a_mpc_over_h / jnp.maximum(a * a, 1.0e-30)
-    d_l_m = d_l_mpc_over_h / cosmo.h * MPC_TO_M
+    try:
+        bg, cosmo = _get_jax_cosmo_backend(float(h0), float(om0))
+    except ModuleNotFoundError as exc:
+        if exc.name != "pkg_resources":
+            raise
+        d_l_m = _flat_lcdm_luminosity_distance_m_jax(redshift, h0, om0)
+    else:
+        a = 1.0 / (1.0 + jnp.maximum(redshift, 0.0))
+        d_a_mpc_over_h = bg.angular_diameter_distance(cosmo, a)
+        d_l_mpc_over_h = d_a_mpc_over_h / jnp.maximum(a * a, 1.0e-30)
+        d_l_m = d_l_mpc_over_h / cosmo.h * MPC_TO_M
     return jnp.reshape(d_l_m, ()) if scalar_input else d_l_m
 
 
@@ -472,7 +495,14 @@ def _build_diffstar_host(context: ModelContext, prior_config: dict[str, Any], *,
         default_loc = float(np.asarray(getattr(DEFAULT_DIFFSTAR_U_PARAMS, key)))
         u_params[key] = numpyro.sample(key, dist.Normal(*_cfg_mean_scale(prior_config, key, default_loc, 1.0)))
     bounded = get_bounded_diffstar_params(DiffstarUParams(**u_params))
-    base_history = calc_sfh_singlegal(bounded, DEFAULT_MAH_PARAMS, gal_t_table, return_smh=True)
+    base_history = calc_sfh_singlegal(
+        bounded,
+        DEFAULT_MAH_PARAMS,
+        gal_t_table,
+        lgt0=DIFFSTAR_LGT0,
+        fb=DIFFSTAR_FB,
+        return_smh=True,
+    )
 
     gal_lgmet = numpyro.sample("gal_lgmet", dist.Normal(*_cfg_mean_scale(prior_config, "gal_lgmet", -0.3, 0.5)))
     gal_lgmet_scatter = numpyro.sample("gal_lgmet_scatter", dist.HalfNormal(_cfg_halfnorm(prior_config, "gal_lgmet_scatter", 0.2)))
