@@ -12,7 +12,7 @@ authors = [
   { name = "grahspj contributors" }
 ]
 dependencies = [
-  "numpy",
+  "numpy<2.4",
   "scipy",
   "setuptools>=68,<81",
   "astropy",
