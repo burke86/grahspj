@@ -71,6 +71,26 @@ def _percent_delta(candidate: float, baseline: float) -> float:
     return float(100.0 * (candidate - baseline) / baseline) if baseline else float("nan")
 
 
+def _stderr(values: list[float]) -> float:
+    return float(_stdev(values) / np.sqrt(len(values))) if len(values) > 1 else 0.0
+
+
+def _metric_mean(row: dict[str, Any], key: str) -> float:
+    return float(row.get(f"{key}_mean", row[key]))
+
+
+def _metric_stderr(row: dict[str, Any], key: str) -> float:
+    return float(row.get(f"{key}_stderr", 0.0))
+
+
+def _percent_delta_stderr(candidate: float, baseline: float, candidate_stderr: float, baseline_stderr: float) -> float:
+    if baseline == 0.0:
+        return float("nan")
+    term_candidate = candidate_stderr / baseline
+    term_baseline = candidate * baseline_stderr / (baseline * baseline)
+    return float(100.0 * np.sqrt(term_candidate * term_candidate + term_baseline * term_baseline))
+
+
 def _workflow_url() -> str:
     server = os.getenv("GITHUB_SERVER_URL", "https://github.com")
     repo = os.getenv("GITHUB_REPOSITORY", "")
@@ -147,20 +167,30 @@ def build_fairall9_fixedz_config(dsps_ssp_fn: str | Path) -> FitConfig:
     )
 
 
-def _bench_jitted(name: str, fn: Callable[[], Any], repeats: int) -> dict[str, Any]:
+def _bench_jitted(name: str, fn: Callable[[], Any], repeats: int, trials: int) -> dict[str, Any]:
     compiled = jax.jit(fn)
     out = compiled()
     jax.block_until_ready(out)
-    start = time.perf_counter()
-    for _ in range(repeats):
-        out = compiled()
-    jax.block_until_ready(out)
-    elapsed = time.perf_counter() - start
+    trial_elapsed = []
+    trial_ms = []
+    for _ in range(trials):
+        start = time.perf_counter()
+        for _ in range(repeats):
+            out = compiled()
+        jax.block_until_ready(out)
+        elapsed = time.perf_counter() - start
+        trial_elapsed.append(float(elapsed))
+        trial_ms.append(float(1.0e3 * elapsed / repeats))
     return {
         "name": name,
         "repeats": int(repeats),
-        "elapsed_seconds": float(elapsed),
-        "ms_per_eval": float(1.0e3 * elapsed / repeats),
+        "trials": int(trials),
+        "elapsed_seconds": float(sum(trial_elapsed)),
+        "trial_elapsed_seconds": trial_elapsed,
+        "trial_ms_per_eval": trial_ms,
+        "ms_per_eval": _mean(trial_ms),
+        "ms_per_eval_stdev": _stdev(trial_ms),
+        "ms_per_eval_stderr": _stderr(trial_ms),
         "value": float(np.asarray(out).ravel()[0]),
     }
 
@@ -362,9 +392,12 @@ def run_benchmark(
     map_steps: int,
     repeats: int,
     component_repeats: int,
+    trials: int,
 ) -> dict[str, Any]:
     if repeats < 1 or component_repeats < 1:
         raise ValueError("repeats and component_repeats must be at least 1")
+    if trials < 1:
+        raise ValueError("trials must be at least 1")
 
     setup_start = time.perf_counter()
     cfg = build_fairall9_fixedz_config(dsps_ssp_fn)
@@ -386,13 +419,14 @@ def run_benchmark(
         include_spectral_features=False,
     )
 
-    whole = _bench_jitted("whole_log_density", lambda: log_density(model, (), {}, params)[0], repeats)
+    whole = _bench_jitted("whole_log_density", lambda: log_density(model, (), {}, params)[0], repeats, trials)
     whole_no_features = _bench_jitted(
         "whole_log_density_no_sed_agn_features",
         lambda: log_density(model_no_features, (), {}, params)[0],
         repeats,
+        trials,
     )
-    components = [_bench_jitted(name, fn, component_repeats) for name, fn in _build_component_functions(fitter).items()]
+    components = [_bench_jitted(name, fn, component_repeats, trials) for name, fn in _build_component_functions(fitter).items()]
 
     return {
         "label": label,
@@ -405,6 +439,7 @@ def run_benchmark(
         "map_steps": int(map_steps),
         "repeats": int(repeats),
         "component_repeats": int(component_repeats),
+        "trials": int(trials),
         "setup_seconds": float(setup_seconds),
         "map_seconds": float(map_seconds),
         "whole_log_density": whole,
@@ -417,12 +452,28 @@ def _fmt_ms(value: float) -> str:
     return f"{value:.4f} ms"
 
 
+def _fmt_ms_row(row: dict[str, Any]) -> str:
+    mean = _metric_mean(row, "ms_per_eval")
+    stderr = _metric_stderr(row, "ms_per_eval")
+    if stderr <= 0.0:
+        return _fmt_ms(mean)
+    return f"{mean:.4f} +/- {stderr:.4f} ms"
+
+
+def _fmt_percent_delta(candidate: float, baseline: float, candidate_stderr: float = 0.0, baseline_stderr: float = 0.0) -> str:
+    delta = _percent_delta(candidate, baseline)
+    stderr = _percent_delta_stderr(candidate, baseline, candidate_stderr, baseline_stderr)
+    if not np.isfinite(stderr) or stderr <= 0.0:
+        return f"{delta:+.2f}%"
+    return f"{delta:+.2f}% +/- {stderr:.2f}%"
+
+
 def _component_map(result: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return {row["name"]: row for row in result["components"]}
 
 
 def render_markdown(result: dict[str, Any], *, workflow_url: str) -> str:
-    whole_ms = result["whole_log_density"]["ms_per_eval"]
+    whole_ms = _metric_mean(result["whole_log_density"], "ms_per_eval")
     lines = [
         "<!-- grahspj benchmark -->",
         "### grahspj PR benchmark",
@@ -435,25 +486,31 @@ def render_markdown(result: dict[str, Any], *, workflow_url: str) -> str:
         f"| filters | {result['n_filters']} |",
         f"| wavelength grid | {result['n_wave']} |",
         f"| MAP steps | {result['map_steps']} |",
+        f"| timing trials | {result.get('trials', 1)} x {result['repeats']} evals |",
         f"| setup time | {result['setup_seconds']:.3f} s |",
         f"| MAP time | {result['map_seconds']:.3f} s |",
-        f"| whole log-density | {_fmt_ms(whole_ms)} |",
-        f"| whole log-density, no SED AGN features | {_fmt_ms(result['whole_log_density_no_sed_agn_features']['ms_per_eval'])} |",
+        f"| whole log-density | {_fmt_ms_row(result['whole_log_density'])} |",
+        f"| whole log-density, no SED AGN features | {_fmt_ms_row(result['whole_log_density_no_sed_agn_features'])} |",
         "",
         "| component | ms/eval | share of whole |",
         "| --- | ---: | ---: |",
     ]
-    for row in sorted(result["components"], key=lambda item: item["ms_per_eval"], reverse=True):
-        lines.append(f"| `{row['name']}` | {_fmt_ms(row['ms_per_eval'])} | {100.0 * row['ms_per_eval'] / whole_ms:.1f}% |")
+    for row in sorted(result["components"], key=lambda item: _metric_mean(item, "ms_per_eval"), reverse=True):
+        row_ms = _metric_mean(row, "ms_per_eval")
+        lines.append(f"| `{row['name']}` | {_fmt_ms_row(row)} | {100.0 * row_ms / whole_ms:.1f}% |")
     lines.extend(["", f"Run: {workflow_url}", ""])
     return "\n".join(lines)
 
 
 def render_comparison_markdown(baseline: dict[str, Any], candidate: dict[str, Any], *, workflow_url: str) -> str:
-    base_whole = baseline["whole_log_density"]["ms_per_eval"]
-    cand_whole = candidate["whole_log_density"]["ms_per_eval"]
-    base_no_features = baseline["whole_log_density_no_sed_agn_features"]["ms_per_eval"]
-    cand_no_features = candidate["whole_log_density_no_sed_agn_features"]["ms_per_eval"]
+    base_whole = _metric_mean(baseline["whole_log_density"], "ms_per_eval")
+    cand_whole = _metric_mean(candidate["whole_log_density"], "ms_per_eval")
+    base_whole_se = _metric_stderr(baseline["whole_log_density"], "ms_per_eval")
+    cand_whole_se = _metric_stderr(candidate["whole_log_density"], "ms_per_eval")
+    base_no_features = _metric_mean(baseline["whole_log_density_no_sed_agn_features"], "ms_per_eval")
+    cand_no_features = _metric_mean(candidate["whole_log_density_no_sed_agn_features"], "ms_per_eval")
+    base_no_features_se = _metric_stderr(baseline["whole_log_density_no_sed_agn_features"], "ms_per_eval")
+    cand_no_features_se = _metric_stderr(candidate["whole_log_density_no_sed_agn_features"], "ms_per_eval")
     lines = [
         "<!-- grahspj benchmark -->",
         "### grahspj PR benchmark",
@@ -466,19 +523,22 @@ def render_comparison_markdown(baseline: dict[str, Any], candidate: dict[str, An
         f"| filters | {baseline['n_filters']} | {candidate['n_filters']} | |",
         f"| wavelength grid | {baseline['n_wave']} | {candidate['n_wave']} | |",
         f"| MAP steps | {baseline['map_steps']} | {candidate['map_steps']} | |",
+        f"| timing trials | {baseline.get('trials', 1)} x {baseline['repeats']} evals | {candidate.get('trials', 1)} x {candidate['repeats']} evals | |",
         f"| MAP time | {baseline['map_seconds']:.3f} s | {candidate['map_seconds']:.3f} s | {_percent_delta(candidate['map_seconds'], baseline['map_seconds']):+.2f}% |",
-        f"| whole log-density | {_fmt_ms(base_whole)} | {_fmt_ms(cand_whole)} | {_percent_delta(cand_whole, base_whole):+.2f}% |",
-        f"| whole log-density, no SED AGN features | {_fmt_ms(base_no_features)} | {_fmt_ms(cand_no_features)} | {_percent_delta(cand_no_features, base_no_features):+.2f}% |",
+        f"| whole log-density | {_fmt_ms_row(baseline['whole_log_density'])} | {_fmt_ms_row(candidate['whole_log_density'])} | {_fmt_percent_delta(cand_whole, base_whole, cand_whole_se, base_whole_se)} |",
+        f"| whole log-density, no SED AGN features | {_fmt_ms_row(baseline['whole_log_density_no_sed_agn_features'])} | {_fmt_ms_row(candidate['whole_log_density_no_sed_agn_features'])} | {_fmt_percent_delta(cand_no_features, base_no_features, cand_no_features_se, base_no_features_se)} |",
         "",
         "| component | base | PR | delta |",
         "| --- | ---: | ---: | ---: |",
     ]
     base_components = _component_map(baseline)
     cand_components = _component_map(candidate)
-    for name in sorted(set(base_components).intersection(cand_components), key=lambda key: cand_components[key]["ms_per_eval"], reverse=True):
-        base_ms = base_components[name]["ms_per_eval"]
-        cand_ms = cand_components[name]["ms_per_eval"]
-        lines.append(f"| `{name}` | {_fmt_ms(base_ms)} | {_fmt_ms(cand_ms)} | {_percent_delta(cand_ms, base_ms):+.2f}% |")
+    for name in sorted(set(base_components).intersection(cand_components), key=lambda key: _metric_mean(cand_components[key], "ms_per_eval"), reverse=True):
+        base_ms = _metric_mean(base_components[name], "ms_per_eval")
+        cand_ms = _metric_mean(cand_components[name], "ms_per_eval")
+        base_se = _metric_stderr(base_components[name], "ms_per_eval")
+        cand_se = _metric_stderr(cand_components[name], "ms_per_eval")
+        lines.append(f"| `{name}` | {_fmt_ms_row(base_components[name])} | {_fmt_ms_row(cand_components[name])} | {_fmt_percent_delta(cand_ms, base_ms, cand_se, base_se)} |")
     lines.extend(["", f"Run: {workflow_url}", ""])
     return "\n".join(lines)
 
@@ -492,6 +552,7 @@ def _run_command(args: argparse.Namespace) -> None:
         map_steps=args.map_steps,
         repeats=args.repeats,
         component_repeats=args.component_repeats,
+        trials=args.trials,
     )
     (args.output_dir / "benchmark.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
     (args.output_dir / "output").write_text(render_markdown(result, workflow_url=_workflow_url()), encoding="utf-8")
@@ -505,8 +566,8 @@ def _compare_command(args: argparse.Namespace) -> None:
         "baseline": baseline,
         "candidate": candidate,
         "whole_log_density_delta_percent": _percent_delta(
-            candidate["whole_log_density"]["ms_per_eval"],
-            baseline["whole_log_density"]["ms_per_eval"],
+            _metric_mean(candidate["whole_log_density"], "ms_per_eval"),
+            _metric_mean(baseline["whole_log_density"], "ms_per_eval"),
         ),
         "map_seconds_delta_percent": _percent_delta(candidate["map_seconds"], baseline["map_seconds"]),
     }
@@ -522,6 +583,7 @@ def _add_run_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--map-steps", type=int, default=int(os.getenv("GRAHSPJ_BENCH_MAP_STEPS", "40")))
     parser.add_argument("--repeats", type=int, default=int(os.getenv("GRAHSPJ_BENCH_REPEATS", "100")))
     parser.add_argument("--component-repeats", type=int, default=int(os.getenv("GRAHSPJ_BENCH_COMPONENT_REPEATS", "100")))
+    parser.add_argument("--trials", type=int, default=int(os.getenv("GRAHSPJ_BENCH_TRIALS", "3")))
 
 
 def main() -> None:

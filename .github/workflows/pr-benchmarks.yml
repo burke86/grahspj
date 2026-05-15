@@ -56,6 +56,7 @@ jobs:
           GRAHSPJ_BENCH_MAP_STEPS: "40"
           GRAHSPJ_BENCH_REPEATS: "100"
           GRAHSPJ_BENCH_COMPONENT_REPEATS: "100"
+          GRAHSPJ_BENCH_TRIALS: "3"
           MPLCONFIGDIR: ${{ runner.temp }}/matplotlib
         run: |
           mkdir -p benchmark-artifacts
