@@ -76,15 +76,36 @@ def _get_jax_cosmo_backend(h0: float, om0: float):
     return bg, cosmo
 
 
+def _flat_lcdm_luminosity_distance_m_jax(redshift, h0: float, om0: float):
+    """Fallback flat-LCDM luminosity distance when jax_cosmo is unavailable."""
+    z = jnp.maximum(jnp.asarray(redshift, dtype=jnp.float64), 0.0)
+    grid = jnp.linspace(0.0, 1.0, 256, dtype=jnp.float64)
+    z_grid = z[..., None] * grid
+    e_z = jnp.sqrt(float(om0) * (1.0 + z_grid) ** 3 + (1.0 - float(om0)))
+    integrand = 1.0 / jnp.maximum(e_z, 1.0e-30)
+    dt = 1.0 / (grid.size - 1)
+    integral_unit = dt * (
+        0.5 * integrand[..., 0] + jnp.sum(integrand[..., 1:-1], axis=-1) + 0.5 * integrand[..., -1]
+    )
+    comoving_mpc = (C_KMS / float(h0)) * z * integral_unit
+    return (1.0 + z) * comoving_mpc * MPC_TO_M
+
+
 def _luminosity_distance_m_jax(redshift, h0: float, om0: float):
-    """Return luminosity distance in meters using jax_cosmo."""
+    """Return luminosity distance in meters using a JAX-native flat LCDM path."""
     redshift = jnp.asarray(redshift, dtype=jnp.float64)
     scalar_input = redshift.ndim == 0
-    bg, cosmo = _get_jax_cosmo_backend(float(h0), float(om0))
-    a = 1.0 / (1.0 + jnp.maximum(redshift, 0.0))
-    d_a_mpc_over_h = bg.angular_diameter_distance(cosmo, a)
-    d_l_mpc_over_h = d_a_mpc_over_h / jnp.maximum(a * a, 1.0e-30)
-    d_l_m = d_l_mpc_over_h / cosmo.h * MPC_TO_M
+    try:
+        bg, cosmo = _get_jax_cosmo_backend(float(h0), float(om0))
+    except ModuleNotFoundError as exc:
+        if exc.name != "pkg_resources":
+            raise
+        d_l_m = _flat_lcdm_luminosity_distance_m_jax(redshift, h0, om0)
+    else:
+        a = 1.0 / (1.0 + jnp.maximum(redshift, 0.0))
+        d_a_mpc_over_h = bg.angular_diameter_distance(cosmo, a)
+        d_l_mpc_over_h = d_a_mpc_over_h / jnp.maximum(a * a, 1.0e-30)
+        d_l_m = d_l_mpc_over_h / cosmo.h * MPC_TO_M
     return jnp.reshape(d_l_m, ()) if scalar_input else d_l_m
 
 
