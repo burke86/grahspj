@@ -4,7 +4,7 @@ This directory contains reusable performance benchmarks for `grahspj`.
 
 ## PR benchmark
 
-`grahspj_pr_benchmark.py` runs a fixed-redshift Fairall 9 photometric likelihood benchmark and writes JSON plus Markdown output suitable for a pull-request comment.
+`grahspj_pr_benchmark.py` runs a fixed-redshift Fairall 9 photometric likelihood benchmark and writes JSON plus Markdown output suitable for a pull-request comment. Timing measurements run multiple trials by default and report mean plus standard error.
 
 Local example:
 
@@ -13,7 +13,8 @@ conda run -n sed python benchmarks/grahspj_pr_benchmark.py run \
   --output-dir /tmp/grahspj-bench \
   --label local \
   --sha local \
-  --dsps-ssp-fn ../jaxqsofit/tempdata.h5
+  --dsps-ssp-fn ../jaxqsofit/tempdata.h5 \
+  --trials 3
 ```
 
 Compare two benchmark JSON files:
