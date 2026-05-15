@@ -21,6 +21,8 @@ from numpyro.infer.util import log_density
 
 from diffmah.diffmah_kernels import DEFAULT_MAH_PARAMS
 from diffstar import DEFAULT_DIFFSTAR_U_PARAMS, DiffstarUParams, calc_sfh_singlegal, get_bounded_diffstar_params
+from diffstar.defaults import FB as DIFFSTAR_FB
+from diffstar.defaults import LGT0 as DIFFSTAR_LGT0
 from dsps.sed.ssp_weights import calc_ssp_weights_sfh_table_lognormal_mdf
 
 from grahspj.config import AGNConfig, FilterSet, FitConfig, GalaxyConfig, InferenceConfig, LikelihoodConfig, Observation, PhotometryData
@@ -182,6 +184,8 @@ def _build_component_functions(fitter: GRAHSPJ) -> dict[str, Callable[[], Any]]:
             bounded,
             DEFAULT_MAH_PARAMS,
             ctx.host_basis_jax.gal_t_table,
+            lgt0=DIFFSTAR_LGT0,
+            fb=DIFFSTAR_FB,
             return_smh=True,
         )
         info = calc_ssp_weights_sfh_table_lognormal_mdf(
@@ -212,7 +216,14 @@ def _build_component_functions(fitter: GRAHSPJ) -> dict[str, Callable[[], Any]]:
 
     def host_sfh_weights_only():
         bounded = get_bounded_diffstar_params(DiffstarUParams(**u_defaults))
-        base_history = calc_sfh_singlegal(bounded, DEFAULT_MAH_PARAMS, ctx.host_basis_jax.gal_t_table, return_smh=True)
+        base_history = calc_sfh_singlegal(
+            bounded,
+            DEFAULT_MAH_PARAMS,
+            ctx.host_basis_jax.gal_t_table,
+            lgt0=DIFFSTAR_LGT0,
+            fb=DIFFSTAR_FB,
+            return_smh=True,
+        )
         info = calc_ssp_weights_sfh_table_lognormal_mdf(
             ctx.host_basis_jax.gal_t_table,
             base_history.sfh,

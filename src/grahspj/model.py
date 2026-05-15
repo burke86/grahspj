@@ -20,6 +20,8 @@ import jax.numpy as jnp
 import numpy as np
 from diffmah.diffmah_kernels import DEFAULT_MAH_PARAMS
 from diffstar import DEFAULT_DIFFSTAR_U_PARAMS, DiffstarUParams, calc_sfh_singlegal, get_bounded_diffstar_params
+from diffstar.defaults import FB as DIFFSTAR_FB
+from diffstar.defaults import LGT0 as DIFFSTAR_LGT0
 from dsps.sed.ssp_weights import calc_ssp_weights_sfh_table_lognormal_mdf
 import numpyro
 import numpyro.distributions as dist
@@ -472,7 +474,14 @@ def _build_diffstar_host(context: ModelContext, prior_config: dict[str, Any], *,
         default_loc = float(np.asarray(getattr(DEFAULT_DIFFSTAR_U_PARAMS, key)))
         u_params[key] = numpyro.sample(key, dist.Normal(*_cfg_mean_scale(prior_config, key, default_loc, 1.0)))
     bounded = get_bounded_diffstar_params(DiffstarUParams(**u_params))
-    base_history = calc_sfh_singlegal(bounded, DEFAULT_MAH_PARAMS, gal_t_table, return_smh=True)
+    base_history = calc_sfh_singlegal(
+        bounded,
+        DEFAULT_MAH_PARAMS,
+        gal_t_table,
+        lgt0=DIFFSTAR_LGT0,
+        fb=DIFFSTAR_FB,
+        return_smh=True,
+    )
 
     gal_lgmet = numpyro.sample("gal_lgmet", dist.Normal(*_cfg_mean_scale(prior_config, "gal_lgmet", -0.3, 0.5)))
     gal_lgmet_scatter = numpyro.sample("gal_lgmet_scatter", dist.HalfNormal(_cfg_halfnorm(prior_config, "gal_lgmet_scatter", 0.2)))
