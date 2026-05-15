@@ -32,6 +32,7 @@ class LoadedFilter:
     """One prepared filter response on the model evaluation grid."""
     name: str
     wave: np.ndarray
+    native_transmission: np.ndarray
     transmission: np.ndarray
     effective_wavelength: float
     interp_indices: np.ndarray
@@ -58,6 +59,15 @@ class PackedFiltersJax:
     transmission: jnp.ndarray
     work_wave: jnp.ndarray
     effective_wavelength: jnp.ndarray
+    valid_mask: jnp.ndarray
+
+
+@dataclass
+class PackedFilterCurvesJax:
+    """JAX-native raw filter curves for local component quadrature."""
+    wave: jnp.ndarray
+    transmission: jnp.ndarray
+    denom: jnp.ndarray
     valid_mask: jnp.ndarray
 
 
@@ -103,6 +113,30 @@ class NebularTemplatesJax:
     line_lumin_per_photon: jnp.ndarray
     continuum_wave_a: jnp.ndarray
     continuum_lumin_per_a_per_photon: jnp.ndarray
+
+
+@dataclass
+class NebularRestTemplatesJax:
+    """Nebular templates already interpolated or broadened onto rest_wave."""
+    line_profile_per_photon: jnp.ndarray | None
+    continuum_lumin_per_a_per_photon: jnp.ndarray
+
+
+@dataclass
+class RedshiftProjectionCacheJax:
+    """Photometric projection matrices tabulated over redshift."""
+    redshift_grid: jnp.ndarray
+    filter_projection: jnp.ndarray
+    scalar_projection: jnp.ndarray
+
+
+@dataclass
+class FixedLocalLineProjectionCacheJax:
+    """Fixed-z local AGN line projection terms tabulated over line width."""
+    log_width_grid: jnp.ndarray
+    profile_norm: jnp.ndarray
+    attenuation_curve: jnp.ndarray
+    projection_weight: jnp.ndarray
 
 
 @dataclass
@@ -187,9 +221,11 @@ class ModelContext:
     filters: list[LoadedFilter]
     packed_filters: PackedFilters
     packed_filters_jax: PackedFiltersJax
+    packed_filter_curves_jax: PackedFilterCurvesJax
     igm_cache_jax: IGMCacheJax
     templates: LoadedTemplates
     nebular_templates_jax: NebularTemplatesJax
+    nebular_rest_templates_jax: NebularRestTemplatesJax
     rest_wave_jax: jnp.ndarray
     obs_wave_jax: jnp.ndarray
     filter_effective_wavelength_jax: jnp.ndarray
@@ -202,6 +238,8 @@ class ModelContext:
     fixed_igm_jax: jnp.ndarray | None
     fixed_filter_projection_jax: jnp.ndarray | None
     fixed_scalar_filter_projection_jax: jnp.ndarray | None
+    fixed_local_line_projection_cache_jax: FixedLocalLineProjectionCacheJax | None
+    redshift_projection_cache_jax: RedshiftProjectionCacheJax | None
     fluxes: np.ndarray
     errors: np.ndarray
     upper_limits: np.ndarray
@@ -228,7 +266,10 @@ _DALE2014_CACHE: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
 _HOST_BASIS_CACHE: dict[tuple[str, float, float, int], HostBasis] = {}
 _REST_TEMPLATE_CACHE: dict[tuple[Any, ...], tuple[np.ndarray, np.ndarray]] = {}
 _NEBULAR_TEMPLATE_CACHE: dict[str, NebularTemplatesJax] = {}
+_NEBULAR_REST_TEMPLATE_CACHE: dict[tuple[Any, ...], tuple[np.ndarray | None, np.ndarray]] = {}
 _FIXED_NEBULAR_LINE_PROFILE_CACHE: dict[tuple[Any, ...], np.ndarray] = {}
+_REDSHIFT_PROJECTION_CACHE: dict[tuple[Any, ...], tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
+_FIXED_LOCAL_LINE_PROJECTION_CACHE: dict[tuple[Any, ...], tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = {}
 _DEFAULT_SPECLITE_NAME_MAP = {
     "u_sdss": "sdss2010-u",
     "g_sdss": "sdss2010-g",
@@ -687,6 +728,7 @@ def _prepare_loaded_filter(obs_wave: np.ndarray, response: speclite_filters.Filt
     return LoadedFilter(
         name=response.name,
         wave=filt_wave,
+        native_transmission=trans.astype(float),
         transmission=trans_r,
         effective_wavelength=effective,
         interp_indices=interp_indices.astype(int),
@@ -766,6 +808,36 @@ def _pack_loaded_filters_jax(packed_filters: PackedFilters) -> PackedFiltersJax:
     )
 
 
+def _pack_filter_curves_jax(filters: Sequence[LoadedFilter]) -> PackedFilterCurvesJax:
+    """Pack native filter curves for direct local-grid quadrature."""
+    if not filters:
+        raise ValueError("At least one filter is required to build a model context.")
+    n_filters = len(filters)
+    max_points = max(f.wave.size for f in filters)
+    wave = np.zeros((n_filters, max_points), dtype=float)
+    transmission = np.zeros((n_filters, max_points), dtype=float)
+    valid_mask = np.zeros((n_filters, max_points), dtype=bool)
+    denom = np.zeros(n_filters, dtype=float)
+    for i, filt in enumerate(filters):
+        n = filt.wave.size
+        filt_wave = np.asarray(filt.wave, dtype=float)
+        filt_trans = np.clip(np.asarray(filt.native_transmission, dtype=float), 0.0, None)
+        wave[i, :n] = filt_wave
+        transmission[i, :n] = filt_trans
+        valid_mask[i, :n] = True
+        denom[i] = max(float(np.trapezoid(filt_trans, filt_wave)), 1.0e-30)
+        if n < max_points:
+            step = max(float(filt_wave[-1] - filt_wave[-2]) if n > 1 else 1.0, 1.0e-6)
+            pad = filt_wave[-1] + step * np.arange(1, max_points - n + 1, dtype=float)
+            wave[i, n:] = pad
+    return PackedFilterCurvesJax(
+        wave=jnp.asarray(wave, dtype=jnp.float64),
+        transmission=jnp.asarray(transmission, dtype=jnp.float64),
+        denom=jnp.asarray(denom, dtype=jnp.float64),
+        valid_mask=jnp.asarray(valid_mask, dtype=bool),
+    )
+
+
 def _trapezoid_weights(x: np.ndarray) -> np.ndarray:
     """Return linear weights equivalent to ``np.trapezoid(y, x)``."""
     x = np.asarray(x, dtype=float)
@@ -808,6 +880,46 @@ def _build_fixed_filter_projection_matrices(
             lum_matrix[i, right] += c * wr * fixed_igm[right] / distance_scale
             scalar_matrix[i, left] += c * wl
             scalar_matrix[i, right] += c * wr
+    return lum_matrix, scalar_matrix
+
+
+def _build_filter_projection_matrices_for_redshift(
+    rest_wave: np.ndarray,
+    packed_filters: PackedFilters,
+    igm: np.ndarray,
+    luminosity_distance_m: float,
+    redshift: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Build photometric projection matrices for an arbitrary redshift."""
+    n_filters = packed_filters.interp_indices.shape[0]
+    n_rest = len(rest_wave)
+    lum_matrix = np.zeros((n_filters, n_rest), dtype=float)
+    scalar_matrix = np.zeros((n_filters, n_rest), dtype=float)
+    distance_scale = 4.0 * np.pi * max(float(luminosity_distance_m), 1.0e-12) ** 2 * max(1.0 + float(redshift), 1.0e-8)
+    igm = np.asarray(igm, dtype=float)
+
+    for i in range(n_filters):
+        valid = np.asarray(packed_filters.valid_mask[i], dtype=bool)
+        filt_wave = np.asarray(packed_filters.work_wave[i], dtype=float)
+        filt_trans = np.where(valid, packed_filters.transmission[i], 0.0)
+        denom = max(float(np.trapezoid(filt_trans, np.where(valid, filt_wave, 0.0))), 1.0e-30)
+        coeff = _trapezoid_weights(np.where(valid, filt_wave, 0.0)) * filt_trans / denom
+        coeff *= 1.0e-10 / 299792458.0 * 1.0e29 * float(packed_filters.effective_wavelength[i]) ** 2
+        rest_at_filter = filt_wave / max(1.0 + float(redshift), 1.0e-8)
+        pos = np.searchsorted(rest_wave, rest_at_filter, side="right") - 1
+        left = np.clip(pos, 0, n_rest - 1)
+        right = np.clip(left + 1, 0, n_rest - 1)
+        span = np.maximum(rest_wave[right] - rest_wave[left], 1.0e-30)
+        weight_right = np.clip((rest_at_filter - rest_wave[left]) / span, 0.0, 1.0)
+        in_range = valid & (rest_at_filter >= rest_wave[0]) & (rest_at_filter <= rest_wave[-1])
+        for lidx, ridx, wr, c, ok in zip(left, right, weight_right, coeff, in_range):
+            if not bool(ok):
+                continue
+            wl = 1.0 - float(wr)
+            lum_matrix[i, int(lidx)] += c * wl * igm[int(lidx)] / distance_scale
+            lum_matrix[i, int(ridx)] += c * float(wr) * igm[int(ridx)] / distance_scale
+            scalar_matrix[i, int(lidx)] += c * wl
+            scalar_matrix[i, int(ridx)] += c * float(wr)
     return lum_matrix, scalar_matrix
 
 
@@ -1074,6 +1186,239 @@ def _build_fixed_nebular_line_profile(
     return profile
 
 
+def _build_nebular_rest_templates_jax(
+    rest_wave: np.ndarray,
+    cfg: FitConfig,
+    templates: NebularTemplatesJax,
+) -> NebularRestTemplatesJax:
+    """Precompute nebular template grids on the model rest-wavelength grid."""
+    if not (cfg.galaxy.fit_host and cfg.nebular.enabled):
+        zeros = np.zeros((1, 1, 1, rest_wave.size), dtype=float)
+        return NebularRestTemplatesJax(
+            line_profile_per_photon=jnp.asarray(zeros, dtype=jnp.float64),
+            continuum_lumin_per_a_per_photon=jnp.asarray(zeros, dtype=jnp.float64),
+        )
+
+    prior_config = cfg.prior_config
+    line_width_fixed = "nebular_lines_width" not in prior_config
+    cache_key = (
+        float(rest_wave[0]),
+        float(rest_wave[-1]),
+        int(rest_wave.size),
+        bool(cfg.galaxy.fit_host and cfg.nebular.enabled and cfg.nebular.emission),
+        bool(line_width_fixed),
+        float(cfg.nebular.lines_width),
+        tuple(np.asarray(templates.z_grid, dtype=float).tolist()),
+        tuple(np.asarray(templates.logu_grid, dtype=float).tolist()),
+        tuple(np.asarray(templates.ne_grid, dtype=float).tolist()),
+    )
+    cached = _NEBULAR_REST_TEMPLATE_CACHE.get(cache_key)
+    if cached is not None:
+        line_grid, continuum_grid = cached
+        return NebularRestTemplatesJax(
+            line_profile_per_photon=None if line_grid is None else jnp.asarray(line_grid, dtype=jnp.float64),
+            continuum_lumin_per_a_per_photon=jnp.asarray(continuum_grid, dtype=jnp.float64),
+        )
+
+    continuum_native = np.asarray(templates.continuum_lumin_per_a_per_photon, dtype=float)
+    continuum_wave = np.asarray(templates.continuum_wave_a, dtype=float)
+    continuum_flat = continuum_native.reshape((-1, continuum_native.shape[-1]))
+    continuum_rest = np.empty((continuum_flat.shape[0], rest_wave.size), dtype=float)
+    for i, row in enumerate(continuum_flat):
+        continuum_rest[i] = np.interp(rest_wave, continuum_wave, row, left=0.0, right=0.0)
+    continuum_rest = continuum_rest.reshape(continuum_native.shape[:3] + (rest_wave.size,))
+
+    line_grid = None
+    if cfg.nebular.emission and line_width_fixed:
+        line_wave = np.asarray(templates.line_wave_a, dtype=float)
+        line_lumin = np.asarray(templates.line_lumin_per_photon, dtype=float)
+        fwhm_wave = np.maximum(line_wave * float(cfg.nebular.lines_width) / 299792.458, 1.0e-8)
+        sigma = fwhm_wave / (2.0 * np.sqrt(2.0 * np.log(2.0)))
+        z = (rest_wave[:, None] - line_wave[None, :]) / np.maximum(sigma[None, :], 1.0e-12)
+        profile_matrix = np.exp(-0.5 * z * z) / np.maximum(sigma[None, :] * np.sqrt(2.0 * np.pi), 1.0e-30)
+        line_grid = np.tensordot(line_lumin, profile_matrix.T, axes=([-1], [0]))
+
+    _NEBULAR_REST_TEMPLATE_CACHE[cache_key] = (line_grid, continuum_rest)
+    return NebularRestTemplatesJax(
+        line_profile_per_photon=None if line_grid is None else jnp.asarray(line_grid, dtype=jnp.float64),
+        continuum_lumin_per_a_per_photon=jnp.asarray(continuum_rest, dtype=jnp.float64),
+    )
+
+
+def _redshift_projection_grid(cfg: FitConfig) -> np.ndarray:
+    """Return the redshift grid used for cached photometric projection."""
+    n_grid = max(int(cfg.likelihood.redshift_projection_n_grid), 2)
+    redshift_pdf = cfg.prior_config.get("redshift_pdf")
+    if redshift_pdf is not None:
+        z_grid = np.asarray(redshift_pdf["z_grid"], dtype=float)
+        low = float(z_grid[0])
+        high = float(z_grid[-1])
+    else:
+        sigma = max(float(cfg.observation.redshift_err), 1.0e-3)
+        width = max(float(cfg.likelihood.redshift_projection_sigma), 1.0) * sigma
+        low = max(0.0, float(cfg.observation.redshift) - width)
+        high = max(low + 1.0e-6, float(cfg.observation.redshift) + width)
+    return np.linspace(low, high, n_grid, dtype=float)
+
+
+def _build_redshift_projection_cache_jax(
+    rest_wave: np.ndarray,
+    packed_filters: PackedFilters,
+    igm_cache: IGMCacheJax,
+    cfg: FitConfig,
+    cosmology: FlatLambdaCDM,
+) -> RedshiftProjectionCacheJax | None:
+    """Precompute filter projection matrices over redshift for photo-z fits."""
+    if not (cfg.observation.fit_redshift and cfg.likelihood.use_redshift_projection_cache):
+        return None
+    z_grid = _redshift_projection_grid(cfg)
+    cache_key = (
+        float(rest_wave[0]),
+        float(rest_wave[-1]),
+        int(rest_wave.size),
+        tuple(np.round(z_grid, 12).tolist()),
+        tuple(np.asarray(packed_filters.effective_wavelength, dtype=float).tolist()),
+        tuple(np.round(np.asarray(packed_filters.work_wave, dtype=float).ravel(), 8).tolist()),
+        tuple(np.round(np.asarray(packed_filters.transmission, dtype=float).ravel(), 12).tolist()),
+        tuple(np.asarray(packed_filters.valid_mask, dtype=bool).ravel().tolist()),
+        cfg.galaxy.cosmology_h0,
+        cfg.galaxy.cosmology_om0,
+    )
+    cached = _REDSHIFT_PROJECTION_CACHE.get(cache_key)
+    if cached is not None:
+        z_cached, lum_cached, scalar_cached = cached
+        return RedshiftProjectionCacheJax(
+            redshift_grid=jnp.asarray(z_cached, dtype=jnp.float64),
+            filter_projection=jnp.asarray(lum_cached, dtype=jnp.float64),
+            scalar_projection=jnp.asarray(scalar_cached, dtype=jnp.float64),
+        )
+
+    lum_mats = []
+    scalar_mats = []
+    for z in z_grid:
+        d_l = float(cosmology.luminosity_distance(max(float(z), 0.0)).to_value(u.m))
+        igm = np.asarray(_build_fixed_igm_jax(igm_cache, float(z)), dtype=float)
+        lum, scalar = _build_filter_projection_matrices_for_redshift(
+            rest_wave,
+            packed_filters,
+            igm,
+            d_l,
+            float(z),
+        )
+        lum_mats.append(lum)
+        scalar_mats.append(scalar)
+    lum_grid = np.asarray(lum_mats, dtype=float)
+    scalar_grid = np.asarray(scalar_mats, dtype=float)
+    _REDSHIFT_PROJECTION_CACHE[cache_key] = (z_grid, lum_grid, scalar_grid)
+    return RedshiftProjectionCacheJax(
+        redshift_grid=jnp.asarray(z_grid, dtype=jnp.float64),
+        filter_projection=jnp.asarray(lum_grid, dtype=jnp.float64),
+        scalar_projection=jnp.asarray(scalar_grid, dtype=jnp.float64),
+    )
+
+
+def _attenuation_curve_np(wave_rest: np.ndarray, opt_index: float, nir_index: float, norm: float, lam_break: float) -> np.ndarray:
+    """NumPy version of the broken power-law attenuation curve."""
+    wave_rest = np.asarray(wave_rest, dtype=float)
+    index = np.where(wave_rest < float(lam_break), float(opt_index), float(nir_index))
+    return float(norm) * (wave_rest / float(lam_break)) ** index
+
+
+def _trapezoid_weights_axis1(x: np.ndarray) -> np.ndarray:
+    """Return trapezoid weights for each row of a 2D coordinate array."""
+    x = np.asarray(x, dtype=float)
+    weights = np.zeros_like(x, dtype=float)
+    if x.shape[1] == 1:
+        return weights
+    dx = np.diff(x, axis=1)
+    weights[:, 0] = 0.5 * dx[:, 0]
+    weights[:, -1] = 0.5 * dx[:, -1]
+    if x.shape[1] > 2:
+        weights[:, 1:-1] = 0.5 * (dx[:, :-1] + dx[:, 1:])
+    return weights
+
+
+def _build_fixed_local_line_projection_cache_jax(
+    cfg: FitConfig,
+    templates: LoadedTemplates,
+    filters: Sequence[LoadedFilter],
+    redshift: float,
+    luminosity_distance_m: float,
+    fixed_igm: np.ndarray,
+) -> FixedLocalLineProjectionCacheJax | None:
+    """Precompute fixed-z local AGN line filter projection terms over width."""
+    if not (
+        cfg.likelihood.use_local_line_photometry
+        and cfg.likelihood.use_fixed_local_line_cache
+        and cfg.agn.fit_agn
+        and templates.line_wave.size > 0
+    ):
+        return None
+    n_width = max(int(cfg.likelihood.fixed_local_line_cache_n_width), 2)
+    width_min = max(float(cfg.likelihood.fixed_local_line_cache_min_width_kms), 1.0e-6)
+    width_max = max(float(cfg.likelihood.fixed_local_line_cache_max_width_kms), width_min * (1.0 + 1.0e-6))
+    width_grid = np.geomspace(width_min, width_max, n_width).astype(float)
+    log_width_grid = np.log(width_grid)
+    line_wave = np.asarray(templates.line_wave, dtype=float)
+    offsets = np.linspace(-3.0, 3.0, 9, dtype=float)
+    cache_key = (
+        tuple(np.round(line_wave, 8).tolist()),
+        tuple(np.round(width_grid, 8).tolist()),
+        float(redshift),
+        float(luminosity_distance_m),
+        tuple(float(f.effective_wavelength) for f in filters),
+        tuple(tuple(np.round(np.asarray(f.wave, dtype=float), 8).tolist()) for f in filters),
+        tuple(tuple(np.round(np.asarray(f.native_transmission, dtype=float), 12).tolist()) for f in filters),
+        tuple(np.round(np.asarray(fixed_igm, dtype=float), 12).tolist()),
+    )
+    cached = _FIXED_LOCAL_LINE_PROJECTION_CACHE.get(cache_key)
+    if cached is not None:
+        cached_log_width, profile_norm, attenuation_curve, projection_weight = cached
+        return FixedLocalLineProjectionCacheJax(
+            log_width_grid=jnp.asarray(cached_log_width, dtype=jnp.float64),
+            profile_norm=jnp.asarray(profile_norm, dtype=jnp.float64),
+            attenuation_curve=jnp.asarray(attenuation_curve, dtype=jnp.float64),
+            projection_weight=jnp.asarray(projection_weight, dtype=jnp.float64),
+        )
+
+    n_lines = line_wave.size
+    n_local = offsets.size
+    n_filters = len(filters)
+    profile_norm = np.empty((n_width, n_lines, n_local), dtype=float)
+    attenuation_curve = np.empty_like(profile_norm)
+    projection_weight = np.empty((n_width, n_filters, n_lines, n_local), dtype=float)
+    distance_scale = 4.0 * np.pi * max(float(luminosity_distance_m), 1.0e-12) ** 2 * max(1.0 + float(redshift), 1.0e-8)
+    fixed_igm = np.asarray(fixed_igm, dtype=float)
+    rest_wave = np.geomspace(cfg.galaxy.rest_wave_min, cfg.galaxy.rest_wave_max, cfg.galaxy.n_wave).astype(float)
+
+    for iw, width in enumerate(width_grid):
+        fwhm_wave = np.maximum(line_wave * (float(width) * 1000.0) / 299792458.0, 1.0e-8)
+        sigma = fwhm_wave / (2.0 * np.sqrt(2.0 * np.log(2.0)))
+        rest_line_wave = np.maximum(line_wave[:, None] + offsets[None, :] * fwhm_wave[:, None], 1.0e-6)
+        z = (rest_line_wave - line_wave[:, None]) / np.maximum(sigma[:, None], 1.0e-12)
+        norm = 5100.0 / np.sqrt(np.pi * sigma * sigma)
+        profile_norm[iw] = np.exp(-0.5 * z * z) * norm[:, None]
+        attenuation_curve[iw] = _attenuation_curve_np(rest_line_wave, -1.2, -3.0, 1.2, 11000.0)
+        igm_local = np.interp(rest_line_wave, rest_wave, fixed_igm, left=0.0, right=0.0)
+        obs_line_wave = rest_line_wave * (1.0 + float(redshift))
+        trap_weights = _trapezoid_weights_axis1(obs_line_wave)
+        for ifilt, filt in enumerate(filters):
+            filt_wave = np.asarray(filt.wave, dtype=float)
+            filt_trans = np.clip(np.asarray(filt.native_transmission, dtype=float), 0.0, None)
+            denom = max(float(np.trapezoid(filt_trans, filt_wave)), 1.0e-30)
+            trans = np.interp(obs_line_wave, filt_wave, filt_trans, left=0.0, right=0.0)
+            conv = 1.0e-10 / 299792458.0 * 1.0e29 * float(filt.effective_wavelength) ** 2
+            projection_weight[iw, ifilt] = conv * trap_weights * trans * igm_local / denom / distance_scale
+
+    _FIXED_LOCAL_LINE_PROJECTION_CACHE[cache_key] = (log_width_grid, profile_norm, attenuation_curve, projection_weight)
+    return FixedLocalLineProjectionCacheJax(
+        log_width_grid=jnp.asarray(log_width_grid, dtype=jnp.float64),
+        profile_norm=jnp.asarray(profile_norm, dtype=jnp.float64),
+        attenuation_curve=jnp.asarray(attenuation_curve, dtype=jnp.float64),
+        projection_weight=jnp.asarray(projection_weight, dtype=jnp.float64),
+    )
+
+
 def build_model_context(cfg: FitConfig) -> ModelContext:
     """Construct the static context consumed by the grahspj NumPyro model."""
     cfg.validate()
@@ -1199,9 +1544,11 @@ def build_model_context(cfg: FitConfig) -> ModelContext:
     loaded_filters = [_prepare_loaded_filter(obs_wave, response) for response in filter_responses]
     packed_filters = _pack_loaded_filters(loaded_filters)
     packed_filters_jax = _pack_loaded_filters_jax(packed_filters)
+    packed_filter_curves_jax = _pack_filter_curves_jax(loaded_filters)
     igm_cache_jax = _build_igm_cache_jax(rest_wave)
     templates = _load_templates(cfg)
     nebular_templates_jax = _load_nebular_templates_jax(bool(cfg.galaxy.fit_host and cfg.nebular.enabled))
+    nebular_rest_templates_jax = _build_nebular_rest_templates_jax(rest_wave, cfg, nebular_templates_jax)
     feii_template_on_rest, dust_lumin_rest = _build_rest_template_cache(rest_wave, templates)
     fixed_nebular_line_profile = _build_fixed_nebular_line_profile(rest_wave, cfg, nebular_templates_jax)
     rest_wave_jax = jnp.asarray(rest_wave, dtype=jnp.float64)
@@ -1221,6 +1568,14 @@ def build_model_context(cfg: FitConfig) -> ModelContext:
         fixed_igm_jax = None
         fixed_filter_projection_jax = None
         fixed_scalar_filter_projection_jax = None
+        fixed_local_line_projection_cache_jax = None
+        redshift_projection_cache_jax = _build_redshift_projection_cache_jax(
+            rest_wave,
+            packed_filters,
+            igm_cache_jax,
+            cfg,
+            cosmology,
+        )
     else:
         fixed_redshift_jax = jnp.asarray(float(cfg.observation.redshift), dtype=jnp.float64)
         fixed_luminosity_distance_m_jax = jnp.asarray(luminosity_distance_m, dtype=jnp.float64)
@@ -1234,6 +1589,15 @@ def build_model_context(cfg: FitConfig) -> ModelContext:
         )
         fixed_filter_projection_jax = jnp.asarray(filter_projection, dtype=jnp.float64)
         fixed_scalar_filter_projection_jax = jnp.asarray(scalar_projection, dtype=jnp.float64)
+        fixed_local_line_projection_cache_jax = _build_fixed_local_line_projection_cache_jax(
+            cfg,
+            templates,
+            loaded_filters,
+            float(cfg.observation.redshift),
+            luminosity_distance_m,
+            np.asarray(fixed_igm_jax, dtype=float),
+        )
+        redshift_projection_cache_jax = None
 
     mw_ebv = 0.0
     if cfg.observation.apply_mw_deredden and cfg.observation.ra is not None and cfg.observation.dec is not None:
@@ -1259,9 +1623,11 @@ def build_model_context(cfg: FitConfig) -> ModelContext:
         filters=loaded_filters,
         packed_filters=packed_filters,
         packed_filters_jax=packed_filters_jax,
+        packed_filter_curves_jax=packed_filter_curves_jax,
         igm_cache_jax=igm_cache_jax,
         templates=templates,
         nebular_templates_jax=nebular_templates_jax,
+        nebular_rest_templates_jax=nebular_rest_templates_jax,
         rest_wave_jax=rest_wave_jax,
         obs_wave_jax=obs_wave_jax,
         filter_effective_wavelength_jax=filter_effective_wavelength_jax,
@@ -1274,6 +1640,8 @@ def build_model_context(cfg: FitConfig) -> ModelContext:
         fixed_igm_jax=fixed_igm_jax,
         fixed_filter_projection_jax=fixed_filter_projection_jax,
         fixed_scalar_filter_projection_jax=fixed_scalar_filter_projection_jax,
+        fixed_local_line_projection_cache_jax=fixed_local_line_projection_cache_jax,
+        redshift_projection_cache_jax=redshift_projection_cache_jax,
         fluxes=fluxes,
         errors=errors,
         upper_limits=upper_limits,
