@@ -33,6 +33,7 @@ C_MS = 2.99792458e8
 L_SUN_W = 3.828e26
 ERG_PER_WATT = 1.0e7
 AGN_BOLOMETRIC_CORRECTION_5100 = 9.26
+DSPS_SOLAR_METALLICITY = 0.019
 MPC_TO_M = 3.085677581491367e22
 GRAHSP_BIATTENUATION_BREAK_A = 11000.0
 GRAHSP_PL_BEND_LOC_A = 1000.0
@@ -199,11 +200,41 @@ def _sample_log_stellar_mass(prior_config: dict[str, Any]):
     return numpyro.sample("log_stellar_mass", dist.StudentT(df=5.0, loc=10.0, scale=2.0))
 
 
+def _ssp_lgmet_solar_offset(ssp_lgmet):
+    """Return the solar-metallicity offset for the SSP metallicity convention."""
+    ssp_lgmet = jnp.asarray(ssp_lgmet, dtype=jnp.float64)
+    # DSPS SSP grids use absolute log10(Z). Older/simple test grids may use
+    # log10(Z/Zsun). A max below -1 is a robust signature of absolute log10(Z).
+    return jnp.where(jnp.nanmax(ssp_lgmet) < -1.0, jnp.log10(DSPS_SOLAR_METALLICITY), 0.0)
+
+
+def _default_gal_lgmet_loc(ssp_lgmet):
+    """Default galaxy metallicity center in the SSP grid's metallicity convention."""
+    ssp_lgmet = jnp.asarray(ssp_lgmet, dtype=jnp.float64)
+    loc = _ssp_lgmet_solar_offset(ssp_lgmet) - 0.3
+    return jnp.clip(loc, jnp.nanmin(ssp_lgmet), jnp.nanmax(ssp_lgmet))
+
+
+def _cfg_lgmet_value(
+    cfg: dict[str, Any],
+    solar_relative_key: str,
+    default_logzsol: float,
+    solar_offset,
+    *,
+    absolute_key: str | None = None,
+):
+    """Read metallicity config values and convert log(Z/Zsun) defaults to log10(Z)."""
+    if absolute_key is not None and absolute_key in cfg:
+        return jnp.asarray(cfg[absolute_key], dtype=jnp.float64)
+    return jnp.asarray(cfg.get(solar_relative_key, default_logzsol), dtype=jnp.float64) + solar_offset
+
+
 def _mass_metallicity_relation_logprior(
     log_stellar_mass,
     gal_lgmet,
     prior_config: dict[str, Any],
     *,
+    ssp_lgmet=None,
     redshift: float = 0.0,
 ):
     """Return an optional soft stellar mass-metallicity log-prior."""
@@ -213,16 +244,21 @@ def _mass_metallicity_relation_logprior(
     if not isinstance(cfg, dict) or cfg.get("enabled", True) is False:
         return jnp.asarray(0.0, dtype=jnp.float64)
 
+    solar_offset = _ssp_lgmet_solar_offset(ssp_lgmet) if ssp_lgmet is not None else jnp.asarray(0.0, dtype=jnp.float64)
     pivot_mass = jnp.asarray(cfg.get("pivot_mass", 10.0), dtype=jnp.float64)
-    pivot_logzsol = jnp.asarray(cfg.get("pivot_logzsol", -0.15), dtype=jnp.float64)
+    pivot_lgmet = _cfg_lgmet_value(cfg, "pivot_logzsol", -0.15, solar_offset, absolute_key="pivot_lgmet")
     slope = jnp.asarray(cfg.get("slope", 0.35), dtype=jnp.float64)
     scale = jnp.maximum(jnp.asarray(cfg.get("scale", 0.25), dtype=jnp.float64), 1.0e-6)
     redshift_ref = jnp.asarray(cfg.get("redshift_ref", 0.0), dtype=jnp.float64)
     redshift_slope = jnp.asarray(cfg.get("redshift_slope", -0.15), dtype=jnp.float64)
-    min_loc = jnp.asarray(cfg.get("min", -1.5), dtype=jnp.float64)
-    max_loc = jnp.asarray(cfg.get("max", 0.3), dtype=jnp.float64)
+    min_loc = _cfg_lgmet_value(cfg, "min", -1.5, solar_offset, absolute_key="min_lgmet")
+    max_loc = _cfg_lgmet_value(cfg, "max", 0.3, solar_offset, absolute_key="max_lgmet")
+    if ssp_lgmet is not None:
+        ssp_lgmet = jnp.asarray(ssp_lgmet, dtype=jnp.float64)
+        min_loc = jnp.maximum(min_loc, jnp.nanmin(ssp_lgmet))
+        max_loc = jnp.minimum(max_loc, jnp.nanmax(ssp_lgmet))
 
-    loc = pivot_logzsol + slope * (jnp.asarray(log_stellar_mass, dtype=jnp.float64) - pivot_mass)
+    loc = pivot_lgmet + slope * (jnp.asarray(log_stellar_mass, dtype=jnp.float64) - pivot_mass)
     loc = loc + redshift_slope * (jnp.asarray(redshift, dtype=jnp.float64) - redshift_ref)
     loc = jnp.clip(loc, jnp.minimum(min_loc, max_loc), jnp.maximum(min_loc, max_loc))
     return dist.Normal(loc, scale).log_prob(jnp.asarray(gal_lgmet, dtype=jnp.float64))
@@ -625,12 +661,13 @@ def _build_diffstar_host(context: ModelContext, prior_config: dict[str, Any], *,
         return_smh=True,
     )
 
-    gal_lgmet = numpyro.sample("gal_lgmet", dist.Normal(*_cfg_mean_scale(prior_config, "gal_lgmet", -0.3, 0.5)))
+    gal_lgmet = numpyro.sample("gal_lgmet", dist.Normal(*_cfg_mean_scale(prior_config, "gal_lgmet", _default_gal_lgmet_loc(ssp_lgmet), 0.5)))
     gal_lgmet_scatter = numpyro.sample("gal_lgmet_scatter", dist.HalfNormal(_cfg_halfnorm(prior_config, "gal_lgmet_scatter", 0.2)))
     mmr_logprior = _mass_metallicity_relation_logprior(
         log_stellar_mass,
         gal_lgmet,
         prior_config,
+        ssp_lgmet=ssp_lgmet,
         redshift=float(context.fit_config.observation.redshift),
     )
     numpyro.factor("mass_metallicity_relation_prior", mmr_logprior)
