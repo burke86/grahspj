@@ -281,6 +281,7 @@ def _torus_component(wave, fcov, si, cool_lam, cool_width, hot_lam, hot_width, h
         si_em_ampl * jnp.exp(-0.5 * ((wave - si_em_lam) / si_em_width) ** 2)
         - si_abs_ampl * jnp.exp(-0.5 * ((wave - si_abs_lam) / si_abs_width) ** 2)
     )
+    si_spec = jnp.maximum(si_spec, -torus)
     return torus + si_spec
 
 
@@ -1252,10 +1253,11 @@ def evaluate_photometric_state(
         igm = context.fixed_igm_jax
     nebular = _build_nebular_components(context, host_state, host_rest, prior_config)
     host_with_nebular_rest = host_rest + nebular["absorption_rest"] + nebular["emission_rest"]
-    gal_att_rest, agn_att_rest, host_absorbed_rest, dust_luminosity = _apply_biattenuation(
+    agn_attenuated_input_rest = disk_rest + feii_rest + line_rest + balmer_rest
+    gal_att_rest, agn_attenuated_rest, host_absorbed_rest, dust_luminosity = _apply_biattenuation(
         rest_wave,
         host_with_nebular_rest,
-        disk_rest + torus_rest + feii_rest + line_rest + balmer_rest,
+        agn_attenuated_input_rest,
         ebv_gal,
         ebv_agn,
         -1.2,
@@ -1272,7 +1274,7 @@ def evaluate_photometric_state(
     nebular_lines_att_rest = nebular["lines_rest"] * gal_att_factor
     nebular_continuum_att_rest = nebular["continuum_rest"] * gal_att_factor
     disk_att_rest = disk_rest * agn_att_factor
-    torus_att_rest = torus_rest * agn_att_factor
+    torus_att_rest = torus_rest
     feii_att_rest = feii_rest * agn_att_factor
     line_bl_att_rest = line_bl_rest * agn_att_factor
     line_nl_att_rest = line_nl_rest * agn_att_factor
@@ -1284,8 +1286,8 @@ def evaluate_photometric_state(
         _host_dust_emission(context, dust_luminosity, dust_alpha),
         jnp.zeros_like(rest_wave),
     )
-    total_rest = gal_att_rest + dust_rest + agn_att_rest
-    agn_rest = agn_att_rest
+    agn_rest = agn_attenuated_rest + torus_att_rest
+    total_rest = gal_att_rest + dust_rest + agn_rest
     transmitted_fraction = jnp.clip(total_rest / jnp.maximum(host_with_nebular_rest + disk_rest + torus_rest + feii_rest + line_rest + balmer_rest, 1e-30), 1e-4, 1.0)
     fast_projection_enabled = _can_use_fixed_filter_projection(context, cfg) and not include_components
     redshift_projection_enabled = (
