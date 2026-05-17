@@ -129,6 +129,16 @@ def _cfg_halfnorm(prior_config: dict[str, Any], key: str, default_scale: float):
     return jnp.asarray(default_scale)
 
 
+def _cfg_exponential(prior_config: dict[str, Any], key: str, default_scale: float):
+    """Read an Exponential scale value from prior_config."""
+    cfg = prior_config.get(key, None)
+    if isinstance(cfg, dict) and "scale" in cfg:
+        return jnp.asarray(cfg["scale"])
+    if isinstance(cfg, (int, float)):
+        return jnp.asarray(cfg)
+    return jnp.asarray(default_scale)
+
+
 def _cfg_mean_scale(prior_config: dict[str, Any], key: str, default_loc: float, default_scale: float):
     """Alias for reading mean/scale prior settings from prior_config."""
     return _cfg_norm(prior_config, key, default_loc, default_scale)
@@ -1239,6 +1249,23 @@ def evaluate_photometric_state(
         intrinsic_scatter = jnp.exp(log_intrinsic_scatter)
     else:
         intrinsic_scatter = jnp.asarray(float(cfg.likelihood.intrinsic_scatter_default), dtype=jnp.float64)
+    if cfg.likelihood.fit_systematics_width:
+        systematics_width = numpyro.sample(
+            "systematics_width",
+            dist.Exponential(
+                1.0
+                / jnp.maximum(
+                    _cfg_exponential(
+                        prior_config,
+                        "systematics_width",
+                        cfg.likelihood.systematics_width_prior_scale,
+                    ),
+                    1.0e-12,
+                )
+            ),
+        )
+    else:
+        systematics_width = jnp.asarray(float(cfg.likelihood.systematics_width), dtype=jnp.float64)
     if cfg.observation.fit_redshift:
         redshift = _sample_redshift(context, prior_config, cfg)
         luminosity_distance_m = _luminosity_distance_m_jax(
@@ -1529,7 +1556,7 @@ def evaluate_photometric_state(
         obs_errors=obs_errors,
         upper_limits=upper_limits,
         data_mask=data_mask,
-        systematics_width=cfg.likelihood.systematics_width,
+        systematics_width=systematics_width,
         intrinsic_scatter=intrinsic_scatter,
         student_t_df=cfg.likelihood.student_t_df,
         agn_component=agn_fluxes,

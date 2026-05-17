@@ -175,6 +175,8 @@ class AGNConfig:
 class LikelihoodConfig:
     """Likelihood and extra model-mismatch configuration."""
     systematics_width: float = 0.05
+    fit_systematics_width: bool = False
+    systematics_width_prior_scale: float = 0.01
     student_t_df: float = 5.0
     fit_intrinsic_scatter: bool = True
     intrinsic_scatter_default: float = 1.0e-4

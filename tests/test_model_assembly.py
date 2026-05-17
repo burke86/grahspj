@@ -129,6 +129,27 @@ def _fixed_component_data():
     }
 
 
+def test_systematics_width_can_be_sampled_with_exponential_prior(monkeypatch):
+    _patch_ssp(monkeypatch)
+    cfg = _cfg()
+    cfg.likelihood.fit_systematics_width = True
+    cfg.likelihood.systematics_width = 0.05
+    cfg.likelihood.systematics_width_prior_scale = 0.01
+    context = build_model_context(cfg)
+
+    tr = _deterministic_likelihood_trace(
+        context,
+        {
+            **_fixed_component_data(),
+            "systematics_width": np.array(0.02),
+        },
+    )
+
+    assert "systematics_width" in tr
+    assert np.isclose(_site(tr, "systematics_width"), 0.02)
+    assert "photometry_loglike" in tr
+
+
 def test_component_rest_and_observed_seds_sum_to_total(monkeypatch):
     _patch_ssp(monkeypatch)
     context = build_model_context(_cfg(fit_balmer_continuum=True))
