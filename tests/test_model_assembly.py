@@ -129,6 +129,27 @@ def _fixed_component_data():
     }
 
 
+def test_systematics_width_can_be_sampled_with_exponential_prior(monkeypatch):
+    _patch_ssp(monkeypatch)
+    cfg = _cfg()
+    cfg.likelihood.fit_systematics_width = True
+    cfg.likelihood.systematics_width = 0.05
+    cfg.likelihood.systematics_width_prior_scale = 0.01
+    context = build_model_context(cfg)
+
+    tr = _deterministic_likelihood_trace(
+        context,
+        {
+            **_fixed_component_data(),
+            "systematics_width": np.array(0.02),
+        },
+    )
+
+    assert "systematics_width" in tr
+    assert np.isclose(_site(tr, "systematics_width"), 0.02)
+    assert "photometry_loglike" in tr
+
+
 def test_component_rest_and_observed_seds_sum_to_total(monkeypatch):
     _patch_ssp(monkeypatch)
     context = build_model_context(_cfg(fit_balmer_continuum=True))
@@ -177,6 +198,23 @@ def test_component_rest_and_observed_seds_sum_to_total(monkeypatch):
     assert np.allclose(_site(tr, "agn_obs_sed"), agn_obs_parts, rtol=2.0e-10, atol=1.0e-40)
     assert np.allclose(_site(tr, "host_total_obs_sed"), host_obs_parts, rtol=2.0e-10, atol=1.0e-40)
     assert np.allclose(_site(tr, "total_obs_sed"), total_obs_parts, rtol=2.0e-10, atol=1.0e-40)
+
+
+def test_torus_component_is_not_foreground_attenuated(monkeypatch):
+    _patch_ssp(monkeypatch)
+    context = build_model_context(_cfg())
+    low_ebv = _fixed_component_data()
+    high_ebv = _fixed_component_data()
+    low_ebv["ebv_gal"] = np.array(0.0)
+    low_ebv["ebv_agn"] = np.array(0.0)
+    high_ebv["ebv_gal"] = np.array(0.5)
+    high_ebv["ebv_agn"] = np.array(0.5)
+
+    tr_low = _deterministic_trace(context, low_ebv)
+    tr_high = _deterministic_trace(context, high_ebv)
+
+    np.testing.assert_allclose(_site(tr_high, "torus_rest_sed"), _site(tr_low, "torus_rest_sed"))
+    assert np.sum(_site(tr_high, "disk_rest_sed")) < np.sum(_site(tr_low, "disk_rest_sed"))
 
 
 def test_evaluate_photometric_state_matches_deterministic_sites(monkeypatch):

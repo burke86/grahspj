@@ -15,7 +15,7 @@ from grahspj.config import (
     PhotometryData,
 )
 from grahspj.core import GRAHSPJ
-from grahspj.model import _luminosity_distance_m_jax, grahsp_photometric_model
+from grahspj.model import _default_gal_lgmet_loc, _mass_metallicity_relation_logprior, _luminosity_distance_m_jax, grahsp_photometric_model
 from grahspj.preload import build_model_context
 
 
@@ -175,6 +175,29 @@ def test_mass_metallicity_prior_is_enabled_by_default(monkeypatch):
     assert "mass_metallicity_relation_prior" in tr
     assert np.all(np.isfinite(np.asarray(tr["mass_metallicity_relation_prior"]["value"], dtype=float)))
     assert np.all(np.isfinite(np.asarray(tr["mass_metallicity_relation_logprior"]["value"], dtype=float)))
+
+
+def test_default_metallicity_prior_uses_dsps_absolute_lgmet_grid():
+    ssp_lgmet = np.array([-4.34771165, -3.34771165, -2.34771165, -1.34771165])
+
+    default_loc = float(np.asarray(_default_gal_lgmet_loc(ssp_lgmet)))
+    assert np.isclose(default_loc, np.log10(0.019) - 0.3)
+
+    low_mass_prior = _mass_metallicity_relation_logprior(
+        8.0,
+        np.log10(0.019) - 0.85,
+        {},
+        ssp_lgmet=ssp_lgmet,
+    )
+    old_convention_prior = _mass_metallicity_relation_logprior(
+        8.0,
+        -0.85,
+        {},
+        ssp_lgmet=ssp_lgmet,
+    )
+
+    assert np.isfinite(float(np.asarray(low_mass_prior)))
+    assert float(np.asarray(low_mass_prior)) > float(np.asarray(old_convention_prior))
 
 
 def test_mass_metallicity_prior_can_be_disabled(monkeypatch):
