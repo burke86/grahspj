@@ -229,6 +229,13 @@ def _cfg_lgmet_value(
     return jnp.asarray(cfg.get(solar_relative_key, default_logzsol), dtype=jnp.float64) + solar_offset
 
 
+def _cumulative_trapezoid(y, x):
+    """Return cumulative trapezoidal integral with an initial zero element."""
+    dx = jnp.diff(x)
+    area = 0.5 * (y[1:] + y[:-1]) * dx
+    return jnp.concatenate([jnp.zeros((1,), dtype=jnp.result_type(y, x)), jnp.cumsum(area)])
+
+
 def _mass_metallicity_relation_logprior(
     log_stellar_mass,
     gal_lgmet,
@@ -705,6 +712,8 @@ def _build_diffstar_host(context: ModelContext, prior_config: dict[str, Any], *,
         "host_ssp_weights": host_weights,
         "ssp_lg_age_gyr": ssp_lg_age_gyr,
         "ssp_lgmet": ssp_lgmet,
+        "sfh_age_gyr": jnp.asarray(0.0, dtype=jnp.float64),
+        "sfh_tau_gyr": jnp.asarray(0.0, dtype=jnp.float64),
     }
     if not full_output:
         return state
@@ -720,6 +729,118 @@ def _build_diffstar_host(context: ModelContext, prior_config: dict[str, Any], *,
         }
     )
     return state
+
+
+def _build_delayed_host(context: ModelContext, prior_config: dict[str, Any], *, full_output: bool = True):
+    """Build the host-galaxy SED from a CIGALE-like delayed-tau SFH."""
+    ssp_lgmet = context.host_basis_jax.ssp_lgmet
+    ssp_lg_age_gyr = context.host_basis_jax.ssp_lg_age_gyr
+    host_basis_rest = context.host_basis_jax.rest_llambda
+    surviving_frac_by_age = context.host_basis_jax.surviving_frac_by_age
+    gal_t_table = context.host_basis_jax.gal_t_table
+    t_obs_gyr = jnp.asarray(context.t_obs_gyr, dtype=jnp.float64)
+    cfg = context.fit_config.galaxy
+
+    log_stellar_mass = _sample_log_stellar_mass(prior_config)
+    min_age = jnp.asarray(max(float(cfg.sfh_t_min_gyr), 1.0e-3), dtype=jnp.float64)
+    max_age = jnp.maximum(t_obs_gyr, min_age * 1.01)
+    log_age_gyr = numpyro.sample(
+        "log_sfh_age_gyr",
+        dist.TruncatedNormal(
+            *_cfg_norm(
+                prior_config,
+                "log_sfh_age_gyr",
+                np.log(min(3.0, max(float(context.t_obs_gyr), 1.0e-3))),
+                1.0,
+            ),
+            low=jnp.log(min_age),
+            high=jnp.log(max_age),
+        ),
+    )
+    log_tau_gyr = numpyro.sample(
+        "log_sfh_tau_gyr",
+        dist.TruncatedNormal(
+            *_cfg_norm(prior_config, "log_sfh_tau_gyr", np.log(1.0), float(cfg.tau_host_prior_scale)),
+            low=jnp.log(jnp.asarray(0.03, dtype=jnp.float64)),
+            high=jnp.log(jnp.asarray(30.0, dtype=jnp.float64)),
+        ),
+    )
+    age_gyr = jnp.exp(log_age_gyr)
+    tau_gyr = jnp.maximum(jnp.exp(log_tau_gyr), 1.0e-4)
+    stellar_age_gyr = jnp.maximum(t_obs_gyr - gal_t_table, 0.0)
+    sfh_age_gyr = age_gyr - stellar_age_gyr
+    base_sfh = jnp.where((sfh_age_gyr > 0.0) & (sfh_age_gyr <= age_gyr), sfh_age_gyr * jnp.exp(-sfh_age_gyr / tau_gyr), 0.0)
+    base_smh = _cumulative_trapezoid(base_sfh, gal_t_table) * 1.0e9
+
+    gal_lgmet = numpyro.sample("gal_lgmet", dist.Normal(*_cfg_mean_scale(prior_config, "gal_lgmet", _default_gal_lgmet_loc(ssp_lgmet), 0.5)))
+    gal_lgmet_scatter = numpyro.sample("gal_lgmet_scatter", dist.HalfNormal(_cfg_halfnorm(prior_config, "gal_lgmet_scatter", 0.2)))
+    mmr_logprior = _mass_metallicity_relation_logprior(
+        log_stellar_mass,
+        gal_lgmet,
+        prior_config,
+        ssp_lgmet=ssp_lgmet,
+        redshift=float(context.fit_config.observation.redshift),
+    )
+    numpyro.factor("mass_metallicity_relation_prior", mmr_logprior)
+    host_weights_info = calc_ssp_weights_sfh_table_lognormal_mdf(
+        gal_t_table,
+        base_sfh,
+        gal_lgmet,
+        gal_lgmet_scatter,
+        ssp_lgmet,
+        ssp_lg_age_gyr,
+        t_obs_gyr,
+    )
+    host_weights = host_weights_info.weights
+    surviving_mass_fraction = jnp.clip(jnp.sum(host_weights_info.age_weights * surviving_frac_by_age), 1e-12, 1.0)
+    target_surviving_mass = 10.0**log_stellar_mass
+    target_formed_mass = target_surviving_mass / surviving_mass_fraction
+    base_formed_mass = jnp.clip(base_smh[-1], 1e-30, 1.0e40)
+    sfh_scale = target_formed_mass / base_formed_mass
+    host_rest = target_formed_mass * jnp.tensordot(
+        host_weights,
+        host_basis_rest,
+        axes=((0, 1), (0, 1)),
+    )
+    state = {
+        "host_rest": host_rest,
+        "log_stellar_mass": log_stellar_mass,
+        "surviving_mass_fraction": surviving_mass_fraction,
+        "formed_mass": target_formed_mass,
+        "sfh_scale": sfh_scale,
+        "gal_lgmet": gal_lgmet,
+        "gal_lgmet_scatter": gal_lgmet_scatter,
+        "mass_metallicity_relation_logprior": mmr_logprior,
+        "host_age_weights": host_weights_info.age_weights,
+        "host_lgmet_weights": host_weights_info.lgmet_weights,
+        "host_ssp_weights": host_weights,
+        "ssp_lg_age_gyr": ssp_lg_age_gyr,
+        "ssp_lgmet": ssp_lgmet,
+        "sfh_age_gyr": age_gyr,
+        "sfh_tau_gyr": tau_gyr,
+    }
+    if not full_output:
+        return state
+    state.update(
+        {
+            "host_age_weights": host_weights_info.age_weights,
+            "host_lgmet_weights": host_weights_info.lgmet_weights,
+            "host_ssp_weights": host_weights,
+            "gal_sfr_table": base_sfh * sfh_scale,
+            "gal_smh_table": base_smh * sfh_scale,
+        }
+    )
+    return state
+
+
+def _build_host_state(context: ModelContext, prior_config: dict[str, Any], *, full_output: bool = True):
+    """Dispatch to the configured host SFH model."""
+    model_name = str(context.fit_config.galaxy.host_sfh_model).lower()
+    if model_name in {"delayed", "sfhdelayed", "delayed_tau", "delayed-tau"}:
+        return _build_delayed_host(context, prior_config, full_output=full_output)
+    if model_name in {"diffstar", "dsps_diffstar"}:
+        return _build_diffstar_host(context, prior_config, full_output=full_output)
+    raise ValueError("galaxy.host_sfh_model must be one of: 'delayed', 'diffstar'.")
 
 
 def _empty_host_state(context: ModelContext):
@@ -740,6 +861,8 @@ def _empty_host_state(context: ModelContext):
         "gal_lgmet": jnp.asarray(0.0, dtype=jnp.float64),
         "gal_lgmet_scatter": jnp.asarray(0.0, dtype=jnp.float64),
         "mass_metallicity_relation_logprior": jnp.asarray(0.0, dtype=jnp.float64),
+        "sfh_age_gyr": jnp.asarray(0.0, dtype=jnp.float64),
+        "sfh_tau_gyr": jnp.asarray(0.0, dtype=jnp.float64),
         "gal_sfr_table": jnp.zeros_like(gal_t_table),
         "gal_smh_table": jnp.zeros_like(gal_t_table),
         "ssp_lg_age_gyr": ssp_lg_age_gyr,
@@ -932,7 +1055,7 @@ def _host_capture_fraction(spatial_scale_arcsec, turnover_arcsec, slope):
     return jnp.where(valid, frac, 1.0)
 
 
-def photometric_loglike(pred_fluxes, obs_fluxes, obs_errors, upper_limits, data_mask, systematics_width, intrinsic_scatter, student_t_df, agn_component, agn_bol_lum_w, agn_nev, variability_uncertainty, attenuation_model_uncertainty, transmitted_fraction, lyman_break_uncertainty, filter_wavelength, redshift):
+def photometric_loglike(pred_fluxes, obs_fluxes, obs_errors, upper_limits, data_mask, systematics_width, intrinsic_scatter, likelihood_family, student_t_df, agn_component, agn_bol_lum_w, agn_nev, variability_uncertainty, attenuation_model_uncertainty, transmitted_fraction, lyman_break_uncertainty, filter_wavelength, redshift):
     """Evaluate the broadband photometric log-likelihood for one model state."""
     pred_fluxes = jnp.nan_to_num(pred_fluxes, nan=0.0, posinf=1.0e30, neginf=-1.0e30)
     agn_component = jnp.nan_to_num(agn_component, nan=0.0, posinf=1.0e30, neginf=-1.0e30)
@@ -952,8 +1075,14 @@ def photometric_loglike(pred_fluxes, obs_fluxes, obs_errors, upper_limits, data_
         sys_variance = sys_variance + (ly_unc * pred_fluxes) ** 2
     total_variance = jnp.nan_to_num(obs_variance + sys_variance + var_variance, nan=1.0e30, posinf=1.0e30, neginf=1.0e30)
     scale = jnp.sqrt(jnp.clip(total_variance, 1e-30, 1.0e60))
-    student = dist.StudentT(df=student_t_df, loc=pred_fluxes, scale=scale)
-    logl_data = jnp.sum(jnp.where(data_mask, student.log_prob(obs_fluxes), 0.0))
+    family = str(likelihood_family).lower()
+    if family in {"gaussian", "normal"}:
+        data_dist = dist.Normal(loc=pred_fluxes, scale=scale)
+    elif family in {"student_t", "student-t", "studentt", "t"}:
+        data_dist = dist.StudentT(df=student_t_df, loc=pred_fluxes, scale=scale)
+    else:
+        raise ValueError("likelihood.likelihood_family must be one of: 'gaussian', 'student_t'.")
+    logl_data = jnp.sum(jnp.where(data_mask, data_dist.log_prob(obs_fluxes), 0.0))
     logl_lim = jnp.sum(jnp.where(upper_limits, -0.5 * _chi2_upper_limit(obs_fluxes, pred_fluxes, total_variance), 0.0))
     invalid = ~(jnp.isfinite(pred_fluxes) & jnp.isfinite(scale) & jnp.isfinite(obs_fluxes) & jnp.isfinite(obs_errors))
     penalty = -1.0e6 * jnp.sum(invalid.astype(jnp.float64))
@@ -1083,7 +1212,7 @@ def evaluate_photometric_state(
         and not spectroscopy_enabled
         and not cfg.likelihood.attenuation_model_uncertainty
     )
-    host_state = _build_diffstar_host(context, prior_config, full_output=include_components) if fit_host else _empty_host_state(context)
+    host_state = _build_host_state(context, prior_config, full_output=include_components) if fit_host else _empty_host_state(context)
     host_rest = host_state["host_rest"]
     if fit_host and bool(cfg.galaxy.fit_host_kinematics):
         gal_v_kms = numpyro.sample("gal_v_kms", dist.Normal(*_cfg_norm(prior_config, "gal_v_kms", 0.0, 150.0)))
@@ -1595,6 +1724,7 @@ def evaluate_photometric_state(
         data_mask=data_mask,
         systematics_width=systematics_width,
         intrinsic_scatter=intrinsic_scatter,
+        likelihood_family=cfg.likelihood.likelihood_family,
         student_t_df=cfg.likelihood.student_t_df,
         agn_component=agn_fluxes,
         agn_bol_lum_w=agn_bol_luminosity,
@@ -1641,6 +1771,8 @@ def evaluate_photometric_state(
     numpyro.deterministic("gal_lgmet_fit", host_state["gal_lgmet"])
     numpyro.deterministic("gal_lgmet_scatter_fit", host_state["gal_lgmet_scatter"])
     numpyro.deterministic("mass_metallicity_relation_logprior", host_state["mass_metallicity_relation_logprior"])
+    numpyro.deterministic("sfh_age_gyr_fit", host_state["sfh_age_gyr"])
+    numpyro.deterministic("sfh_tau_gyr_fit", host_state["sfh_tau_gyr"])
     numpyro.deterministic("log_dust_luminosity_fit", _safe_log10(dust_luminosity))
     numpyro.deterministic("dust_alpha_fit", dust_alpha)
     numpyro.deterministic("nebular_logU_fit", nebular["logU"])
