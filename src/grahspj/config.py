@@ -105,6 +105,7 @@ class GalaxyConfig:
     """Host-galaxy model, cosmology, and wavelength-grid settings."""
     fit_host: bool = True
     fit_host_kinematics: bool = False
+    host_sfh_model: str = "delayed"
     dsps_ssp_fn: str = "tempdata.h5"
     age_grid_gyr: Sequence[float] = (0.1, 0.3, 1.0, 3.0, 10.0)
     logzsol_grid: Sequence[float] = (-1.0, -0.5, 0.0, 0.2)
@@ -177,6 +178,7 @@ class LikelihoodConfig:
     systematics_width: float = 0.05
     fit_systematics_width: bool = True
     systematics_width_prior_scale: float = 0.01
+    likelihood_family: str = "gaussian"
     student_t_df: float = 5.0
     fit_intrinsic_scatter: bool = True
     intrinsic_scatter_default: float = 1.0e-4

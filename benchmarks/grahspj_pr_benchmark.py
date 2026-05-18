@@ -355,6 +355,7 @@ def _build_component_functions(fitter: GRAHSPJ) -> dict[str, Callable[[], Any]]:
             jnp.asarray(ctx.data_mask, dtype=bool),
             ctx.fit_config.likelihood.systematics_width,
             1.0e-4,
+            ctx.fit_config.likelihood.likelihood_family,
             ctx.fit_config.likelihood.student_t_df,
             jnp.zeros_like(pred_fluxes),
             agn_amp * AGN_BOLOMETRIC_CORRECTION_5100,

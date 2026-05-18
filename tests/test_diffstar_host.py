@@ -50,6 +50,7 @@ def test_diffstar_host_model_exposes_log_stellar_mass(monkeypatch):
     monkeypatch.setattr("grahspj.preload._SSP_DATA_CACHE", {})
     cfg = _mock_config()
     cfg.galaxy.dsps_ssp_fn = "fake-diffstar.h5"
+    cfg.galaxy.host_sfh_model = "diffstar"
     context = build_model_context(cfg)
     tr = trace(seed(lambda: grahsp_photometric_model(context, include_components=True), 0)).get_trace()
 
@@ -66,6 +67,30 @@ def test_diffstar_host_model_exposes_log_stellar_mass(monkeypatch):
     assert np.any(np.asarray(tr["line_bl_rest_sed"]["value"]) > 0.0)
     assert np.any(np.asarray(tr["line_nl_rest_sed"]["value"]) > 0.0)
     assert np.allclose(np.asarray(tr["line_liner_rest_sed"]["value"]), 0.0)
+
+
+def test_delayed_host_model_is_default(monkeypatch):
+    class _SSPData:
+        ssp_lgmet = np.array([-2.0, -1.5, -1.0, -0.5])
+        ssp_lg_age_gyr = np.array([-1.0, -0.5, 0.0, 0.5])
+        ssp_wave = np.array([900.0, 2000.0, 5000.0, 10000.0])
+        ssp_flux = np.ones((4, 4, 4))
+
+    monkeypatch.setattr("grahspj.preload._load_ssp_templates", lambda fn: _SSPData())
+    monkeypatch.setattr("grahspj.preload._SSP_DATA_CACHE", {})
+    cfg = _mock_config()
+    cfg.galaxy.dsps_ssp_fn = "fake-delayed.h5"
+    context = build_model_context(cfg)
+    tr = trace(seed(lambda: grahsp_photometric_model(context, include_components=True), 0)).get_trace()
+
+    assert cfg.galaxy.host_sfh_model == "delayed"
+    assert "log_sfh_age_gyr" in tr
+    assert "log_sfh_tau_gyr" in tr
+    assert "u_lgmcrit" not in tr
+    assert np.isfinite(float(np.asarray(tr["sfh_age_gyr_fit"]["value"])))
+    assert np.isfinite(float(np.asarray(tr["sfh_tau_gyr_fit"]["value"])))
+    assert np.all(np.isfinite(np.asarray(tr["gal_sfr_table"]["value"], dtype=float)))
+    assert np.all(np.isfinite(np.asarray(tr["gal_smh_table"]["value"], dtype=float)))
 
 
 def test_agn_type_2_uses_sy2_narrow_lines_only(monkeypatch):
