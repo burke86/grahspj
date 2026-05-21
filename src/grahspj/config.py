@@ -105,6 +105,7 @@ class GalaxyConfig:
     """Host-galaxy model, cosmology, and wavelength-grid settings."""
     fit_host: bool = True
     fit_host_kinematics: bool = False
+    host_sfh_model: str = "delayed"
     dsps_ssp_fn: str = "tempdata.h5"
     age_grid_gyr: Sequence[float] = (0.1, 0.3, 1.0, 3.0, 10.0)
     logzsol_grid: Sequence[float] = (-1.0, -0.5, 0.0, 0.2)
@@ -175,6 +176,9 @@ class AGNConfig:
 class LikelihoodConfig:
     """Likelihood and extra model-mismatch configuration."""
     systematics_width: float = 0.05
+    fit_systematics_width: bool = True
+    systematics_width_prior_scale: float = 0.01
+    likelihood_family: str = "gaussian"
     student_t_df: float = 5.0
     fit_intrinsic_scatter: bool = True
     intrinsic_scatter_default: float = 1.0e-4
@@ -186,6 +190,14 @@ class LikelihoodConfig:
     absolute_flux_scale_prior_sigma_dex: float = 0.5
     use_host_capture_model: bool = False
     use_fast_photometry_projection: bool = True
+    use_local_line_photometry: bool = True
+    use_fixed_local_line_cache: bool = True
+    fixed_local_line_cache_n_width: int = 128
+    fixed_local_line_cache_min_width_kms: float = 200.0
+    fixed_local_line_cache_max_width_kms: float = 30000.0
+    use_redshift_projection_cache: bool = True
+    redshift_projection_n_grid: int = 128
+    redshift_projection_sigma: float = 6.0
 
 
 @dataclass
