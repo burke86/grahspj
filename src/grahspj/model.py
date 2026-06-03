@@ -120,6 +120,19 @@ def _cfg_norm(prior_config: dict[str, Any], key: str, default_loc: float, defaul
     return jnp.asarray(default_loc), jnp.asarray(default_scale)
 
 
+def _cfg_truncnorm(prior_config: dict[str, Any], key: str, default_loc: float, default_scale: float, default_low: float, default_high: float):
+    """Read a truncated Normal-like prior `(loc, scale, low, high)` from prior_config."""
+    loc, scale = _cfg_norm(prior_config, key, default_loc, default_scale)
+    cfg = prior_config.get(key, None)
+    if isinstance(cfg, dict):
+        low = cfg.get("low", default_low)
+        high = cfg.get("high", default_high)
+    else:
+        low = default_low
+        high = default_high
+    return loc, scale, jnp.asarray(low, dtype=jnp.float64), jnp.asarray(high, dtype=jnp.float64)
+
+
 def _cfg_halfnorm(prior_config: dict[str, Any], key: str, default_scale: float):
     """Read a HalfNormal-like scale value from prior_config."""
     cfg = prior_config.get(key, None)
@@ -1253,8 +1266,10 @@ def evaluate_photometric_state(
 
     agn_type = int(cfg.agn.agn_type)
     if fit_agn:
-        uv_slope = numpyro.sample("uv_slope", dist.Normal(*_cfg_norm(prior_config, "uv_slope", 0.0, 0.5)))
-        pl_slope = numpyro.sample("pl_slope", dist.Normal(*_cfg_norm(prior_config, "pl_slope", -1.0, 0.5)))
+        pl_loc, pl_scale, pl_low, pl_high = _cfg_truncnorm(prior_config, "pl_slope", -1.8, 0.4, -3.0, -1.0)
+        pl_slope = numpyro.sample("pl_slope", dist.TruncatedNormal(pl_loc, pl_scale, low=pl_low, high=pl_high))
+        uv_slope = numpyro.sample("uv_slope", dist.Normal(*_cfg_norm(prior_config, "uv_slope", 0.0, 0.05)))
+        numpyro.factor("uv_slope_gt_pl_slope", jnp.where(uv_slope > pl_slope, 0.0, -jnp.inf))
         pl_bend_loc = numpyro.sample("pl_bend_loc", dist.LogNormal(*_cfg_norm(prior_config, "log_pl_bend_loc", np.log(GRAHSP_PL_BEND_LOC_A), 0.3)))
         pl_bend_width = numpyro.sample("pl_bend_width", dist.LogNormal(*_cfg_norm(prior_config, "log_pl_bend_width", np.log(GRAHSP_PL_BEND_WIDTH), 0.4)))
         pl_cutoff = numpyro.sample("pl_cutoff", dist.LogNormal(*_cfg_norm(prior_config, "log_pl_cutoff", np.log(GRAHSP_PL_CUTOFF_A), 0.6)))

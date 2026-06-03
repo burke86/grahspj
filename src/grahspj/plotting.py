@@ -10,18 +10,15 @@ from .mplstyle import use_style
 
 
 _COMPONENT_STYLE = [
-    ("host_obs_sed", "Host stellar", "#2b6cb0", 1.6),
-    ("nebular_obs_sed", "Nebular emission", "#319795", 1.1),
-    ("dust_obs_sed", "Host dust", "#b7791f", 1.5),
-    ("disk_obs_sed", "AGN disk", "#c05621", 1.2),
-    ("torus_obs_sed", "Torus", "#805ad5", 1.2),
-    ("feii_obs_sed", "Fe II", "#2f855a", 1.0),
-    ("line_bl_obs_sed", "AGN lines", "#d53f8c", 1.0),
-    ("line_nl_obs_sed", "AGN lines", "#b83280", 1.0),
-    ("line_liner_obs_sed", "AGN lines", "#97266d", 1.0),
-    ("balmer_obs_sed", "Balmer cont.", "#dd6b20", 1.0),
-    ("agn_obs_sed", "AGN total", "#718096", 1.4),
-    ("total_obs_sed", "Model total", "#000000", 2.0),
+    (("host_obs_sed",), "Host stellar", "#2b6cb0", 1.6),
+    (("nebular_obs_sed",), "Nebular emission", "#319795", 1.1),
+    (("dust_obs_sed",), "Host dust", "#b7791f", 1.5),
+    (("disk_obs_sed",), "AGN disk", "#c05621", 1.2),
+    (("torus_obs_sed",), "Torus", "#805ad5", 1.2),
+    (("line_bl_obs_sed", "line_nl_obs_sed", "line_liner_obs_sed", "feii_obs_sed"), "AGN lines", "#d53f8c", 1.0),
+    (("balmer_obs_sed",), "Balmer cont.", "#dd6b20", 1.0),
+    (("agn_obs_sed",), "AGN total", "#718096", 1.4),
+    (("total_obs_sed",), "Model total", "#000000", 2.0),
 ]
 
 
@@ -34,6 +31,26 @@ def _median_site(pred: dict[str, Any], key: str) -> np.ndarray:
 def _percentile_site(pred: dict[str, Any], key: str, q: float) -> np.ndarray:
     """Return one percentile across predictive draws for a site."""
     arr = np.asarray(pred[key], dtype=float)
+    return np.percentile(arr, q, axis=0) if arr.ndim > 1 else arr
+
+
+def _site_sum(pred: dict[str, Any], keys: tuple[str, ...]) -> np.ndarray:
+    """Return the per-draw sum of available predictive sites."""
+    arrays = [np.asarray(pred[key], dtype=float) for key in keys if key in pred]
+    if not arrays:
+        return np.asarray([])
+    return np.sum(arrays, axis=0)
+
+
+def _median_site_sum(pred: dict[str, Any], keys: tuple[str, ...]) -> np.ndarray:
+    """Return the median draw of a summed component group."""
+    arr = _site_sum(pred, keys)
+    return np.median(arr, axis=0) if arr.ndim > 1 else arr
+
+
+def _percentile_site_sum(pred: dict[str, Any], keys: tuple[str, ...], q: float) -> np.ndarray:
+    """Return one percentile across predictive draws for a summed component group."""
+    arr = _site_sum(pred, keys)
     return np.percentile(arr, q, axis=0) if arr.ndim > 1 else arr
 
 
@@ -113,12 +130,12 @@ def plot_fit_sed(
         )
 
         component_sums = {}
-        for key, label, color, lw in _COMPONENT_STYLE:
-            if key not in pred:
+        for keys, label, color, lw in _COMPONENT_STYLE:
+            if not any(key in pred for key in keys):
                 continue
-            component = _to_display_flux_density(obs_wave, _median_site(pred, key))
-            comp_lo = _to_display_flux_density(obs_wave, _percentile_site(pred, key, 16.0))
-            comp_hi = _to_display_flux_density(obs_wave, _percentile_site(pred, key, 84.0))
+            component = _to_display_flux_density(obs_wave, _median_site_sum(pred, keys))
+            comp_lo = _to_display_flux_density(obs_wave, _percentile_site_sum(pred, keys, 16.0))
+            comp_hi = _to_display_flux_density(obs_wave, _percentile_site_sum(pred, keys, 84.0))
             finite_component = np.asarray(component, dtype=float)
             if not np.any(np.isfinite(finite_component) & (np.abs(finite_component) > 0.0)):
                 continue
@@ -142,13 +159,14 @@ def plot_fit_sed(
             plot_label = label if label not in legend_labels_seen else "_nolegend_"
             if plot_label != "_nolegend_":
                 legend_labels_seen.add(label)
-            if key == "total_obs_sed":
+            primary_key = keys[0]
+            if primary_key == "total_obs_sed":
                 ax_sed.plot(obs_wave, component, color=color, lw=max(lw - 0.2, 1.4), alpha=0.65, label=plot_label, zorder=1)
-            elif key == "host_obs_sed":
+            elif primary_key == "host_obs_sed":
                 ax_sed.plot(obs_wave, component, color=color, lw=max(lw, 2.3), ls="--", alpha=0.95, label=plot_label, zorder=4)
-            elif key == "dust_obs_sed":
+            elif primary_key == "dust_obs_sed":
                 ax_sed.plot(obs_wave, component, color=color, lw=max(lw, 2.1), ls=(0, (4, 2)), alpha=0.95, label=plot_label, zorder=4)
-            elif key == "agn_obs_sed":
+            elif primary_key == "agn_obs_sed":
                 ax_sed.plot(obs_wave, component, color=color, lw=max(lw, 2.2), ls="-.", alpha=0.95, label=plot_label, zorder=4)
             else:
                 ax_sed.plot(obs_wave, component, color=color, lw=max(lw, 2.0), ls=":", alpha=0.95, label=plot_label, zorder=3)
