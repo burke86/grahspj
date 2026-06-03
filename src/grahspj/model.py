@@ -669,10 +669,10 @@ def _local_nebular_line_obs_sed(context: ModelContext, line_wave, line_lumin, wi
     attenuation_curve = _attenuation_curve(rest_line_wave, -1.2, -3.0, 1.2, GRAHSP_BIATTENUATION_BREAK_A)
     attenuation_factor = 10 ** (jnp.asarray(ebv_total, dtype=jnp.float64) * attenuation_curve / -2.5)
     flux_lambda = rest_lumin * attenuation_factor * igm_local / distance_scale
-    obs_flat = jnp.ravel(obs_line_wave)
-    flux_flat = jnp.ravel(flux_lambda)
-    order = jnp.argsort(obs_flat)
-    return obs_flat[order], flux_flat[order]
+    separator = jnp.full((obs_line_wave.shape[0], 1), jnp.nan, dtype=jnp.float64)
+    obs_plot = jnp.concatenate([obs_line_wave, separator], axis=1)
+    flux_plot = jnp.concatenate([flux_lambda, separator], axis=1)
+    return jnp.ravel(obs_plot), jnp.ravel(flux_plot)
 
 
 def _interp_fixed_local_line_terms(width_kms, cache):

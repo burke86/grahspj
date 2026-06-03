@@ -177,14 +177,16 @@ def plot_fit_sed(
             finite_component = np.asarray(local_component, dtype=float)
             finite_wave = np.asarray(local_wave, dtype=float)
             finite = np.isfinite(finite_wave) & np.isfinite(finite_component) & (np.abs(finite_component) > 0.0)
+            local_wave_plot = np.where(np.isfinite(finite_wave), finite_wave, np.nan)
+            local_component_plot = np.where(finite, finite_component, np.nan)
             if np.any(finite):
                 plotted_components.append(local_component)
                 plot_label = "Nebular emission" if "Nebular emission" not in legend_labels_seen else "_nolegend_"
                 if plot_label != "_nolegend_":
                     legend_labels_seen.add("Nebular emission")
                 ax_sed.plot(
-                    finite_wave[finite],
-                    local_component[finite],
+                    local_wave_plot,
+                    local_component_plot,
                     color="#319795",
                     lw=1.4,
                     ls=":",
@@ -199,11 +201,13 @@ def plot_fit_sed(
             finite_total = np.asarray(local_total, dtype=float)
             finite_wave = np.asarray(local_wave, dtype=float)
             finite = np.isfinite(finite_wave) & np.isfinite(finite_total) & (finite_total > 0.0)
+            local_wave_plot = np.where(np.isfinite(finite_wave), finite_wave, np.nan)
+            local_total_plot = np.where(finite, finite_total, np.nan)
             if np.any(finite):
                 plotted_components.append(local_total)
                 ax_sed.plot(
-                    finite_wave[finite],
-                    local_total[finite],
+                    local_wave_plot,
+                    local_total_plot,
                     color="#000000",
                     lw=1.5,
                     alpha=0.8,
