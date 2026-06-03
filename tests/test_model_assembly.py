@@ -450,7 +450,10 @@ def test_plotted_component_sites_are_attenuated_likelihood_components(monkeypatc
         assert np.allclose(_site(tr, obs_key), expected, rtol=2.0e-10, atol=1.0e-40)
 
     projected_total = np.asarray(_project_filters(_site(tr, "total_obs_sed"), context.packed_filters_jax))
-    assert np.allclose(_site(tr, "pred_fluxes"), projected_total, rtol=2.0e-10, atol=1.0e-30)
+    projected_coarse_nebular_lines = np.asarray(_project_filters(_site(tr, "nebular_lines_obs_sed"), context.packed_filters_jax))
+    corrected_total = projected_total - projected_coarse_nebular_lines + _site(tr, "nebular_lines_fluxes")
+    assert np.allclose(_site(tr, "pred_fluxes"), corrected_total, rtol=2.0e-10, atol=1.0e-30)
+    assert np.asarray(_site(tr, "nebular_lines_local_obs_wave")).size > np.asarray(_site(tr, "nebular_lines_obs_sed")).size
 
 
 def test_fast_fixed_filter_projection_matches_legacy_photometry(monkeypatch):
@@ -460,6 +463,7 @@ def test_fast_fixed_filter_projection_matches_legacy_photometry(monkeypatch):
     fast_cfg.likelihood.use_fast_photometry_projection = True
     fast_cfg.likelihood.use_local_line_photometry = False
     slow_cfg.likelihood.use_fast_photometry_projection = False
+    slow_cfg.likelihood.use_local_line_photometry = False
     fast_context = build_model_context(fast_cfg)
     slow_context = build_model_context(slow_cfg)
 
