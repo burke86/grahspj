@@ -11,7 +11,7 @@ from .mplstyle import use_style
 
 _COMPONENT_STYLE = [
     (("host_obs_sed",), "Host stellar", "#2b6cb0", 1.6),
-    (("nebular_obs_sed",), "Nebular emission", "#319795", 1.1),
+    (("nebular_continuum_obs_sed",), "Nebular emission", "#319795", 1.1),
     (("dust_obs_sed",), "Host dust", "#b7791f", 1.5),
     (("disk_obs_sed",), "AGN disk", "#c05621", 1.2),
     (("torus_obs_sed",), "Torus", "#805ad5", 1.2),
@@ -170,6 +170,50 @@ def plot_fit_sed(
                 ax_sed.plot(obs_wave, component, color=color, lw=max(lw, 2.2), ls="-.", alpha=0.95, label=plot_label, zorder=4)
             else:
                 ax_sed.plot(obs_wave, component, color=color, lw=max(lw, 2.0), ls=":", alpha=0.95, label=plot_label, zorder=3)
+
+        if "nebular_lines_local_obs_wave" in pred and "nebular_lines_local_obs_sed" in pred:
+            local_wave = _median_site(pred, "nebular_lines_local_obs_wave")
+            local_component = _to_display_flux_density(local_wave, _median_site(pred, "nebular_lines_local_obs_sed"))
+            finite_component = np.asarray(local_component, dtype=float)
+            finite_wave = np.asarray(local_wave, dtype=float)
+            finite = np.isfinite(finite_wave) & np.isfinite(finite_component) & (np.abs(finite_component) > 0.0)
+            local_wave_plot = np.where(np.isfinite(finite_wave), finite_wave, np.nan)
+            local_component_plot = np.where(finite, finite_component, np.nan)
+            if np.any(finite):
+                plotted_components.append(local_component)
+                plot_label = "Nebular emission" if "Nebular emission" not in legend_labels_seen else "_nolegend_"
+                if plot_label != "_nolegend_":
+                    legend_labels_seen.add("Nebular emission")
+                ax_sed.plot(
+                    local_wave_plot,
+                    local_component_plot,
+                    color="#319795",
+                    lw=1.4,
+                    ls=":",
+                    alpha=0.95,
+                    label=plot_label,
+                    zorder=3,
+                )
+
+        if "total_local_lines_obs_wave" in pred and "total_local_lines_obs_sed" in pred:
+            local_wave = _median_site(pred, "total_local_lines_obs_wave")
+            local_total = _to_display_flux_density(local_wave, _median_site(pred, "total_local_lines_obs_sed"))
+            finite_total = np.asarray(local_total, dtype=float)
+            finite_wave = np.asarray(local_wave, dtype=float)
+            finite = np.isfinite(finite_wave) & np.isfinite(finite_total) & (finite_total > 0.0)
+            local_wave_plot = np.where(np.isfinite(finite_wave), finite_wave, np.nan)
+            local_total_plot = np.where(finite, finite_total, np.nan)
+            if np.any(finite):
+                plotted_components.append(local_total)
+                ax_sed.plot(
+                    local_wave_plot,
+                    local_total_plot,
+                    color="#000000",
+                    lw=1.5,
+                    alpha=0.8,
+                    label="_nolegend_",
+                    zorder=2,
+                )
 
         ax_sed.errorbar(
             phot_wave,

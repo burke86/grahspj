@@ -570,6 +570,20 @@ def _local_line_gaussian_grid(line_wave, line_lumin, width_kms, *, n_local: int 
     return wave, lumin
 
 
+def _local_flux_conserving_line_grid(line_wave, line_lumin, width_kms, *, n_local: int = 9):
+    """Evaluate integrated-luminosity line profiles on per-line local grids."""
+    line_wave = jnp.asarray(line_wave, dtype=jnp.float64)
+    line_lumin = jnp.asarray(line_lumin, dtype=jnp.float64)
+    offsets = jnp.linspace(-3.0, 3.0, int(n_local), dtype=jnp.float64)
+    fwhm_wave = jnp.maximum(line_wave * jnp.asarray(width_kms, dtype=jnp.float64) / C_KMS, 1.0e-8)
+    sigma = fwhm_wave / (2.0 * jnp.sqrt(2.0 * jnp.log(2.0)))
+    wave = jnp.maximum(line_wave[:, None] + offsets[None, :] * fwhm_wave[:, None], 1.0e-6)
+    z = (wave - line_wave[:, None]) / jnp.maximum(sigma[:, None], 1.0e-12)
+    norm = 1.0 / jnp.maximum(sigma * jnp.sqrt(2.0 * jnp.pi), 1.0e-30)
+    lumin = line_lumin[:, None] * jnp.exp(-0.5 * z * z) * norm[:, None]
+    return wave, lumin
+
+
 def _project_local_line_filters(
     context: ModelContext,
     line_wave,
@@ -606,6 +620,59 @@ def _project_local_line_filters(
         curves.denom,
         context.filter_effective_wavelength_jax,
     )
+
+
+def _project_local_nebular_line_filters(
+    context: ModelContext,
+    line_wave,
+    line_lumin,
+    width_kms,
+    ebv_total,
+    redshift,
+    luminosity_distance_m,
+    igm,
+):
+    """Project flux-conserving nebular line emission through filters using local line grids."""
+    rest_line_wave, rest_lumin = _local_flux_conserving_line_grid(line_wave, line_lumin, width_kms)
+    redshift = jnp.asarray(redshift, dtype=jnp.float64)
+    luminosity_distance_m = jnp.asarray(luminosity_distance_m, dtype=jnp.float64)
+    distance_scale = 4.0 * jnp.pi * jnp.maximum(luminosity_distance_m, 1.0e-12) ** 2 * jnp.maximum(1.0 + redshift, 1.0e-8)
+    obs_line_wave = rest_line_wave * (1.0 + redshift)
+    igm_local = jnp.interp(rest_line_wave, context.rest_wave_jax, igm, left=0.0, right=0.0)
+    attenuation_curve = _attenuation_curve(rest_line_wave, -1.2, -3.0, 1.2, GRAHSP_BIATTENUATION_BREAK_A)
+    attenuation_factor = 10 ** (jnp.asarray(ebv_total, dtype=jnp.float64) * attenuation_curve / -2.5)
+    flux_lambda = rest_lumin * attenuation_factor * igm_local / distance_scale
+    curves = context.packed_filter_curves_jax
+
+    def _one_filter(filt_wave, filt_trans, denom, eff_wave):
+        trans = jnp.interp(obs_line_wave, filt_wave, filt_trans, left=0.0, right=0.0)
+        numer = jnp.sum(jnp.trapezoid(trans * flux_lambda, obs_line_wave, axis=1))
+        f_lambda = numer / jnp.maximum(denom, 1.0e-30)
+        return 1.0e-10 / 299792458.0 * 1.0e29 * eff_wave * eff_wave * f_lambda
+
+    return jax.vmap(_one_filter)(
+        curves.wave,
+        curves.transmission,
+        curves.denom,
+        context.filter_effective_wavelength_jax,
+    )
+
+
+def _local_nebular_line_obs_sed(context: ModelContext, line_wave, line_lumin, width_kms, ebv_total, redshift, luminosity_distance_m, igm):
+    """Return observed-frame local-grid wavelengths and F_lambda for nebular lines."""
+    rest_line_wave, rest_lumin = _local_flux_conserving_line_grid(line_wave, line_lumin, width_kms)
+    redshift = jnp.asarray(redshift, dtype=jnp.float64)
+    luminosity_distance_m = jnp.asarray(luminosity_distance_m, dtype=jnp.float64)
+    distance_scale = 4.0 * jnp.pi * jnp.maximum(luminosity_distance_m, 1.0e-12) ** 2 * jnp.maximum(1.0 + redshift, 1.0e-8)
+    obs_line_wave = rest_line_wave * (1.0 + redshift)
+    igm_local = jnp.interp(rest_line_wave, context.rest_wave_jax, igm, left=0.0, right=0.0)
+    attenuation_curve = _attenuation_curve(rest_line_wave, -1.2, -3.0, 1.2, GRAHSP_BIATTENUATION_BREAK_A)
+    attenuation_factor = 10 ** (jnp.asarray(ebv_total, dtype=jnp.float64) * attenuation_curve / -2.5)
+    flux_lambda = rest_lumin * attenuation_factor * igm_local / distance_scale
+    separator = jnp.full((obs_line_wave.shape[0], 1), jnp.nan, dtype=jnp.float64)
+    obs_plot = jnp.concatenate([obs_line_wave, separator], axis=1)
+    flux_plot = jnp.concatenate([flux_lambda, separator], axis=1)
+    return jnp.ravel(obs_plot), jnp.ravel(flux_plot)
 
 
 def _interp_fixed_local_line_terms(width_kms, cache):
@@ -906,6 +973,7 @@ def _build_nebular_components(context: ModelContext, host_state: dict[str, Any],
             "f_dust": jnp.asarray(float(cfg.f_dust), dtype=jnp.float64),
             "lines_width": jnp.asarray(float(cfg.lines_width), dtype=jnp.float64),
             "corr": jnp.asarray(0.0, dtype=jnp.float64),
+            "line_lumin": jnp.zeros((1,), dtype=jnp.float64),
         }
 
     logu = _sample_optional_normal(prior_config, "nebular_logU", float(cfg.logU), 0.3)
@@ -940,14 +1008,15 @@ def _build_nebular_components(context: ModelContext, host_state: dict[str, Any],
     corr = _cigale_nebular_correction(f_esc, f_dust)
     rest_templates = context.nebular_rest_templates_jax
     continuum_rest = rest_templates.continuum_lumin_per_a_per_photon[z_idx, u_idx, ne_idx] * n_ly_total * corr
+    line_lumin = templates.line_lumin_per_photon[z_idx, u_idx, ne_idx] * n_ly_total * corr
     if context.fixed_nebular_line_profile_jax is not None:
         lines_rest = context.fixed_nebular_line_profile_jax * n_ly_total * corr
     elif rest_templates.line_profile_per_photon is not None:
         lines_rest = rest_templates.line_profile_per_photon[z_idx, u_idx, ne_idx] * n_ly_total * corr
     else:
-        line_lumin = templates.line_lumin_per_photon[z_idx, u_idx, ne_idx] * n_ly_total * corr
         lines_rest = _flux_conserving_line_gaussians(rest_wave, templates.line_wave_a, line_lumin, lines_width)
     emission_scale = jnp.asarray(1.0 if cfg.emission else 0.0, dtype=jnp.float64)
+    line_lumin = line_lumin * emission_scale
     lines_rest = lines_rest * emission_scale
     continuum_rest = continuum_rest * emission_scale
     absorption_rest = jnp.where(rest_wave < 912.0, -host_rest * (1.0 - f_esc), 0.0)
@@ -968,6 +1037,7 @@ def _build_nebular_components(context: ModelContext, host_state: dict[str, Any],
         "f_dust": f_dust,
         "lines_width": lines_width,
         "corr": corr,
+        "line_lumin": line_lumin,
     }
 
 
@@ -1555,6 +1625,33 @@ def evaluate_photometric_state(
             coarse_line_obs = _redshift_to_obs(rest_wave, line_att_rest * igm, obs_wave, redshift, luminosity_distance_m)
             coarse_agn_line_fluxes = _project_filters(coarse_line_obs, context.packed_filters_jax)
         pred_fluxes_raw = pred_fluxes_raw - coarse_agn_line_fluxes + local_agn_line_fluxes
+    local_nebular_line_fluxes = jnp.zeros_like(pred_fluxes_raw)
+    coarse_nebular_line_fluxes = jnp.zeros_like(pred_fluxes_raw)
+    correct_nebular_line_photometry = (
+        fit_host
+        and bool(cfg.nebular.enabled)
+        and bool(cfg.nebular.emission)
+        and bool(cfg.likelihood.use_local_line_photometry)
+    )
+    if correct_nebular_line_photometry:
+        local_nebular_line_fluxes = _project_local_nebular_line_filters(
+            context,
+            context.nebular_templates_jax.line_wave_a,
+            nebular["line_lumin"],
+            nebular["lines_width"],
+            ebv_gal,
+            redshift,
+            luminosity_distance_m,
+            igm,
+        )
+        if fast_projection_enabled:
+            coarse_nebular_line_fluxes = _project_rest_luminosity_filters(context, nebular_lines_att_rest)
+        elif redshift_projection_enabled:
+            coarse_nebular_line_fluxes = _project_redshift_luminosity_filters(context, nebular_lines_att_rest, redshift)
+        else:
+            coarse_nebular_line_obs = _redshift_to_obs(rest_wave, nebular_lines_att_rest * igm, obs_wave, redshift, luminosity_distance_m)
+            coarse_nebular_line_fluxes = _project_filters(coarse_nebular_line_obs, context.packed_filters_jax)
+        pred_fluxes_raw = pred_fluxes_raw - coarse_nebular_line_fluxes + local_nebular_line_fluxes
     if host_capture_enabled or include_components or spectroscopy_enabled:
         host_obs = (
             jnp.zeros_like(obs_wave)
@@ -1567,6 +1664,8 @@ def evaluate_photometric_state(
             host_fluxes_total = _project_redshift_luminosity_filters(context, gal_att_rest, redshift)
         else:
             host_fluxes_total = _project_filters(host_obs, context.packed_filters_jax)
+        if correct_nebular_line_photometry:
+            host_fluxes_total = host_fluxes_total - coarse_nebular_line_fluxes + local_nebular_line_fluxes
     else:
         host_obs = jnp.zeros_like(total_obs)
         host_fluxes_total = jnp.zeros_like(pred_fluxes_raw)
@@ -1680,6 +1779,21 @@ def evaluate_photometric_state(
         nebular_obs = _redshift_to_obs(rest_wave, nebular_att_rest * igm, obs_wave, redshift, luminosity_distance_m)
         nebular_lines_obs = _redshift_to_obs(rest_wave, nebular_lines_att_rest * igm, obs_wave, redshift, luminosity_distance_m)
         nebular_continuum_obs = _redshift_to_obs(rest_wave, nebular_continuum_att_rest * igm, obs_wave, redshift, luminosity_distance_m)
+        nebular_lines_local_obs_wave, nebular_lines_local_obs = _local_nebular_line_obs_sed(
+            context,
+            context.nebular_templates_jax.line_wave_a,
+            nebular["line_lumin"],
+            nebular["lines_width"],
+            ebv_gal,
+            redshift,
+            luminosity_distance_m,
+            igm,
+        )
+        total_local_obs = (
+            jnp.interp(nebular_lines_local_obs_wave, obs_wave, total_obs, left=0.0, right=0.0)
+            - jnp.interp(nebular_lines_local_obs_wave, obs_wave, nebular_lines_obs, left=0.0, right=0.0)
+            + nebular_lines_local_obs
+        )
         disk_obs = _redshift_to_obs(rest_wave, disk_att_rest * igm, obs_wave, redshift, luminosity_distance_m)
         torus_obs = _redshift_to_obs(rest_wave, torus_att_rest * igm, obs_wave, redshift, luminosity_distance_m)
         feii_obs = _redshift_to_obs(rest_wave, feii_att_rest * igm, obs_wave, redshift, luminosity_distance_m)
@@ -1694,6 +1808,9 @@ def evaluate_photometric_state(
         nebular_fluxes = _project_filters(nebular_obs, context.packed_filters_jax)
         nebular_lines_fluxes = _project_filters(nebular_lines_obs, context.packed_filters_jax)
         nebular_continuum_fluxes = _project_filters(nebular_continuum_obs, context.packed_filters_jax)
+        if correct_nebular_line_photometry:
+            nebular_lines_fluxes = local_nebular_line_fluxes
+            nebular_fluxes = nebular_continuum_fluxes + local_nebular_line_fluxes
         disk_fluxes = _project_filters(disk_obs, context.packed_filters_jax)
         torus_fluxes = _project_filters(torus_obs, context.packed_filters_jax)
         feii_fluxes = _project_filters(feii_obs, context.packed_filters_jax)
@@ -1704,6 +1821,9 @@ def evaluate_photometric_state(
         balmer_fluxes = _project_filters(balmer_obs, context.packed_filters_jax)
         trans_fluxes = _project_filters(transmitted_fraction_obs, context.packed_filters_jax)
     else:
+        nebular_lines_local_obs_wave = jnp.zeros((1,), dtype=jnp.float64)
+        nebular_lines_local_obs = jnp.zeros((1,), dtype=jnp.float64)
+        total_local_obs = jnp.zeros((1,), dtype=jnp.float64)
         if need_agn_fluxes:
             if fast_projection_enabled:
                 agn_fluxes = _project_rest_luminosity_filters(context, agn_rest)
@@ -1844,12 +1964,16 @@ def evaluate_photometric_state(
         numpyro.deterministic("line_liner_fluxes", line_liner_fluxes)
         numpyro.deterministic("balmer_fluxes", balmer_fluxes)
         numpyro.deterministic("total_obs_sed", total_obs)
+        numpyro.deterministic("total_local_lines_obs_wave", nebular_lines_local_obs_wave)
+        numpyro.deterministic("total_local_lines_obs_sed", total_local_obs)
         numpyro.deterministic("agn_obs_sed", agn_obs)
         numpyro.deterministic("host_obs_sed", host_stellar_obs)
         numpyro.deterministic("host_total_obs_sed", host_obs)
         numpyro.deterministic("dust_obs_sed", dust_obs)
         numpyro.deterministic("nebular_obs_sed", nebular_obs)
         numpyro.deterministic("nebular_lines_obs_sed", nebular_lines_obs)
+        numpyro.deterministic("nebular_lines_local_obs_wave", nebular_lines_local_obs_wave)
+        numpyro.deterministic("nebular_lines_local_obs_sed", nebular_lines_local_obs)
         numpyro.deterministic("nebular_continuum_obs_sed", nebular_continuum_obs)
         numpyro.deterministic("disk_obs_sed", disk_obs)
         numpyro.deterministic("torus_obs_sed", torus_obs)
@@ -1889,12 +2013,16 @@ def evaluate_photometric_state(
                 "dust_rest_sed": dust_rest,
                 "nebular_rest_sed": nebular_att_rest,
                 "total_obs_sed": total_obs,
+                "total_local_lines_obs_wave": nebular_lines_local_obs_wave,
+                "total_local_lines_obs_sed": total_local_obs,
                 "agn_obs_sed": agn_obs,
                 "host_obs_sed": host_stellar_obs,
                 "host_total_obs_sed": host_obs,
                 "dust_obs_sed": dust_obs,
                 "nebular_obs_sed": nebular_obs,
                 "nebular_lines_obs_sed": nebular_lines_obs,
+                "nebular_lines_local_obs_wave": nebular_lines_local_obs_wave,
+                "nebular_lines_local_obs_sed": nebular_lines_local_obs,
                 "nebular_continuum_obs_sed": nebular_continuum_obs,
                 "disk_obs_sed": disk_obs,
                 "torus_obs_sed": torus_obs,
