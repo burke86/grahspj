@@ -705,9 +705,8 @@ class GRAHSPJ:
         custom_components = {
             "grahspj_torus": obs_sed_component("torus_obs_sed"),
             "grahspj_host_dust": obs_sed_component("dust_obs_sed"),
-            "grahspj_sed_feii": obs_sed_component("feii_obs_sed"),
             "grahspj_sed_balmer": obs_sed_component("balmer_obs_sed"),
-            "grahspj_sed_lines": obs_sed_component("line_obs_sed"),
+            "grahspj_sed_lines": obs_sed_component("line_obs_sed") + obs_sed_component("feii_obs_sed"),
         }
         plotter.custom_components = {
             name: model for name, model in custom_components.items() if keep_component(model)
