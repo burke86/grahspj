@@ -20,6 +20,7 @@ dependencies = [
   "speclite",
   "extinction",
   "matplotlib",
+  "corner",
   "jax>=0.4.30,<0.6",
   "jaxlib>=0.4.30,<0.6",
   "jax_cosmo",

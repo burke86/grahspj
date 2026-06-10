@@ -593,6 +593,48 @@ class GRAHSPJ:
             annotate_band_names=annotate_band_names,
         )
 
+    def plot_corner(
+        self,
+        output_path: str | Path | None = None,
+        params: list[str] | tuple[str, ...] | None = None,
+        max_params: int | None = 12,
+        labels: dict[str, str] | list[str] | tuple[str, ...] | None = None,
+        truths: dict[str, float | None] | list[float | None] | tuple[float | None, ...] | None = None,
+        show: bool = False,
+        **corner_kwargs,
+    ):
+        """Plot scalar posterior samples with the corner package."""
+        from .plotting import plot_corner
+
+        return plot_corner(
+            self,
+            output_path=output_path,
+            params=params,
+            max_params=max_params,
+            labels=labels,
+            truths=truths,
+            show=show,
+            **corner_kwargs,
+        )
+
+    def plot_trace(
+        self,
+        output_path: str | Path | None = None,
+        params: list[str] | tuple[str, ...] | None = None,
+        max_params: int | None = 12,
+        show: bool = False,
+    ):
+        """Plot scalar posterior sample traces, preserving chains when available."""
+        from .plotting import plot_trace
+
+        return plot_trace(
+            self,
+            output_path=output_path,
+            params=params,
+            max_params=max_params,
+            show=show,
+        )
+
     @staticmethod
     def _posterior_median_array(value: Any) -> np.ndarray:
         """Return a median predictive array over the leading sample axis."""
