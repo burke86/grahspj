@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,238 @@ _COMPONENT_STYLE = [
     (("agn_obs_sed",), "AGN total", "#718096", 1.4),
     (("total_obs_sed",), "Model total", "#000000", 2.0),
 ]
+
+_CORNER_SIGMA_LEVELS = tuple(1.0 - np.exp(-0.5 * np.asarray([1.0, 2.0, 3.0]) ** 2))
+_CORNER_ONE_SIGMA_QUANTILES = (0.16, 0.5, 0.84)
+
+
+def _posterior_samples(fitter_or_samples: Any) -> Mapping[str, Any]:
+    if isinstance(fitter_or_samples, Mapping):
+        samples = fitter_or_samples
+    else:
+        samples = getattr(fitter_or_samples, "samples", None)
+    if not samples:
+        raise RuntimeError("No fitted posterior samples are available.")
+    return samples
+
+
+def _grouped_trace_samples(fitter_or_samples: Any) -> tuple[Mapping[str, Any], bool]:
+    if not isinstance(fitter_or_samples, Mapping):
+        nuts_result = getattr(fitter_or_samples, "nuts_result", None)
+        if isinstance(nuts_result, Mapping):
+            mcmc = nuts_result.get("mcmc")
+            if mcmc is not None and hasattr(mcmc, "get_samples"):
+                return mcmc.get_samples(group_by_chain=True), True
+    return _posterior_samples(fitter_or_samples), False
+
+
+def _finite_scalar_sample_array(value: Any, *, grouped: bool) -> np.ndarray | None:
+    arr = np.asarray(value, dtype=float)
+    if grouped:
+        if arr.ndim != 2:
+            return None
+    elif arr.ndim != 1:
+        return None
+    if arr.size == 0 or not np.all(np.isfinite(arr)):
+        return None
+    return arr
+
+
+def _has_dynamic_range(value: Any, *, grouped: bool) -> bool:
+    arr = _finite_scalar_sample_array(value, grouped=grouped)
+    if arr is None:
+        return False
+    flat = arr.reshape(-1)
+    return bool(np.nanmin(flat) < np.nanmax(flat))
+
+
+def _select_scalar_params(
+    samples: Mapping[str, Any],
+    params: list[str] | tuple[str, ...] | None,
+    *,
+    max_params: int | None,
+    grouped: bool,
+) -> list[str]:
+    if params is not None:
+        selected = [str(param) for param in params]
+        for param in selected:
+            if param not in samples:
+                raise KeyError(f"Posterior sample {param!r} is not available.")
+            if _finite_scalar_sample_array(samples[param], grouped=grouped) is None:
+                raise ValueError(f"Posterior sample {param!r} is not a finite scalar sample site.")
+        return selected
+
+    selected = [
+        str(param)
+        for param, value in samples.items()
+        if _finite_scalar_sample_array(value, grouped=grouped) is not None
+    ]
+    if max_params is not None:
+        selected = selected[: int(max_params)]
+    if not selected:
+        raise RuntimeError("No finite scalar posterior sample sites are available for plotting.")
+    return selected
+
+
+def _select_corner_params(
+    samples: Mapping[str, Any],
+    params: list[str] | tuple[str, ...] | None,
+    *,
+    max_params: int | None,
+    grouped: bool,
+) -> list[str]:
+    if params is not None:
+        selected = [str(param) for param in params]
+        for param in selected:
+            if param not in samples:
+                raise KeyError(f"Posterior sample {param!r} is not available.")
+            if _finite_scalar_sample_array(samples[param], grouped=grouped) is None:
+                raise ValueError(f"Posterior sample {param!r} is not a finite scalar sample site.")
+            if not _has_dynamic_range(samples[param], grouped=grouped):
+                raise ValueError(f"Posterior sample {param!r} has no dynamic range and cannot be used in a corner plot.")
+        return selected
+
+    selected = [
+        str(param)
+        for param, value in samples.items()
+        if _has_dynamic_range(value, grouped=grouped)
+    ]
+    if max_params is not None:
+        selected = selected[: int(max_params)]
+    if not selected:
+        raise RuntimeError("No finite scalar posterior sample sites with dynamic range are available for corner plotting.")
+    return selected
+
+
+def _labels_for_params(params: list[str], labels: Mapping[str, str] | list[str] | tuple[str, ...] | None) -> list[str]:
+    if labels is None:
+        return params
+    if isinstance(labels, Mapping):
+        return [str(labels.get(param, param)) for param in params]
+    label_list = [str(label) for label in labels]
+    if len(label_list) != len(params):
+        raise ValueError("labels must have the same length as params.")
+    return label_list
+
+
+def _truths_for_params(params: list[str], truths: Mapping[str, float | None] | list[float | None] | tuple[float | None, ...] | None):
+    if truths is None:
+        return None
+    if isinstance(truths, Mapping):
+        return [truths.get(param) for param in params]
+    truth_list = list(truths)
+    if len(truth_list) != len(params):
+        raise ValueError("truths must have the same length as params.")
+    return truth_list
+
+
+def _sample_matrix(samples: Mapping[str, Any], params: list[str], *, grouped: bool) -> np.ndarray:
+    columns = []
+    draw_count = None
+    for param in params:
+        arr = _finite_scalar_sample_array(samples[param], grouped=grouped)
+        if arr is None:
+            raise ValueError(f"Posterior sample {param!r} is not a finite scalar sample site.")
+        column = arr.reshape(-1)
+        if draw_count is None:
+            draw_count = column.size
+        elif column.size != draw_count:
+            raise ValueError("Selected posterior samples do not have the same number of draws.")
+        columns.append(column)
+    return np.column_stack(columns)
+
+
+def plot_corner(
+    fitter_or_samples: Any,
+    output_path: str | Path | None = None,
+    params: list[str] | tuple[str, ...] | None = None,
+    max_params: int | None = 12,
+    labels: Mapping[str, str] | list[str] | tuple[str, ...] | None = None,
+    truths: Mapping[str, float | None] | list[float | None] | tuple[float | None, ...] | None = None,
+    show: bool = False,
+    **corner_kwargs,
+):
+    """Render a corner plot for scalar posterior sample sites."""
+    try:
+        import corner as corner_lib
+    except ModuleNotFoundError as exc:  # pragma: no cover - depends on optional runtime install state
+        raise RuntimeError("plot_corner requires the 'corner' package.") from exc
+
+    samples, grouped = _grouped_trace_samples(fitter_or_samples)
+    selected = _select_corner_params(samples, params, max_params=max_params, grouped=grouped)
+    matrix = _sample_matrix(samples, selected, grouped=grouped)
+    plot_labels = _labels_for_params(selected, labels)
+    plot_truths = _truths_for_params(selected, truths)
+    corner_kwargs.setdefault("levels", _CORNER_SIGMA_LEVELS)
+    corner_kwargs.setdefault("quantiles", _CORNER_ONE_SIGMA_QUANTILES)
+    corner_kwargs.setdefault("title_quantiles", _CORNER_ONE_SIGMA_QUANTILES)
+    corner_kwargs.setdefault("show_titles", True)
+    corner_kwargs.setdefault("smooth", 1.0)
+    corner_kwargs.setdefault("smooth1d", 1.0)
+    corner_kwargs.setdefault("plot_datapoints", False)
+    corner_kwargs.setdefault("fill_contours", True)
+    corner_kwargs.setdefault("title_kwargs", {"fontsize": 8})
+    corner_kwargs.setdefault("title_fmt", ".3g")
+
+    with use_style():
+        fig = corner_lib.corner(matrix, labels=plot_labels, truths=plot_truths, **corner_kwargs)
+        if output_path is not None:
+            output_path = Path(output_path)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            fig.savefig(output_path)
+        if show:
+            plt.show()
+        else:
+            plt.close(fig)
+        return fig
+
+
+def plot_trace(
+    fitter_or_samples: Any,
+    output_path: str | Path | None = None,
+    params: list[str] | tuple[str, ...] | None = None,
+    max_params: int | None = 12,
+    show: bool = False,
+):
+    """Render per-parameter trace plots, preserving NUTS chains when available."""
+    samples, grouped = _grouped_trace_samples(fitter_or_samples)
+    selected = _select_scalar_params(samples, params, max_params=max_params, grouped=grouped)
+    chain_values = []
+    for param in selected:
+        arr = _finite_scalar_sample_array(samples[param], grouped=grouped)
+        if arr is None:
+            raise ValueError(f"Posterior sample {param!r} is not a finite scalar sample site.")
+        chain_values.append(arr if grouped else arr.reshape(1, -1))
+
+    with use_style():
+        fig, axes = plt.subplots(
+            len(selected),
+            1,
+            figsize=(10, max(2.4, 1.7 * len(selected))),
+            sharex=True,
+            squeeze=False,
+        )
+        axes_flat = axes.ravel()
+        for ax, param, values in zip(axes_flat, selected, chain_values):
+            draws = np.arange(values.shape[1])
+            for chain_index, chain in enumerate(values):
+                label = f"chain {chain_index}" if values.shape[0] > 1 else None
+                ax.plot(draws, chain, lw=0.8, alpha=0.85, label=label)
+            ax.set_ylabel(param, fontsize=8)
+            ax.tick_params(axis="both", labelsize=8)
+            if values.shape[0] > 1:
+                ax.legend(loc="upper right", fontsize=8)
+        axes_flat[-1].set_xlabel("Draw", fontsize=9)
+        fig.tight_layout()
+        if output_path is not None:
+            output_path = Path(output_path)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            fig.savefig(output_path)
+        if show:
+            plt.show()
+        else:
+            plt.close(fig)
+        return fig
 
 
 def _median_site(pred: dict[str, Any], key: str) -> np.ndarray:

@@ -35,7 +35,9 @@ __all__ = [
     "PhotometryData",
     "SpectroscopyConfig",
     "SpectroscopyData",
+    "plot_corner",
     "plot_fit_sed",
+    "plot_trace",
     "style_path",
     "load_chimera_benchmark_dataset",
     "run_chimera_mass_benchmark",
@@ -53,6 +55,14 @@ def __getattr__(name):
         from .plotting import plot_fit_sed
 
         return plot_fit_sed
+    if name == "plot_corner":
+        from .plotting import plot_corner
+
+        return plot_corner
+    if name == "plot_trace":
+        from .plotting import plot_trace
+
+        return plot_trace
     if name == "style_path":
         from .mplstyle import style_path
 
