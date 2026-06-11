@@ -47,6 +47,7 @@ from grahspj.model import (
     _redshift_to_obs,
     _torus_component,
     grahsp_photometric_model,
+    photometric_loglike,
 )
 from grahspj.preload import _build_fixed_igm_jax, _build_igm_cache_jax, build_model_context
 from grahspj.preload import (
@@ -392,6 +393,34 @@ def test_redshift_projection_uses_luminosity_distance_and_one_plus_z():
     obs = np.asarray(_redshift_to_obs(rest_wave, rest_lum, obs_wave, redshift=1.0, luminosity_distance_m=d_l))
 
     assert np.allclose(obs, rest_lum / (4.0 * np.pi * d_l**2 * 2.0))
+
+
+def test_lyman_break_uncertainty_threshold_uses_angstroms():
+    kwargs = dict(
+        pred_fluxes=np.asarray([100.0]),
+        obs_fluxes=np.asarray([1.0]),
+        obs_errors=np.asarray([0.1]),
+        upper_limits=np.asarray([False]),
+        data_mask=np.asarray([True]),
+        systematics_width=0.0,
+        intrinsic_scatter=0.0,
+        likelihood_family="gaussian",
+        student_t_df=5.0,
+        agn_component=np.asarray([0.0]),
+        agn_bol_lum_w=1.0e38,
+        agn_nev=0.1,
+        variability_uncertainty=False,
+        attenuation_model_uncertainty=False,
+        transmitted_fraction=np.asarray([1.0]),
+        filter_wavelength=np.asarray([1400.0]),
+        redshift=0.0,
+    )
+
+    logl_without_uncertainty = float(photometric_loglike(**kwargs, lyman_break_uncertainty=False))
+    logl_with_uncertainty = float(photometric_loglike(**kwargs, lyman_break_uncertainty=True))
+
+    assert logl_without_uncertainty < -1.0e5
+    assert logl_with_uncertainty > -100.0
 
 
 def test_filter_projection_flat_flambda_to_mjy_units():
