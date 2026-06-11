@@ -331,7 +331,12 @@ def _powerlaw_jax(wave, norm, lam1, lam2, x0, xbrk, bend_width, cutoff):
 
 
 def _torus_component(wave, fcov, si, cool_lam, cool_width, hot_lam, hot_width, hot_fcov, si_ratio, si_em_lam, si_abs_lam, si_em_width, si_abs_width, l_agn):
-    """Evaluate the empirical torus component on the rest-frame wavelength grid."""
+    """Evaluate the empirical torus component on the rest-frame wavelength grid.
+
+    The torus luminosity follows the GRAHSP-style empirical normalization from
+    the AGN luminosity and covering factor proxy. It is not computed from the
+    luminosity absorbed by the AGN attenuation curve.
+    """
     log_wave_um = jnp.log10(wave / 10000.0)
     log_cool = jnp.log10(cool_lam)
     log_hot = jnp.log10(hot_lam)
@@ -458,13 +463,32 @@ def _attenuation_curve(wave_rest, opt_index, nir_index, norm, lam_break):
 
 
 def _apply_biattenuation(wave_rest, gal_spec, agn_spec, ebv_gal, ebv_agn, opt_index, nir_index, norm, lam_break):
-    """Apply differential attenuation to host and AGN components."""
+    """Apply differential attenuation to host and AGN components.
+
+    The returned ``dust_luminosity`` is the host-galaxy luminosity absorbed by
+    the galaxy attenuation curve. AGN light is attenuated separately, but its
+    absorbed luminosity is not added to the host dust energy-balance budget.
+    """
     curve = _attenuation_curve(wave_rest, opt_index, nir_index, norm, lam_break)
     gal_att = gal_spec * 10 ** (ebv_gal * curve / -2.5)
     agn_att = agn_spec * 10 ** ((ebv_gal + ebv_agn) * curve / -2.5)
     host_absorbed = jnp.clip(gal_spec - gal_att, 0.0, None)
     dust_luminosity = jnp.clip(jnp.trapezoid(host_absorbed, wave_rest), 0.0, None)
     return gal_att, agn_att, host_absorbed, dust_luminosity
+
+
+def _attenuation_transmitted_fraction(direct_attenuated, direct_intrinsic):
+    """Return the attenuation-only transmitted fraction for direct components.
+
+    This excludes re-emitted host dust and empirical torus emission so the
+    attenuation model uncertainty is controlled only by components that pass
+    through the attenuation curve.
+    """
+    return jnp.clip(
+        direct_attenuated / jnp.maximum(direct_intrinsic, 1.0e-30),
+        1.0e-4,
+        1.0,
+    )
 
 
 def _redshift_to_obs(rest_wave, rest_lum, obs_wave, redshift, luminosity_distance_m):
@@ -1623,7 +1647,10 @@ def evaluate_photometric_state(
     )
     agn_rest = agn_attenuated_rest + torus_att_rest
     total_rest = gal_att_rest + dust_rest + agn_rest
-    transmitted_fraction = jnp.clip(total_rest / jnp.maximum(host_with_nebular_rest + disk_rest + torus_rest + feii_rest + line_rest + balmer_rest, 1e-30), 1e-4, 1.0)
+    transmitted_fraction = _attenuation_transmitted_fraction(
+        gal_att_rest + agn_attenuated_rest,
+        host_with_nebular_rest + agn_attenuated_input_rest,
+    )
     fast_projection_enabled = _can_use_fixed_filter_projection(context, cfg) and not include_components
     redshift_projection_enabled = (
         _can_use_redshift_filter_projection(context, cfg)

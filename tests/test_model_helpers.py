@@ -34,6 +34,7 @@ from grahspj.model import (
     GRAHSP_SI_EM_LAM_A,
     GRAHSP_SI_EM_WIDTH_A,
     GRAHSP_TORUS_NORM_A,
+    _attenuation_transmitted_fraction,
     _attenuation_curve,
     _apply_biattenuation,
     _balmer_continuum_jax,
@@ -194,6 +195,24 @@ def test_biattenuation_routes_host_and_agn_extinction_and_dust_budget():
     assert np.allclose(np.asarray(agn_att), expected_agn)
     assert np.allclose(np.asarray(host_absorbed), host - expected_host)
     assert float(dust_luminosity) == pytest.approx(np.trapezoid(host - expected_host, x=wave))
+
+
+def test_attenuation_transmitted_fraction_uses_only_direct_light():
+    direct_intrinsic = np.asarray([10.0, 10.0, 0.0])
+    direct_attenuated = np.asarray([2.0, 8.0, 0.0])
+    reemitted_dust_or_torus = np.asarray([100.0, 100.0, 100.0])
+
+    frac = np.asarray(_attenuation_transmitted_fraction(direct_attenuated, direct_intrinsic))
+    total_emergent_fraction = np.clip(
+        (direct_attenuated + reemitted_dust_or_torus)
+        / np.maximum(direct_intrinsic + reemitted_dust_or_torus, 1.0e-30),
+        1.0e-4,
+        1.0,
+    )
+
+    np.testing.assert_allclose(frac[:2], [0.2, 0.8])
+    assert frac[2] == pytest.approx(1.0e-4)
+    assert np.all(total_emergent_fraction[:2] > frac[:2])
 
 
 def test_dale2014_host_dust_matches_cigale_v2025_1_reference():
