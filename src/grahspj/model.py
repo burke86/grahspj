@@ -26,7 +26,7 @@ from dsps.sed.ssp_weights import calc_ssp_weights_sfh_table_lognormal_mdf
 import numpyro
 import numpyro.distributions as dist
 
-from .preload import ModelContext
+from .preload import ModelContext, _build_fixed_igm_jax as _igm_transmission
 
 C_KMS = 299792.458
 C_MS = 2.99792458e8
@@ -440,57 +440,6 @@ def _balmer_continuum_jax(wave, balmer_norm, balmer_te, balmer_tau, balmer_vel):
     bc = balmer_norm * (1.0 - jnp.exp(-tau)) * bb / jnp.maximum(bb0, 1e-30)
     bc = jnp.where(wave <= lam_be, bc, 0.0)
     return _shift_and_broaden_single_spectrum_lnlam(jnp.log(wave), bc, 0.0, balmer_vel)
-
-
-def _igm_transmission(igm_cache, redshift):
-    """Approximate IGM transmission following the GRAHSP-style implementation."""
-    n_transitions_low = 10
-    gamma = 0.2788
-    n0 = 0.25
-    rest_wavelength = igm_cache.wavelength
-    fact = igm_cache.fact
-    fact_eval = igm_cache.fact_eval
-    n_eval = igm_cache.n_eval
-    one_plus_z = 1.0 + redshift
-    obs_wavelength = rest_wavelength * one_plus_z
-    z_n2 = one_plus_z * (igm_cache.z_n2 + 1.0) - 1.0
-    z_eval = one_plus_z * (igm_cache.z_eval + 1.0) - 1.0
-    z_n9 = one_plus_z * (igm_cache.z_n9 + 1.0) - 1.0
-    z_l = one_plus_z * (igm_cache.z_l + 1.0) - 1.0
-    wl_ratio = one_plus_z * igm_cache.wl_ratio
-    tau_a = jnp.where(redshift <= 4, 0.00211 * (1.0 + redshift) ** 3.7, 0.00058 * (1.0 + redshift) ** 4.5)
-    tau2 = jnp.where(redshift <= 4, 0.00211 * (1.0 + z_n2) ** 3.7, 0.00058 * (1.0 + z_n2) ** 4.5)
-    tau2 = jnp.where(z_n2 >= redshift, 0.0, tau2)
-    val_le5 = jnp.where(
-        z_eval < 3.0,
-        tau_a * fact_eval[:, None] * (0.25 * (1.0 + z_eval)) ** (1.0 / 3.0),
-        tau_a * fact_eval[:, None] * (0.25 * (1.0 + z_eval)) ** (1.0 / 6.0),
-    )
-    val_6_9 = tau_a * fact_eval[:, None] * (0.25 * (1.0 + z_eval)) ** (1.0 / 3.0)
-    tau9 = tau_a * fact[9] * (0.25 * (1.0 + z_n9)) ** (1.0 / 3.0)
-    val_gt9 = tau9[None, :] * igm_cache.val_gt9_coeff[:, None]
-    val_eval = jnp.where(
-        n_eval[:, None] <= 5.0,
-        val_le5,
-        jnp.where(n_eval[:, None] <= 9.0, val_6_9, val_gt9),
-    )
-    tau_taun = tau2 + jnp.sum(jnp.where(z_eval >= redshift, 0.0, val_eval), axis=0)
-    w = z_l < redshift
-    tau_l_igm = jnp.where(w, 0.805 * (1.0 + z_l) ** 3 * (1.0 / (1.0 + z_l) - 1.0 / (1.0 + redshift)), 0.0)
-    term1 = gamma - jnp.exp(-1.0)
-    term2 = igm_cache.term2
-    term3 = (1.0 + redshift) * wl_ratio ** 1.5 - wl_ratio ** 2.5
-    ni = jnp.arange(1, n_transitions_low, dtype=jnp.float64)
-    coeff = igm_cache.coeff
-    term4_terms = coeff[:, None] * (
-        (1.0 + redshift) ** (2.5 - (3.0 * ni[:, None])) * wl_ratio[None, :] ** (3.0 * ni[:, None])
-        - wl_ratio[None, :] ** 2.5
-    )
-    term4 = jnp.sum(term4_terms, axis=0)
-    tau_l_lls = jnp.where(w, n0 * ((term1 - term2) * term3 - term4), 0.0)
-    lambda_min_igm = (1.0 + redshift) * 70.0
-    weight = jnp.where(obs_wavelength < lambda_min_igm, (obs_wavelength / lambda_min_igm) ** 2, 1.0)
-    return jnp.exp(-tau_taun - tau_l_igm - tau_l_lls) * weight
 
 
 def _attenuation_curve(wave_rest, opt_index, nir_index, norm, lam_break):
