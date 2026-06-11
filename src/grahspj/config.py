@@ -236,13 +236,18 @@ class SpectroscopyConfig:
 
 @dataclass
 class InferenceConfig:
-    """Inference defaults for MAP optimization and NUTS sampling."""
+    """Inference defaults for MAP, NUTS, and nested sampling."""
     learning_rate: float = 5e-3
     map_steps: int = 1500
     num_warmup: int = 200
     num_samples: int = 200
     num_chains: int = 1
     target_accept_prob: float = 0.85
+    dense_mass: bool = True
+    max_tree_depth: int = 10
+    ns_num_live_points: int | None = None
+    ns_max_samples: int | None = None
+    ns_dlogz: float | None = None
     seed: int = 0
 
 

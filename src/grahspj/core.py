@@ -212,6 +212,7 @@ class GRAHSPJ:
         ns_live_points: int | None = None,
         ns_max_samples: int | None = None,
         ns_dlogz: float | None = None,
+<<<<<<< Updated upstream
         ns_resamples: int | None = None,
         ns_difficult_model: bool = False,
         ns_parameter_estimation: bool = False,
@@ -219,6 +220,10 @@ class GRAHSPJ:
         ns_init_efficiency_threshold: float | None = None,
         ns_max_likelihood_evals: int | None = None,
         ns_efficiency_threshold: float | None = None,
+=======
+        nuts_dense_mass: bool | None = None,
+        nuts_max_tree_depth: int | None = None,
+>>>>>>> Stashed changes
         plot_fig: bool = False,
         save_fig: bool = False,
         save_result: bool = False,
@@ -264,6 +269,14 @@ class GRAHSPJ:
             ns_efficiency_threshold = kwargs.pop("ns_efficiency_threshold")
         if "target_accept_prob" in kwargs and target_accept_prob is None:
             target_accept_prob = kwargs.pop("target_accept_prob")
+        if "dense_mass" in kwargs and nuts_dense_mass is None:
+            nuts_dense_mass = kwargs.pop("dense_mass")
+        if "nuts_dense_mass" in kwargs and nuts_dense_mass is None:
+            nuts_dense_mass = kwargs.pop("nuts_dense_mass")
+        if "max_tree_depth" in kwargs and nuts_max_tree_depth is None:
+            nuts_max_tree_depth = kwargs.pop("max_tree_depth")
+        if "nuts_max_tree_depth" in kwargs and nuts_max_tree_depth is None:
+            nuts_max_tree_depth = kwargs.pop("nuts_max_tree_depth")
         use_map_init_explicit = "use_map_init" in kwargs
         if use_map_init_explicit:
             use_map_init = kwargs.pop("use_map_init")
@@ -299,6 +312,10 @@ class GRAHSPJ:
                 nuts_kwargs["num_chains"] = nuts_chains
             if target_accept_prob is not None:
                 nuts_kwargs["target_accept_prob"] = target_accept_prob
+            if nuts_dense_mass is not None:
+                nuts_kwargs["dense_mass"] = nuts_dense_mass
+            if nuts_max_tree_depth is not None:
+                nuts_kwargs["max_tree_depth"] = nuts_max_tree_depth
             if use_map_init_explicit or use_map_init is not True:
                 nuts_kwargs["use_map_init"] = use_map_init
             fit_output = self.fit_nuts(
@@ -328,6 +345,10 @@ class GRAHSPJ:
                 nuts_kwargs["num_chains"] = nuts_chains
             if target_accept_prob is not None:
                 nuts_kwargs["target_accept_prob"] = target_accept_prob
+            if nuts_dense_mass is not None:
+                nuts_kwargs["dense_mass"] = nuts_dense_mass
+            if nuts_max_tree_depth is not None:
+                nuts_kwargs["max_tree_depth"] = nuts_max_tree_depth
             if use_map_init_explicit or use_map_init is not True:
                 nuts_kwargs["use_map_init"] = use_map_init
             nuts_result = self.fit_nuts(
@@ -482,6 +503,8 @@ class GRAHSPJ:
         num_samples: int | None = None,
         num_chains: int | None = None,
         target_accept_prob: float | None = None,
+        dense_mass: bool | None = None,
+        max_tree_depth: int | None = None,
         use_map_init: bool = True,
         progress_bar: bool = True,
     ):
@@ -492,10 +515,18 @@ class GRAHSPJ:
         num_samples = int(self.config.inference.num_samples if num_samples is None else num_samples)
         num_chains = int(self.config.inference.num_chains if num_chains is None else num_chains)
         target_accept_prob = float(self.config.inference.target_accept_prob if target_accept_prob is None else target_accept_prob)
+        dense_mass = bool(self.config.inference.dense_mass if dense_mass is None else dense_mass)
+        max_tree_depth = int(self.config.inference.max_tree_depth if max_tree_depth is None else max_tree_depth)
         init_values = None
         if self.map_result is not None:
             init_values = {k: np.asarray(v) for k, v in self.map_result["median"].items() if np.ndim(v) != 0 or np.isfinite(v)}
-        kernel = NUTS(self._model, init_strategy=init_to_value(values=init_values) if init_values else None, target_accept_prob=target_accept_prob, dense_mass=False, max_tree_depth=8)
+        kernel = NUTS(
+            self._model,
+            init_strategy=init_to_value(values=init_values) if init_values else None,
+            target_accept_prob=target_accept_prob,
+            dense_mass=dense_mass,
+            max_tree_depth=max_tree_depth,
+        )
         mcmc = MCMC(kernel, num_warmup=num_warmup, num_samples=num_samples, num_chains=num_chains, progress_bar=progress_bar, jit_model_args=False)
         rng_key = jax.random.PRNGKey(self.config.inference.seed + 1)
         mcmc.run(rng_key)
@@ -545,6 +576,12 @@ class GRAHSPJ:
             num_resamples = ns_resamples
 
         constructor_kwargs: dict[str, Any] = {"verbose": bool(progress_bar)}
+        if num_live_points is None:
+            num_live_points = self.config.inference.ns_num_live_points
+        if max_samples is None:
+            max_samples = self.config.inference.ns_max_samples
+        if dlogz is None:
+            dlogz = self.config.inference.ns_dlogz
         if num_live_points is not None:
             constructor_kwargs["num_live_points"] = int(num_live_points)
         constructor_kwargs["max_samples"] = None if max_samples is None else int(max_samples)
