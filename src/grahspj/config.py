@@ -79,6 +79,7 @@ class FilterCurve:
 class FilterSet:
     """Filter configuration used to construct synthetic photometry."""
     curves: Sequence[FilterCurve] = field(default_factory=list)
+    speclite_names: Mapping[str, str] = field(default_factory=dict)
     use_grahsp_database: bool = True
 
 
@@ -119,8 +120,6 @@ class GalaxyConfig:
     sfh_t_min_gyr: float = 0.01
     cosmology_h0: float = 70.0
     cosmology_om0: float = 0.3
-    # Host-galaxy dust energy balance only. AGN torus emission is modeled by the
-    # empirical AGN component, not by adding AGN-absorbed luminosity here.
     use_energy_balance: bool = True
     dust_alpha: float = 2.0
 
@@ -236,13 +235,18 @@ class SpectroscopyConfig:
 
 @dataclass
 class InferenceConfig:
-    """Inference defaults for MAP optimization and NUTS sampling."""
+    """Inference defaults for MAP, NUTS, and nested sampling."""
     learning_rate: float = 5e-3
     map_steps: int = 1500
     num_warmup: int = 200
     num_samples: int = 200
     num_chains: int = 1
     target_accept_prob: float = 0.85
+    dense_mass: bool = True
+    max_tree_depth: int = 10
+    ns_num_live_points: int | None = None
+    ns_max_samples: int | None = None
+    ns_dlogz: float | None = None
     seed: int = 0
 
 
@@ -376,6 +380,7 @@ def fit_config_from_mapping(data: Mapping[str, Any]) -> FitConfig:
         curves_raw = filters_raw.get("curves", [])
         filters_obj = FilterSet(
             curves=[_coerce_dataclass(FilterCurve, curve) if isinstance(curve, Mapping) else curve for curve in curves_raw],
+            speclite_names=dict(filters_raw.get("speclite_names", {})),
             use_grahsp_database=bool(filters_raw.get("use_grahsp_database", True)),
         )
     else:

@@ -88,10 +88,6 @@ class GRAHSPJ:
             return_sites=[
                 "pred_fluxes",
                 "pred_spectrum_fluxes",
-                "spec_continuum_model_fluxes",
-                "spec_host_model_fluxes",
-                "spec_disk_model_fluxes",
-                "spec_torus_model_fluxes",
                 "spec_wave_obs",
                 "spec_spectrum_index",
                 "spectrum_scale_fit",
@@ -105,8 +101,6 @@ class GRAHSPJ:
                 "jqf_line_amp_per_component",
                 "jqf_line_mu_per_component",
                 "jqf_line_sig_per_component",
-                "jqf_line_narrow_fwhm_kms",
-                "jqf_line_narrow_amp_scale",
                 "jqf_feii_model",
                 "jqf_balmer_model",
                 "jqf_total_model",
@@ -132,7 +126,6 @@ class GRAHSPJ:
                 "rest_wave",
                 "obs_wave",
                 "redshift_fit",
-                "nebular_line_scale_fit",
                 "total_rest_sed",
                 "agn_rest_sed",
                 "host_rest_sed",
@@ -212,13 +205,8 @@ class GRAHSPJ:
         ns_live_points: int | None = None,
         ns_max_samples: int | None = None,
         ns_dlogz: float | None = None,
-        ns_resamples: int | None = None,
-        ns_difficult_model: bool = False,
-        ns_parameter_estimation: bool = False,
-        ns_num_parallel_workers: int | None = None,
-        ns_init_efficiency_threshold: float | None = None,
-        ns_max_likelihood_evals: int | None = None,
-        ns_efficiency_threshold: float | None = None,
+        nuts_dense_mass: bool | None = None,
+        nuts_max_tree_depth: int | None = None,
         plot_fig: bool = False,
         save_fig: bool = False,
         save_result: bool = False,
@@ -248,22 +236,16 @@ class GRAHSPJ:
             ns_max_samples = kwargs.pop("ns_max_samples")
         if "ns_dlogz" in kwargs and ns_dlogz is None:
             ns_dlogz = kwargs.pop("ns_dlogz")
-        if "ns_resamples" in kwargs and ns_resamples is None:
-            ns_resamples = kwargs.pop("ns_resamples")
-        if "ns_difficult_model" in kwargs:
-            ns_difficult_model = kwargs.pop("ns_difficult_model")
-        if "ns_parameter_estimation" in kwargs:
-            ns_parameter_estimation = kwargs.pop("ns_parameter_estimation")
-        if "ns_num_parallel_workers" in kwargs and ns_num_parallel_workers is None:
-            ns_num_parallel_workers = kwargs.pop("ns_num_parallel_workers")
-        if "ns_init_efficiency_threshold" in kwargs and ns_init_efficiency_threshold is None:
-            ns_init_efficiency_threshold = kwargs.pop("ns_init_efficiency_threshold")
-        if "ns_max_likelihood_evals" in kwargs and ns_max_likelihood_evals is None:
-            ns_max_likelihood_evals = kwargs.pop("ns_max_likelihood_evals")
-        if "ns_efficiency_threshold" in kwargs and ns_efficiency_threshold is None:
-            ns_efficiency_threshold = kwargs.pop("ns_efficiency_threshold")
         if "target_accept_prob" in kwargs and target_accept_prob is None:
             target_accept_prob = kwargs.pop("target_accept_prob")
+        if "dense_mass" in kwargs and nuts_dense_mass is None:
+            nuts_dense_mass = kwargs.pop("dense_mass")
+        if "nuts_dense_mass" in kwargs and nuts_dense_mass is None:
+            nuts_dense_mass = kwargs.pop("nuts_dense_mass")
+        if "max_tree_depth" in kwargs and nuts_max_tree_depth is None:
+            nuts_max_tree_depth = kwargs.pop("max_tree_depth")
+        if "nuts_max_tree_depth" in kwargs and nuts_max_tree_depth is None:
+            nuts_max_tree_depth = kwargs.pop("nuts_max_tree_depth")
         use_map_init_explicit = "use_map_init" in kwargs
         if use_map_init_explicit:
             use_map_init = kwargs.pop("use_map_init")
@@ -299,6 +281,10 @@ class GRAHSPJ:
                 nuts_kwargs["num_chains"] = nuts_chains
             if target_accept_prob is not None:
                 nuts_kwargs["target_accept_prob"] = target_accept_prob
+            if nuts_dense_mass is not None:
+                nuts_kwargs["dense_mass"] = nuts_dense_mass
+            if nuts_max_tree_depth is not None:
+                nuts_kwargs["max_tree_depth"] = nuts_max_tree_depth
             if use_map_init_explicit or use_map_init is not True:
                 nuts_kwargs["use_map_init"] = use_map_init
             fit_output = self.fit_nuts(
@@ -328,6 +314,10 @@ class GRAHSPJ:
                 nuts_kwargs["num_chains"] = nuts_chains
             if target_accept_prob is not None:
                 nuts_kwargs["target_accept_prob"] = target_accept_prob
+            if nuts_dense_mass is not None:
+                nuts_kwargs["dense_mass"] = nuts_dense_mass
+            if nuts_max_tree_depth is not None:
+                nuts_kwargs["max_tree_depth"] = nuts_max_tree_depth
             if use_map_init_explicit or use_map_init is not True:
                 nuts_kwargs["use_map_init"] = use_map_init
             nuts_result = self.fit_nuts(
@@ -345,20 +335,6 @@ class GRAHSPJ:
                 ns_kwargs["max_samples"] = ns_max_samples
             if ns_dlogz is not None:
                 ns_kwargs["dlogz"] = ns_dlogz
-            if ns_resamples is not None:
-                ns_kwargs["num_resamples"] = ns_resamples
-            if ns_difficult_model:
-                ns_kwargs["difficult_model"] = bool(ns_difficult_model)
-            if ns_parameter_estimation:
-                ns_kwargs["parameter_estimation"] = bool(ns_parameter_estimation)
-            if ns_num_parallel_workers is not None:
-                ns_kwargs["num_parallel_workers"] = ns_num_parallel_workers
-            if ns_init_efficiency_threshold is not None:
-                ns_kwargs["init_efficiency_threshold"] = ns_init_efficiency_threshold
-            if ns_max_likelihood_evals is not None:
-                ns_kwargs["max_likelihood_evals"] = ns_max_likelihood_evals
-            if ns_efficiency_threshold is not None:
-                ns_kwargs["efficiency_threshold"] = ns_efficiency_threshold
             fit_output = self.fit_ns(**ns_kwargs)
         else:
             raise ValueError("fit_method must be one of: 'optax+nuts', 'optax', 'nuts', 'ns'")
@@ -482,6 +458,8 @@ class GRAHSPJ:
         num_samples: int | None = None,
         num_chains: int | None = None,
         target_accept_prob: float | None = None,
+        dense_mass: bool | None = None,
+        max_tree_depth: int | None = None,
         use_map_init: bool = True,
         progress_bar: bool = True,
     ):
@@ -492,10 +470,18 @@ class GRAHSPJ:
         num_samples = int(self.config.inference.num_samples if num_samples is None else num_samples)
         num_chains = int(self.config.inference.num_chains if num_chains is None else num_chains)
         target_accept_prob = float(self.config.inference.target_accept_prob if target_accept_prob is None else target_accept_prob)
+        dense_mass = bool(self.config.inference.dense_mass if dense_mass is None else dense_mass)
+        max_tree_depth = int(self.config.inference.max_tree_depth if max_tree_depth is None else max_tree_depth)
         init_values = None
         if self.map_result is not None:
             init_values = {k: np.asarray(v) for k, v in self.map_result["median"].items() if np.ndim(v) != 0 or np.isfinite(v)}
-        kernel = NUTS(self._model, init_strategy=init_to_value(values=init_values) if init_values else None, target_accept_prob=target_accept_prob, dense_mass=False, max_tree_depth=8)
+        kernel = NUTS(
+            self._model,
+            init_strategy=init_to_value(values=init_values) if init_values else None,
+            target_accept_prob=target_accept_prob,
+            dense_mass=dense_mass,
+            max_tree_depth=max_tree_depth,
+        )
         mcmc = MCMC(kernel, num_warmup=num_warmup, num_samples=num_samples, num_chains=num_chains, progress_bar=progress_bar, jit_model_args=False)
         rng_key = jax.random.PRNGKey(self.config.inference.seed + 1)
         mcmc.run(rng_key)
@@ -510,59 +496,25 @@ class GRAHSPJ:
         num_live_points: int | None = None,
         max_samples: int | None = None,
         dlogz: float | None = None,
-        num_resamples: int | None = None,
-        difficult_model: bool | None = None,
-        parameter_estimation: bool | None = None,
-        num_parallel_workers: int | None = None,
-        init_efficiency_threshold: float | None = None,
-        max_likelihood_evals: int | None = None,
-        efficiency_threshold: float | None = None,
-        ns_difficult_model: bool | None = None,
-        ns_parameter_estimation: bool | None = None,
-        ns_num_parallel_workers: int | None = None,
-        ns_init_efficiency_threshold: float | None = None,
-        ns_max_likelihood_evals: int | None = None,
-        ns_efficiency_threshold: float | None = None,
-        ns_resamples: int | None = None,
         progress_bar: bool = True,
     ):
         """Run full-model nested sampling and resample equal-weight posterior draws."""
         NestedSampler = _get_nested_sampler_cls()
 
-        if ns_difficult_model is not None:
-            difficult_model = ns_difficult_model
-        if ns_parameter_estimation is not None:
-            parameter_estimation = ns_parameter_estimation
-        if ns_num_parallel_workers is not None and num_parallel_workers is None:
-            num_parallel_workers = ns_num_parallel_workers
-        if ns_init_efficiency_threshold is not None and init_efficiency_threshold is None:
-            init_efficiency_threshold = ns_init_efficiency_threshold
-        if ns_max_likelihood_evals is not None and max_likelihood_evals is None:
-            max_likelihood_evals = ns_max_likelihood_evals
-        if ns_efficiency_threshold is not None and efficiency_threshold is None:
-            efficiency_threshold = ns_efficiency_threshold
-        if ns_resamples is not None and num_resamples is None:
-            num_resamples = ns_resamples
-
         constructor_kwargs: dict[str, Any] = {"verbose": bool(progress_bar)}
+        if num_live_points is None:
+            num_live_points = self.config.inference.ns_num_live_points
+        if max_samples is None:
+            max_samples = self.config.inference.ns_max_samples
+        if dlogz is None:
+            dlogz = self.config.inference.ns_dlogz
         if num_live_points is not None:
             constructor_kwargs["num_live_points"] = int(num_live_points)
-        constructor_kwargs["max_samples"] = None if max_samples is None else int(max_samples)
-        if difficult_model:
-            constructor_kwargs["difficult_model"] = bool(difficult_model)
-        if parameter_estimation:
-            constructor_kwargs["parameter_estimation"] = bool(parameter_estimation)
-        if num_parallel_workers is not None:
-            constructor_kwargs["num_parallel_workers"] = int(num_parallel_workers)
-        if init_efficiency_threshold is not None:
-            constructor_kwargs["init_efficiency_threshold"] = float(init_efficiency_threshold)
+        if max_samples is not None:
+            constructor_kwargs["max_samples"] = int(max_samples)
         termination_kwargs: dict[str, Any] = {}
         if dlogz is not None:
             termination_kwargs["dlogZ"] = float(dlogz)
-        if max_likelihood_evals is not None:
-            termination_kwargs["max_num_likelihood_evaluations"] = int(max_likelihood_evals)
-        if efficiency_threshold is not None:
-            termination_kwargs["efficiency_threshold"] = float(efficiency_threshold)
 
         sampler = NestedSampler(
             self._model,
@@ -572,10 +524,9 @@ class GRAHSPJ:
         rng_key = jax.random.PRNGKey(self.config.inference.seed + 2)
         sampler.run(rng_key)
         posterior_rng_key = jax.random.PRNGKey(self.config.inference.seed + 3)
-        posterior_num_samples = int(self.config.inference.num_samples if num_resamples is None else num_resamples)
         samples = sampler.get_samples(
             posterior_rng_key,
-            num_samples=posterior_num_samples,
+            num_samples=int(self.config.inference.num_samples),
             group_by_chain=False,
         )
         self.ns_result = {
@@ -583,7 +534,6 @@ class GRAHSPJ:
             "results": getattr(sampler, "_results", None),
             "constructor_kwargs": dict(getattr(sampler, "constructor_kwargs", constructor_kwargs)),
             "termination_kwargs": dict(getattr(sampler, "termination_kwargs", termination_kwargs)),
-            "num_resamples": posterior_num_samples,
         }
         self.samples = {k: np.asarray(v) for k, v in samples.items()}
         self.predictive = None
@@ -675,48 +625,6 @@ class GRAHSPJ:
             posterior=posterior,
             show=show,
             annotate_band_names=annotate_band_names,
-        )
-
-    def plot_corner(
-        self,
-        output_path: str | Path | None = None,
-        params: list[str] | tuple[str, ...] | None = None,
-        max_params: int | None = 12,
-        labels: dict[str, str] | list[str] | tuple[str, ...] | None = None,
-        truths: dict[str, float | None] | list[float | None] | tuple[float | None, ...] | None = None,
-        show: bool = False,
-        **corner_kwargs,
-    ):
-        """Plot scalar posterior samples with the corner package."""
-        from .plotting import plot_corner
-
-        return plot_corner(
-            self,
-            output_path=output_path,
-            params=params,
-            max_params=max_params,
-            labels=labels,
-            truths=truths,
-            show=show,
-            **corner_kwargs,
-        )
-
-    def plot_trace(
-        self,
-        output_path: str | Path | None = None,
-        params: list[str] | tuple[str, ...] | None = None,
-        max_params: int | None = 12,
-        show: bool = False,
-    ):
-        """Plot scalar posterior sample traces, preserving chains when available."""
-        from .plotting import plot_trace
-
-        return plot_trace(
-            self,
-            output_path=output_path,
-            params=params,
-            max_params=max_params,
-            show=show,
         )
 
     @staticmethod
@@ -824,30 +732,19 @@ class GRAHSPJ:
         plotter.flux_prereduced = flux_rest
         plotter.err_prereduced = err_rest
         plotter.model_total = component("pred_spectrum_fluxes", apply_scale=False)
-        spec_host_component = component("spec_host_model_fluxes")
-        plotter.host = (
-            spec_host_component
-            if keep_component(spec_host_component)
-            else obs_sed_component("host_obs_sed", multiplier=host_capture)
-        )
-        spec_disk_component = component("spec_disk_model_fluxes")
-        disk_component = spec_disk_component if keep_component(spec_disk_component) else obs_sed_component("disk_obs_sed")
+        plotter.host = obs_sed_component("host_obs_sed", multiplier=host_capture)
+        disk_component = obs_sed_component("disk_obs_sed")
         plotter.f_pl_model = disk_component if keep_component(disk_component) else component("jqf_continuum_model")
         plotter.f_pl_model_intrinsic = plotter.f_pl_model
         plotter.f_fe_mgii_model = component("jqf_feii_model")
         plotter.f_fe_balmer_model = np.zeros_like(wave_rest)
         plotter.f_bc_model = component("jqf_balmer_model")
         plotter.f_line_model = component("jqf_line_model")
-        spec_torus_component = component("spec_torus_model_fluxes")
         custom_components = {
-            "grahspj_torus": spec_torus_component if keep_component(spec_torus_component) else obs_sed_component("torus_obs_sed"),
+            "grahspj_torus": obs_sed_component("torus_obs_sed"),
             "grahspj_host_dust": obs_sed_component("dust_obs_sed"),
             "grahspj_sed_balmer": obs_sed_component("balmer_obs_sed"),
-            "grahspj_sed_lines": (
-                obs_sed_component("line_obs_sed")
-                + obs_sed_component("feii_obs_sed")
-                + obs_sed_component("nebular_lines_obs_sed")
-            ),
+            "grahspj_sed_lines": obs_sed_component("line_obs_sed") + obs_sed_component("feii_obs_sed"),
         }
         plotter.custom_components = {
             name: model for name, model in custom_components.items() if keep_component(model)
