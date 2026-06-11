@@ -221,6 +221,18 @@ def _ssp_lgmet_solar_offset(ssp_lgmet):
     return jnp.where(jnp.nanmax(ssp_lgmet) < -1.0, jnp.log10(DSPS_SOLAR_METALLICITY), 0.0)
 
 
+def _gal_lgmet_to_absolute_z(gal_lgmet, ssp_lgmet):
+    """Convert galaxy metallicity from the SSP-grid convention to absolute Z."""
+    gal_lgmet = jnp.asarray(gal_lgmet, dtype=jnp.float64)
+    ssp_lgmet = jnp.asarray(ssp_lgmet, dtype=jnp.float64)
+    absolute_logz = jnp.where(
+        jnp.nanmax(ssp_lgmet) < -1.0,
+        gal_lgmet,
+        gal_lgmet + jnp.log10(DSPS_SOLAR_METALLICITY),
+    )
+    return jnp.power(10.0, absolute_logz)
+
+
 def _default_gal_lgmet_loc(ssp_lgmet):
     """Default galaxy metallicity center in the SSP grid's metallicity convention."""
     ssp_lgmet = jnp.asarray(ssp_lgmet, dtype=jnp.float64)
@@ -831,9 +843,6 @@ def _build_diffstar_host(context: ModelContext, prior_config: dict[str, Any], *,
     scaled_smh = base_history.smh * sfh_scale
     state.update(
         {
-            "host_age_weights": host_weights_info.age_weights,
-            "host_lgmet_weights": host_weights_info.lgmet_weights,
-            "host_ssp_weights": host_weights,
             "gal_sfr_table": scaled_sfh,
             "gal_smh_table": scaled_smh,
         }
@@ -1018,7 +1027,7 @@ def _build_nebular_components(context: ModelContext, host_state: dict[str, Any],
 
     logu = _sample_optional_normal(prior_config, "nebular_logU", float(cfg.logU), 0.3)
     default_zgas = float(cfg.zgas) if cfg.zgas is not None else None
-    host_zgas = jnp.power(10.0, host_state["gal_lgmet"])
+    host_zgas = _gal_lgmet_to_absolute_z(host_state["gal_lgmet"], host_state["ssp_lgmet"])
     zgas_default = host_zgas if default_zgas is None else jnp.asarray(default_zgas, dtype=jnp.float64)
     zgas = _sample_optional_normal(prior_config, "nebular_zgas", float(default_zgas) if default_zgas is not None else 0.02, 0.01)
     zgas = jnp.where(default_zgas is None and "nebular_zgas" not in prior_config, zgas_default, jnp.clip(zgas, 1.0e-6, 1.0))

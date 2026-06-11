@@ -41,6 +41,7 @@ from grahspj.model import (
     _chi2_upper_limit,
     _feii_component,
     _flux_conserving_line_gaussians,
+    _gal_lgmet_to_absolute_z,
     _host_dust_emission,
     _igm_transmission,
     _line_gaussians,
@@ -195,6 +196,15 @@ def test_biattenuation_routes_host_and_agn_extinction_and_dust_budget():
     assert np.allclose(np.asarray(agn_att), expected_agn)
     assert np.allclose(np.asarray(host_absorbed), host - expected_host)
     assert float(dust_luminosity) == pytest.approx(np.trapezoid(host - expected_host, x=wave))
+
+
+def test_gal_lgmet_to_absolute_z_respects_ssp_metallicity_convention():
+    absolute_grid = np.asarray([-4.34771165, -3.34771165, -2.34771165, -1.34771165])
+    relative_grid = np.asarray([-2.0, -1.0, -0.3, 0.0])
+
+    assert float(_gal_lgmet_to_absolute_z(np.log10(0.019), absolute_grid)) == pytest.approx(0.019)
+    assert float(_gal_lgmet_to_absolute_z(0.0, relative_grid)) == pytest.approx(0.019)
+    assert float(_gal_lgmet_to_absolute_z(-0.3, relative_grid)) == pytest.approx(0.019 * 10.0**-0.3)
 
 
 def test_attenuation_transmitted_fraction_uses_only_direct_light():
