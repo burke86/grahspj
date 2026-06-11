@@ -494,7 +494,7 @@ def _project_filters(obs_flux, packed_filters):
     values = left * (1.0 - interp_weight) + right * interp_weight
     values = jnp.where(valid_mask, values, 0.0)
     weighted_trans = jnp.where(valid_mask, transmission, 0.0)
-    weighted_wave = jnp.where(valid_mask, work_wave, 0.0)
+    weighted_wave = work_wave
     numer = jnp.trapezoid(values * weighted_trans, weighted_wave, axis=1)
     denom = jnp.maximum(jnp.trapezoid(weighted_trans, weighted_wave, axis=1), 1e-30)
     f_lambda = numer / denom

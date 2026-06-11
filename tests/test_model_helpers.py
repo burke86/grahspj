@@ -52,10 +52,13 @@ from grahspj.model import (
 from grahspj.preload import _build_fixed_igm_jax, _build_igm_cache_jax, build_model_context
 from grahspj.preload import (
     ModelContext,
+    PackedFilters,
     PackedFiltersJax,
     SSPData,
     _DALE2014_CACHE,
     _HOST_BASIS_CACHE,
+    _build_filter_projection_matrices_for_redshift,
+    _build_fixed_filter_projection_matrices,
     _build_host_basis,
     _lnu_lsun_per_hz_to_llambda_w_per_a_np,
     _load_vendored_filter_curve,
@@ -437,6 +440,58 @@ def test_filter_projection_flat_flambda_to_mjy_units():
     expected = 1.0e-10 / 299792458.0 * 1.0e29 * 5000.0**2 * 2.0e-20
 
     assert projected[0] == pytest.approx(expected)
+
+
+def test_filter_projection_padded_rows_do_not_add_spurious_trapezoid_segment():
+    work_wave = np.asarray([[4000.0, 5000.0, 6000.0, 6000.0]], dtype=float)
+    transmission = np.asarray([[1.0, 1.0, 0.1, 0.0]], dtype=float)
+    valid_mask = np.asarray([[True, True, True, False]], dtype=bool)
+    interp_indices = np.asarray([[0, 1, 2, 2]], dtype=np.int32)
+    interp_weight = np.zeros_like(work_wave)
+    effective_wavelength = np.asarray([5000.0], dtype=float)
+    obs_flux = 1.0e-20 * (np.asarray([4000.0, 5000.0, 6000.0, 7000.0]) / 5000.0) ** 2
+    packed_jax = PackedFiltersJax(
+        interp_indices=interp_indices,
+        interp_weight=interp_weight,
+        transmission=transmission,
+        work_wave=work_wave,
+        effective_wavelength=effective_wavelength,
+        valid_mask=valid_mask,
+    )
+    packed_np = PackedFilters(
+        interp_indices=interp_indices,
+        interp_weight=interp_weight,
+        transmission=transmission,
+        work_wave=work_wave,
+        effective_wavelength=effective_wavelength,
+        valid_mask=valid_mask,
+    )
+
+    real_wave = work_wave[0, valid_mask[0]]
+    real_trans = transmission[0, valid_mask[0]]
+    real_flux = obs_flux[: real_wave.size]
+    f_lambda = np.trapezoid(real_flux * real_trans, real_wave) / np.trapezoid(real_trans, real_wave)
+    expected = 1.0e-10 / 299792458.0 * 1.0e29 * effective_wavelength[0] ** 2 * f_lambda
+
+    projected = np.asarray(_project_filters(obs_flux, packed_jax))
+    _, fixed_scalar_matrix = _build_fixed_filter_projection_matrices(
+        rest_wave=np.asarray([4000.0, 5000.0, 6000.0, 7000.0]),
+        packed_filters=packed_np,
+        fixed_igm=np.ones(4),
+        luminosity_distance_m=1.0,
+        redshift=0.0,
+    )
+    _, dynamic_scalar_matrix = _build_filter_projection_matrices_for_redshift(
+        rest_wave=np.asarray([4000.0, 5000.0, 6000.0, 7000.0]),
+        packed_filters=packed_np,
+        igm=np.ones(4),
+        luminosity_distance_m=1.0,
+        redshift=0.0,
+    )
+
+    assert projected[0] == pytest.approx(expected)
+    assert (fixed_scalar_matrix @ obs_flux)[0] == pytest.approx(expected)
+    assert (dynamic_scalar_matrix @ obs_flux)[0] == pytest.approx(expected)
 
 
 def test_ukidss_dr11plus_vendored_filters_load_in_angstroms():

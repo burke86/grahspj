@@ -869,7 +869,7 @@ def _build_fixed_filter_projection_matrices(
 
     for i in range(n_filters):
         weighted_trans = np.where(packed_filters.valid_mask[i], packed_filters.transmission[i], 0.0)
-        weighted_wave = np.where(packed_filters.valid_mask[i], packed_filters.work_wave[i], 0.0)
+        weighted_wave = packed_filters.work_wave[i]
         denom = max(float(np.trapezoid(weighted_trans, weighted_wave)), 1.0e-30)
         coeff = _trapezoid_weights(weighted_wave) * weighted_trans / denom
         coeff *= 1.0e-10 / 299792458.0 * 1.0e29 * float(packed_filters.effective_wavelength[i]) ** 2
@@ -904,8 +904,8 @@ def _build_filter_projection_matrices_for_redshift(
         valid = np.asarray(packed_filters.valid_mask[i], dtype=bool)
         filt_wave = np.asarray(packed_filters.work_wave[i], dtype=float)
         filt_trans = np.where(valid, packed_filters.transmission[i], 0.0)
-        denom = max(float(np.trapezoid(filt_trans, np.where(valid, filt_wave, 0.0))), 1.0e-30)
-        coeff = _trapezoid_weights(np.where(valid, filt_wave, 0.0)) * filt_trans / denom
+        denom = max(float(np.trapezoid(filt_trans, filt_wave)), 1.0e-30)
+        coeff = _trapezoid_weights(filt_wave) * filt_trans / denom
         coeff *= 1.0e-10 / 299792458.0 * 1.0e29 * float(packed_filters.effective_wavelength[i]) ** 2
         rest_at_filter = filt_wave / max(1.0 + float(redshift), 1.0e-8)
         pos = np.searchsorted(rest_wave, rest_at_filter, side="right") - 1
