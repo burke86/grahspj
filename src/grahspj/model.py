@@ -1124,7 +1124,7 @@ def _sample_redshift(context: ModelContext, prior_config: dict[str, Any], cfg) -
 
 def _chi2_upper_limit(obs_fluxes, model_fluxes, total_variance):
     """Return the one-sided chi-square contribution for upper limits."""
-    z = (obs_fluxes - model_fluxes) / (jnp.sqrt(2.0) * jnp.maximum(total_variance, 1e-30))
+    z = (obs_fluxes - model_fluxes) / jnp.sqrt(2.0 * jnp.maximum(total_variance, 1e-60))
     return -2.0 * jnp.log(0.5 * (1.0 + jax.scipy.special.erf(z)) + 1e-300)
 
 
