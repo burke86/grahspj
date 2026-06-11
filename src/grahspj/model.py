@@ -257,7 +257,31 @@ def _mass_metallicity_relation_logprior(
     ssp_lgmet=None,
     redshift: float = 0.0,
 ):
-    """Return an optional soft stellar mass-metallicity log-prior."""
+    """Return an optional soft stellar mass-metallicity log-prior.
+
+    The ``prior_config["mass_metallicity_relation"]`` mapping defines a broad,
+    heuristic Gaussian prior on the host metallicity sampled by the stellar
+    population model. By default the metallicity keys are solar-relative
+    ``log10(Z/Zsun)`` values and are converted into the active SSP grid
+    convention before evaluating the prior. For example, ``pivot_logzsol=-0.15``
+    means 0.15 dex below solar regardless of whether the SSP grid stores
+    absolute ``log10(Z)`` or relative ``log10(Z/Zsun)`` metallicities.
+
+    Supported keys are:
+
+    - ``enabled``: set ``False`` to disable the prior.
+    - ``pivot_mass``: stellar-mass pivot in ``log10(M*/Msun)``.
+    - ``pivot_logzsol``: solar-relative metallicity at ``pivot_mass``.
+    - ``pivot_lgmet``: absolute value in the SSP grid convention, overriding
+      ``pivot_logzsol``.
+    - ``slope``: metallicity slope per dex in stellar mass.
+    - ``scale``: Gaussian prior width in dex.
+    - ``redshift_ref`` and ``redshift_slope``: optional linear redshift trend.
+    - ``min`` and ``max``: solar-relative lower and upper bounds for the prior
+      location, clipped to the SSP grid range.
+    - ``min_lgmet`` and ``max_lgmet``: bounds in the SSP grid convention,
+      overriding ``min`` and ``max``.
+    """
     cfg = prior_config.get("mass_metallicity_relation", None)
     if cfg is None:
         cfg = {}
