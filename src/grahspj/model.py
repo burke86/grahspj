@@ -1189,7 +1189,7 @@ def photometric_loglike(pred_fluxes, obs_fluxes, obs_errors, upper_limits, data_
         att_unc = 10 ** log_unc_frac / tf
         sys_variance = sys_variance + (att_unc * pred_fluxes) ** 2
     if lyman_break_uncertainty:
-        ly_unc = jnp.where(filter_wavelength / (1.0 + redshift) < 150.0, 1.0e8, 0.0)
+        ly_unc = jnp.where(filter_wavelength / (1.0 + redshift) < 1500.0, 1.0e8, 0.0)
         sys_variance = sys_variance + (ly_unc * pred_fluxes) ** 2
     total_variance = jnp.nan_to_num(obs_variance + sys_variance + var_variance, nan=1.0e30, posinf=1.0e30, neginf=1.0e30)
     scale = jnp.sqrt(jnp.clip(total_variance, 1e-30, 1.0e60))
