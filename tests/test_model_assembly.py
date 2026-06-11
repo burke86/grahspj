@@ -289,6 +289,17 @@ def test_host_off_mode_has_zero_host_components_and_no_total_leak(monkeypatch):
     assert np.allclose(_site(tr, "pred_fluxes"), _site(tr, "agn_fluxes"))
 
 
+def test_agn_slope_ordering_uses_positive_delta_without_hard_factor(monkeypatch):
+    _patch_ssp(monkeypatch)
+    context = build_model_context(_cfg(fit_host=False))
+    tr = _deterministic_trace(context, {"log_agn_amp": np.array(np.log(1.0e34)), "fcov": np.array(0.2), "si": np.array(0.0)})
+
+    assert "uv_slope_gt_pl_slope" not in tr
+    assert "uv_slope_delta" in tr
+    assert _site(tr, "uv_slope_delta") > 0.0
+    assert _site(tr, "uv_slope") > _site(tr, "pl_slope")
+
+
 def test_host_kinematics_default_off_skips_broadening_call(monkeypatch):
     _patch_ssp(monkeypatch)
 

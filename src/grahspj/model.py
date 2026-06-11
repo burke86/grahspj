@@ -1388,8 +1388,9 @@ def evaluate_photometric_state(
     if fit_agn:
         pl_loc, pl_scale, pl_low, pl_high = _cfg_truncnorm(prior_config, "pl_slope", -1.8, 0.4, -3.0, -1.0)
         pl_slope = numpyro.sample("pl_slope", dist.TruncatedNormal(pl_loc, pl_scale, low=pl_low, high=pl_high))
-        uv_slope = numpyro.sample("uv_slope", dist.Normal(*_cfg_norm(prior_config, "uv_slope", 0.0, 0.05)))
-        numpyro.factor("uv_slope_gt_pl_slope", jnp.where(uv_slope > pl_slope, 0.0, -jnp.inf))
+        uv_slope_delta = numpyro.sample("uv_slope_delta", dist.LogNormal(*_cfg_norm(prior_config, "log_uv_slope_delta", np.log(1.8), 0.4)))
+        uv_slope = pl_slope + uv_slope_delta
+        numpyro.deterministic("uv_slope", uv_slope)
         pl_bend_loc = numpyro.sample("pl_bend_loc", dist.LogNormal(*_cfg_norm(prior_config, "log_pl_bend_loc", np.log(GRAHSP_PL_BEND_LOC_A), 0.3)))
         pl_bend_width = numpyro.sample("pl_bend_width", dist.LogNormal(*_cfg_norm(prior_config, "log_pl_bend_width", np.log(GRAHSP_PL_BEND_WIDTH), 0.4)))
         pl_cutoff = numpyro.sample("pl_cutoff", dist.LogNormal(*_cfg_norm(prior_config, "log_pl_cutoff", np.log(GRAHSP_PL_CUTOFF_A), 0.6)))
