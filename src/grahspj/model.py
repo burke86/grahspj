@@ -923,6 +923,15 @@ def _build_host_state(context: ModelContext, prior_config: dict[str, Any], *, fu
     raise ValueError("galaxy.host_sfh_model must be one of: 'delayed', 'diffstar'.")
 
 
+def _host_rest_on_basis(host_state: dict[str, Any], host_basis_jax):
+    """Evaluate the sampled SSP mixture on an alternate wavelength basis."""
+    return host_state["formed_mass"] * jnp.tensordot(
+        host_state["host_ssp_weights"],
+        host_basis_jax.rest_llambda,
+        axes=((0, 1), (0, 1)),
+    )
+
+
 def _empty_host_state(context: ModelContext):
     """Return zero-valued host placeholders for AGN-only fits."""
     rest_wave = _np_to_jnp(context.rest_wave)
@@ -972,6 +981,7 @@ def _build_nebular_components(context: ModelContext, host_state: dict[str, Any],
             "f_esc": jnp.asarray(float(cfg.f_esc), dtype=jnp.float64),
             "f_dust": jnp.asarray(float(cfg.f_dust), dtype=jnp.float64),
             "lines_width": jnp.asarray(float(cfg.lines_width), dtype=jnp.float64),
+            "line_scale": jnp.asarray(1.0, dtype=jnp.float64),
             "corr": jnp.asarray(0.0, dtype=jnp.float64),
             "line_lumin": jnp.zeros((1,), dtype=jnp.float64),
         }
@@ -986,7 +996,31 @@ def _build_nebular_components(context: ModelContext, host_state: dict[str, Any],
     f_esc = _sample_optional_truncnorm(prior_config, "nebular_f_esc", float(cfg.f_esc), 0.1, 0.0, 1.0)
     f_dust_raw = _sample_optional_truncnorm(prior_config, "nebular_f_dust", float(cfg.f_dust), 0.1, 0.0, 1.0)
     f_dust = jnp.minimum(f_dust_raw, jnp.maximum(1.0 - f_esc, 0.0))
-    lines_width = jnp.clip(_sample_optional_normal(prior_config, "nebular_lines_width", float(cfg.lines_width), 100.0), 0.0, 1.0e5)
+    tie_width_to_jaxqsofit = bool(
+        context.fit_config.spectroscopy_config.enabled
+        and str(context.fit_config.spectroscopy_config.backend).lower() == "jaxqsofit"
+        and context.fit_config.spectroscopy_config.jaxqsofit.use_spectral_lines
+    )
+    if tie_width_to_jaxqsofit and "nebular_lines_width" not in prior_config:
+        lines_width = numpyro.sample(
+            "nebular_lines_width",
+            dist.TruncatedNormal(
+                loc=jnp.asarray(float(cfg.lines_width), dtype=jnp.float64),
+                scale=jnp.asarray(100.0, dtype=jnp.float64),
+                low=jnp.asarray(1.0, dtype=jnp.float64),
+                high=jnp.asarray(1.0e5, dtype=jnp.float64),
+            ),
+        )
+    else:
+        lines_width = jnp.clip(_sample_optional_normal(prior_config, "nebular_lines_width", float(cfg.lines_width), 100.0), 0.0, 1.0e5)
+    if tie_width_to_jaxqsofit or "log_nebular_line_scale" in prior_config:
+        line_scale_loc, line_scale_width = _cfg_norm(prior_config, "log_nebular_line_scale", 0.0, 0.5)
+        line_scale = numpyro.sample(
+            "nebular_line_scale",
+            dist.LogNormal(line_scale_loc, line_scale_width),
+        )
+    else:
+        line_scale = jnp.asarray(1.0, dtype=jnp.float64)
 
     weights = host_state["formed_mass"] * host_state["host_ssp_weights"]
     young_mask = (jnp.power(10.0, context.host_basis_jax.ssp_lg_age_gyr) * 1.0e3) <= float(cfg.young_age_cut_myr)
@@ -1016,8 +1050,8 @@ def _build_nebular_components(context: ModelContext, host_state: dict[str, Any],
     else:
         lines_rest = _flux_conserving_line_gaussians(rest_wave, templates.line_wave_a, line_lumin, lines_width)
     emission_scale = jnp.asarray(1.0 if cfg.emission else 0.0, dtype=jnp.float64)
-    line_lumin = line_lumin * emission_scale
-    lines_rest = lines_rest * emission_scale
+    line_lumin = line_lumin * emission_scale * line_scale
+    lines_rest = lines_rest * emission_scale * line_scale
     continuum_rest = continuum_rest * emission_scale
     absorption_rest = jnp.where(rest_wave < 912.0, -host_rest * (1.0 - f_esc), 0.0)
     return {
@@ -1036,6 +1070,7 @@ def _build_nebular_components(context: ModelContext, host_state: dict[str, Any],
         "f_esc": f_esc,
         "f_dust": f_dust,
         "lines_width": lines_width,
+        "line_scale": line_scale,
         "corr": corr,
         "line_lumin": line_lumin,
     }
@@ -1198,6 +1233,8 @@ def _evaluate_jaxqsofit_backend(
     line_prior_config,
     rest_wave,
     feii_template_flux,
+    fixed_narrow_fwhm_kms=None,
+    fixed_narrow_amp_scale=None,
 ):
     """Evaluate optional jaxqsofit spectral components inside grahspj."""
     try:
@@ -1222,6 +1259,8 @@ def _evaluate_jaxqsofit_backend(
         broad_fwhm_kms_default=float(cfg.agn.line_width_kms_default),
         feii_fwhm_kms_default=float(cfg.agn.line_width_kms_default),
         balmer_velocity_kms_default=float(cfg.agn.line_width_kms_default),
+        fixed_narrow_fwhm_kms=fixed_narrow_fwhm_kms,
+        fixed_narrow_amp_scale=fixed_narrow_amp_scale,
     )
     return evaluate_joint_spectral_components(
         wave_obs,
@@ -1295,7 +1334,18 @@ def evaluate_photometric_state(
         and not spectroscopy_enabled
         and not cfg.likelihood.attenuation_model_uncertainty
     )
-    host_state = _build_host_state(context, prior_config, full_output=include_components) if fit_host else _empty_host_state(context)
+    needs_spec_host_basis = bool(
+        spectroscopy_enabled
+        and str(cfg.spectroscopy_config.backend).lower() == "jaxqsofit"
+        and context.spec_host_basis_jax is not None
+        and context.spec_rest_wave_jax.size == context.spec_wave_obs.size
+        and not cfg.observation.fit_redshift
+    )
+    host_state = (
+        _build_host_state(context, prior_config, full_output=include_components or needs_spec_host_basis)
+        if fit_host
+        else _empty_host_state(context)
+    )
     host_rest = host_state["host_rest"]
     if fit_host and bool(cfg.galaxy.fit_host_kinematics):
         gal_v_kms = numpyro.sample("gal_v_kms", dist.Normal(*_cfg_norm(prior_config, "gal_v_kms", 0.0, 150.0)))
@@ -1701,27 +1751,121 @@ def evaluate_photometric_state(
     pred_fluxes = pred_fluxes_raw if not host_capture_enabled else pred_fluxes_raw - host_fluxes_total + host_fluxes
 
     spec_model_fluxes = jnp.zeros_like(spec_fluxes)
+    spec_host_model_fluxes = jnp.zeros_like(spec_fluxes)
+    spec_disk_model_fluxes = jnp.zeros_like(spec_fluxes)
+    spec_torus_model_fluxes = jnp.zeros_like(spec_fluxes)
+    spec_continuum_model_fluxes = jnp.zeros_like(spec_fluxes)
     spectrum_scale = jnp.asarray(1.0, dtype=jnp.float64)
     if spectroscopy_enabled:
         backend = str(cfg.spectroscopy_config.backend).lower()
-        spec_source_obs = total_obs
         if backend == "jaxqsofit":
-            spec_source_obs = host_obs + _redshift_to_obs(
-                rest_wave,
-                (disk_rest + torus_rest) * igm,
-                obs_wave,
-                redshift,
-                luminosity_distance_m,
+            use_spec_resolution_continuum = bool(
+                context.spec_host_basis_jax is not None
+                and context.spec_rest_wave_jax.size == context.spec_wave_obs.size
+                and not cfg.observation.fit_redshift
             )
+            if use_spec_resolution_continuum:
+                spec_rest_wave = context.spec_rest_wave_jax
+                spec_igm = jnp.interp(spec_rest_wave, rest_wave, igm, left=0.0, right=0.0)
+                spec_att_curve = _attenuation_curve(
+                    spec_rest_wave,
+                    -1.2,
+                    -3.0,
+                    1.2,
+                    GRAHSP_BIATTENUATION_BREAK_A,
+                )
+                spec_gal_att_factor = 10 ** (ebv_gal * spec_att_curve / -2.5)
+                spec_agn_att_factor = 10 ** ((ebv_gal + ebv_agn) * spec_att_curve / -2.5)
+                spec_nebular_absorption_rest = jnp.interp(
+                    spec_rest_wave,
+                    rest_wave,
+                    nebular["absorption_rest"],
+                    left=0.0,
+                    right=0.0,
+                )
+                spec_host_intrinsic = _host_rest_on_basis(host_state, context.spec_host_basis_jax)
+                if fit_host and bool(cfg.galaxy.fit_host_kinematics):
+                    spec_host_intrinsic = _shift_and_broaden_single_spectrum_lnlam(
+                        jnp.log(spec_rest_wave),
+                        spec_host_intrinsic,
+                        gal_v_kms,
+                        gal_sigma_kms,
+                    )
+                spec_host_rest = (spec_host_intrinsic + spec_nebular_absorption_rest) * spec_gal_att_factor
+                spec_disk_rest = (
+                    _powerlaw_jax(
+                        spec_rest_wave,
+                        agn_amp / 5100.0,
+                        uv_slope,
+                        pl_slope,
+                        5100.0,
+                        pl_bend_loc,
+                        pl_bend_width,
+                        pl_cutoff,
+                    )
+                    * spec_agn_att_factor
+                )
+                spec_torus_rest = _torus_component(
+                    spec_rest_wave,
+                    fcov,
+                    si,
+                    cool_lam,
+                    cool_width,
+                    hot_lam,
+                    hot_width,
+                    hot_fcov,
+                    0.29,
+                    GRAHSP_SI_EM_LAM_A,
+                    GRAHSP_SI_ABS_LAM_A,
+                    GRAHSP_SI_EM_WIDTH_A,
+                    GRAHSP_SI_ABS_WIDTH_A,
+                    agn_amp,
+                )
+                spec_denom = (
+                    4.0
+                    * jnp.pi
+                    * jnp.maximum(luminosity_distance_m, 1e-12) ** 2
+                    * jnp.maximum(1.0 + redshift, 1e-8)
+                )
+                spec_host_lambda = spec_host_rest * spec_igm / spec_denom
+                spec_disk_lambda = spec_disk_rest * spec_igm / spec_denom
+                spec_torus_lambda = spec_torus_rest * spec_igm / spec_denom
+                if host_capture_enabled:
+                    spec_capture_at_pixel = spec_host_capture_fraction_by_spectrum[spec_spectrum_index]
+                    spec_host_lambda = spec_capture_at_pixel * spec_host_lambda
+                spec_host_model_fluxes = _flambda_to_mjy(spec_wave_obs, spec_host_lambda)
+                spec_disk_model_fluxes = _flambda_to_mjy(spec_wave_obs, spec_disk_lambda)
+                spec_torus_model_fluxes = _flambda_to_mjy(spec_wave_obs, spec_torus_lambda)
+                spec_model_fluxes = spec_host_model_fluxes + spec_disk_model_fluxes + spec_torus_model_fluxes
+            else:
+                spec_source_obs = host_obs + _redshift_to_obs(
+                    rest_wave,
+                    (disk_rest + torus_rest) * igm,
+                    obs_wave,
+                    redshift,
+                    luminosity_distance_m,
+                )
+                spec_model_lambda = jnp.interp(spec_wave_obs, obs_wave, spec_source_obs, left=0.0, right=0.0)
+                spec_host_lambda = jnp.interp(spec_wave_obs, obs_wave, host_obs, left=0.0, right=0.0)
+                if host_capture_enabled:
+                    spec_capture_at_pixel = spec_host_capture_fraction_by_spectrum[spec_spectrum_index]
+                    spec_model_lambda = spec_model_lambda - spec_host_lambda + spec_capture_at_pixel * spec_host_lambda
+                    spec_host_lambda = spec_capture_at_pixel * spec_host_lambda
+                spec_host_model_fluxes = _flambda_to_mjy(spec_wave_obs, spec_host_lambda)
+                spec_model_fluxes = _flambda_to_mjy(spec_wave_obs, spec_model_lambda)
+            spec_continuum_model_fluxes = spec_model_fluxes
         elif backend != "grahspj":
             raise ValueError(f"Unsupported spectroscopy backend: {cfg.spectroscopy_config.backend!r}")
-
-        spec_model_lambda = jnp.interp(spec_wave_obs, obs_wave, spec_source_obs, left=0.0, right=0.0)
-        spec_host_lambda = jnp.interp(spec_wave_obs, obs_wave, host_obs, left=0.0, right=0.0)
-        if host_capture_enabled:
-            spec_capture_at_pixel = spec_host_capture_fraction_by_spectrum[spec_spectrum_index]
-            spec_model_lambda = spec_model_lambda - spec_host_lambda + spec_capture_at_pixel * spec_host_lambda
-        spec_model_fluxes = _flambda_to_mjy(spec_wave_obs, spec_model_lambda)
+        else:
+            spec_model_lambda = jnp.interp(spec_wave_obs, obs_wave, total_obs, left=0.0, right=0.0)
+            spec_host_lambda = jnp.interp(spec_wave_obs, obs_wave, host_obs, left=0.0, right=0.0)
+            if host_capture_enabled:
+                spec_capture_at_pixel = spec_host_capture_fraction_by_spectrum[spec_spectrum_index]
+                spec_model_lambda = spec_model_lambda - spec_host_lambda + spec_capture_at_pixel * spec_host_lambda
+                spec_host_lambda = spec_capture_at_pixel * spec_host_lambda
+            spec_host_model_fluxes = _flambda_to_mjy(spec_wave_obs, spec_host_lambda)
+            spec_model_fluxes = _flambda_to_mjy(spec_wave_obs, spec_model_lambda)
+            spec_continuum_model_fluxes = spec_model_fluxes
         if backend == "jaxqsofit" and include_spectral_features:
             jqf_components = _evaluate_jaxqsofit_backend(
                 spec_wave_obs,
@@ -1731,6 +1875,8 @@ def evaluate_photometric_state(
                 context.jaxqsofit_prior_config,
                 rest_wave,
                 feii_template_on_rest,
+                fixed_narrow_fwhm_kms=nebular["lines_width"],
+                fixed_narrow_amp_scale=nebular["line_scale"],
             )
             spec_model_fluxes = jqf_components["total"]
         if cfg.spectroscopy_config.fit_scale:
@@ -1886,6 +2032,10 @@ def evaluate_photometric_state(
 
     numpyro.deterministic("pred_fluxes", pred_fluxes)
     numpyro.deterministic("pred_spectrum_fluxes", spec_model_fluxes)
+    numpyro.deterministic("spec_continuum_model_fluxes", spec_continuum_model_fluxes)
+    numpyro.deterministic("spec_host_model_fluxes", spec_host_model_fluxes)
+    numpyro.deterministic("spec_disk_model_fluxes", spec_disk_model_fluxes)
+    numpyro.deterministic("spec_torus_model_fluxes", spec_torus_model_fluxes)
     numpyro.deterministic("spectrum_scale_fit", spectrum_scale)
     numpyro.deterministic("log_spectrum_scale_fit", log_spectrum_scale)
     numpyro.deterministic("spectrum_host_capture_fraction", spec_host_capture_fraction_by_spectrum)
@@ -1916,6 +2066,7 @@ def evaluate_photometric_state(
     numpyro.deterministic("nebular_f_esc_fit", nebular["f_esc"])
     numpyro.deterministic("nebular_f_dust_fit", nebular["f_dust"])
     numpyro.deterministic("nebular_lines_width_fit", nebular["lines_width"])
+    numpyro.deterministic("nebular_line_scale_fit", nebular["line_scale"])
     numpyro.deterministic("nebular_corr_fit", nebular["corr"])
     numpyro.deterministic("nebular_n_ly_young_fit", nebular["n_ly_young"])
     numpyro.deterministic("nebular_n_ly_old_fit", nebular["n_ly_old"])
@@ -1990,6 +2141,10 @@ def evaluate_photometric_state(
     state = {
         "pred_fluxes": pred_fluxes,
         "pred_spectrum_fluxes": spec_model_fluxes,
+        "spec_continuum_model_fluxes": spec_continuum_model_fluxes,
+        "spec_host_model_fluxes": spec_host_model_fluxes,
+        "spec_disk_model_fluxes": spec_disk_model_fluxes,
+        "spec_torus_model_fluxes": spec_torus_model_fluxes,
         "agn_fluxes": agn_fluxes,
         "host_fluxes": host_fluxes,
         "host_total_fluxes": host_fluxes_total,

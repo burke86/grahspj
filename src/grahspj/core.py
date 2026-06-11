@@ -88,6 +88,10 @@ class GRAHSPJ:
             return_sites=[
                 "pred_fluxes",
                 "pred_spectrum_fluxes",
+                "spec_continuum_model_fluxes",
+                "spec_host_model_fluxes",
+                "spec_disk_model_fluxes",
+                "spec_torus_model_fluxes",
                 "spec_wave_obs",
                 "spec_spectrum_index",
                 "spectrum_scale_fit",
@@ -101,6 +105,8 @@ class GRAHSPJ:
                 "jqf_line_amp_per_component",
                 "jqf_line_mu_per_component",
                 "jqf_line_sig_per_component",
+                "jqf_line_narrow_fwhm_kms",
+                "jqf_line_narrow_amp_scale",
                 "jqf_feii_model",
                 "jqf_balmer_model",
                 "jqf_total_model",
@@ -126,6 +132,7 @@ class GRAHSPJ:
                 "rest_wave",
                 "obs_wave",
                 "redshift_fit",
+                "nebular_line_scale_fit",
                 "total_rest_sed",
                 "agn_rest_sed",
                 "host_rest_sed",
@@ -740,19 +747,30 @@ class GRAHSPJ:
         plotter.flux_prereduced = flux_rest
         plotter.err_prereduced = err_rest
         plotter.model_total = component("pred_spectrum_fluxes", apply_scale=False)
-        plotter.host = obs_sed_component("host_obs_sed", multiplier=host_capture)
-        disk_component = obs_sed_component("disk_obs_sed")
+        spec_host_component = component("spec_host_model_fluxes")
+        plotter.host = (
+            spec_host_component
+            if keep_component(spec_host_component)
+            else obs_sed_component("host_obs_sed", multiplier=host_capture)
+        )
+        spec_disk_component = component("spec_disk_model_fluxes")
+        disk_component = spec_disk_component if keep_component(spec_disk_component) else obs_sed_component("disk_obs_sed")
         plotter.f_pl_model = disk_component if keep_component(disk_component) else component("jqf_continuum_model")
         plotter.f_pl_model_intrinsic = plotter.f_pl_model
         plotter.f_fe_mgii_model = component("jqf_feii_model")
         plotter.f_fe_balmer_model = np.zeros_like(wave_rest)
         plotter.f_bc_model = component("jqf_balmer_model")
         plotter.f_line_model = component("jqf_line_model")
+        spec_torus_component = component("spec_torus_model_fluxes")
         custom_components = {
-            "grahspj_torus": obs_sed_component("torus_obs_sed"),
+            "grahspj_torus": spec_torus_component if keep_component(spec_torus_component) else obs_sed_component("torus_obs_sed"),
             "grahspj_host_dust": obs_sed_component("dust_obs_sed"),
             "grahspj_sed_balmer": obs_sed_component("balmer_obs_sed"),
-            "grahspj_sed_lines": obs_sed_component("line_obs_sed") + obs_sed_component("feii_obs_sed"),
+            "grahspj_sed_lines": (
+                obs_sed_component("line_obs_sed")
+                + obs_sed_component("feii_obs_sed")
+                + obs_sed_component("nebular_lines_obs_sed")
+            ),
         }
         plotter.custom_components = {
             name: model for name, model in custom_components.items() if keep_component(model)

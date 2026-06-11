@@ -215,6 +215,8 @@ class ModelContext:
     ssp_data: SSPData
     host_basis: HostBasis
     host_basis_jax: HostBasisJax
+    spec_host_basis_jax: HostBasisJax | None
+    spec_rest_wave_jax: jnp.ndarray
     t_obs_gyr: float
     luminosity_distance_m: float
     gal_t_table: np.ndarray
@@ -1147,9 +1149,16 @@ def _build_fixed_nebular_line_profile(
 ) -> np.ndarray | None:
     """Precompute fixed nebular line profile per ionizing photon when shape is static."""
     neb = cfg.nebular
+    tie_width_to_jaxqsofit = bool(
+        cfg.spectroscopy_config.enabled
+        and str(cfg.spectroscopy_config.backend).lower() == "jaxqsofit"
+        and cfg.spectroscopy_config.jaxqsofit.use_spectral_lines
+    )
     if not (cfg.galaxy.fit_host and neb.enabled and neb.emission):
         return np.zeros_like(rest_wave, dtype=float)
     if neb.zgas is None:
+        return None
+    if tie_width_to_jaxqsofit:
         return None
     prior_config = cfg.prior_config
     shape_keys = {"nebular_logU", "nebular_zgas", "nebular_ne", "nebular_lines_width"}
@@ -1200,7 +1209,12 @@ def _build_nebular_rest_templates_jax(
         )
 
     prior_config = cfg.prior_config
-    line_width_fixed = "nebular_lines_width" not in prior_config
+    tie_width_to_jaxqsofit = bool(
+        cfg.spectroscopy_config.enabled
+        and str(cfg.spectroscopy_config.backend).lower() == "jaxqsofit"
+        and cfg.spectroscopy_config.jaxqsofit.use_spectral_lines
+    )
+    line_width_fixed = "nebular_lines_width" not in prior_config and not tie_width_to_jaxqsofit
     cache_key = (
         float(rest_wave[0]),
         float(rest_wave[-1]),
@@ -1540,6 +1554,13 @@ def build_model_context(cfg: FitConfig) -> ModelContext:
         host_basis = _empty_host_basis(rest_wave)
         host_basis_jax = _empty_host_basis_jax(rest_wave, gal_t_table)
 
+    spec_rest_wave = np.array([], dtype=float)
+    spec_host_basis_jax = None
+    if cfg.galaxy.fit_host and spec_wave_obs.size > 0 and not cfg.observation.fit_redshift:
+        spec_rest_wave = (spec_wave_obs / (1.0 + max(cfg.observation.redshift, 0.0))).astype(float)
+        spec_host_basis = _build_host_basis(spec_rest_wave, ssp_data)
+        spec_host_basis_jax = _build_host_basis_jax(ssp_data, spec_host_basis, gal_t_table)
+
     filter_responses = _load_filter_responses(cfg)
     loaded_filters = [_prepare_loaded_filter(obs_wave, response) for response in filter_responses]
     packed_filters = _pack_loaded_filters(loaded_filters)
@@ -1617,6 +1638,8 @@ def build_model_context(cfg: FitConfig) -> ModelContext:
         ssp_data=ssp_data,
         host_basis=host_basis,
         host_basis_jax=host_basis_jax,
+        spec_host_basis_jax=spec_host_basis_jax,
+        spec_rest_wave_jax=jnp.asarray(spec_rest_wave, dtype=jnp.float64),
         t_obs_gyr=t_obs_gyr,
         luminosity_distance_m=luminosity_distance_m,
         gal_t_table=gal_t_table,

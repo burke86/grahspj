@@ -15,6 +15,7 @@ from grahspj.config import (
     InferenceConfig,
     JaxQSOFitConfig,
     LikelihoodConfig,
+    NebularConfig,
     Observation,
     PhotometryData,
     SpectroscopyConfig,
@@ -478,10 +479,10 @@ def test_build_context_with_inline_templates(monkeypatch):
 
 def test_context_accepts_multiple_spectra(monkeypatch):
     class _SSPData:
-        ssp_lgmet = np.array([-1.0, 0.0])
-        ssp_lg_age_gyr = np.array([-1.0, 0.0])
-        ssp_wave = np.array([900.0, 2000.0, 5000.0, 10000.0])
-        ssp_flux = np.ones((2, 2, 4))
+        ssp_lgmet = np.array([-2.0, -1.0, -0.3, 0.0])
+        ssp_lg_age_gyr = np.array([-3.0, -2.0, -1.0, 0.0])
+        ssp_wave = np.array([100.0, 500.0, 900.0, 2000.0, 5000.0, 10000.0])
+        ssp_flux = np.ones((4, 4, 6))
 
     monkeypatch.setattr("grahspj.preload._load_ssp_templates", lambda fn: _SSPData())
 
@@ -547,6 +548,29 @@ def test_spectroscopy_config_migrates_legacy_jaxqsofit_flags():
     assert cfg.jaxqsofit.line_flux_scale_mjy == 0.1
 
 
+def test_jaxqsofit_fixed_narrow_width_component_reports_tied_width():
+    pytest.importorskip("jaxqsofit.components")
+    from jaxqsofit.components import SpectralComponentConfig, evaluate_joint_spectral_components
+
+    cfg = SpectralComponentConfig(
+        use_lines=True,
+        use_tied_lines=False,
+        line_centers_rest=[5000.0],
+        line_names=["OIII5007c"],
+        fixed_narrow_fwhm_kms=321.0,
+        fixed_narrow_amp_scale=2.5,
+    )
+    tr = trace(seed(evaluate_joint_spectral_components, jax.random.PRNGKey(1))).get_trace(
+        np.asarray([4995.0, 5000.0, 5005.0]),
+        0.0,
+        np.ones(3),
+        config=cfg,
+    )
+
+    assert tr["jqf_line_narrow_fwhm_kms"]["value"] == pytest.approx(321.0)
+    assert tr["jqf_line_narrow_amp_scale"]["value"] == pytest.approx(2.5)
+
+
 def test_fit_config_mapping_coerces_balmer_continuum_gate():
     cfg = fit_config_from_mapping(
         {
@@ -605,6 +629,166 @@ def test_jaxqsofit_joint_backend_builds_flux_scaled_smart_priors(monkeypatch):
     line_table = prior["line"]["table"]
     assert line_table
     assert min(float(row["minsca"]) for row in line_table) >= 3.0e-4
+
+
+def test_context_builds_spectrum_resolution_host_basis(monkeypatch):
+    class _SSPData:
+        ssp_lgmet = np.array([-1.0, 0.0])
+        ssp_lg_age_gyr = np.array([-1.0, 0.0])
+        ssp_wave = np.array([900.0, 2000.0, 5000.0, 10000.0])
+        ssp_flux = np.ones((2, 2, 4))
+
+    monkeypatch.setattr("grahspj.preload._load_ssp_templates", lambda fn: _SSPData())
+
+    cfg = FitConfig(
+        observation=Observation(object_id="obj", redshift=0.1),
+        photometry=PhotometryData(filter_names=["f1"], fluxes=[1.0], errors=[0.1]),
+        filters=FilterSet(curves=[FilterCurve(name="f1", wave=[1000.0, 2000.0, 3000.0], transmission=[0.0, 1.0, 0.0])], use_grahsp_database=False),
+        galaxy=GalaxyConfig(dsps_ssp_fn="fake.h5", n_wave=16, fit_host=True),
+        agn=AGNConfig(),
+        spectroscopy=SpectroscopyData(
+            wave_obs=[5000.0, 5100.0, 5200.0],
+            fluxes=[2.0, 4.0, 5.0],
+            errors=[0.1, 0.1, 0.1],
+            instrument="sdss",
+        ),
+        spectroscopy_config=SpectroscopyConfig(enabled=True, backend="jaxqsofit"),
+        inference=InferenceConfig(map_steps=2),
+    )
+
+    context = build_model_context(cfg)
+
+    assert context.spec_host_basis_jax is not None
+    assert np.asarray(context.spec_rest_wave_jax).tolist() == pytest.approx(np.asarray(cfg.spectroscopy.wave_obs) / 1.1)
+    assert context.spec_host_basis_jax.rest_llambda.shape[-1] == len(cfg.spectroscopy.wave_obs)
+
+
+def test_jaxqsofit_spectrum_resolution_host_basis_uses_host_kinematics(monkeypatch):
+    pytest.importorskip("jaxqsofit.components")
+
+    class _SSPData:
+        ssp_lgmet = np.array([-2.0, -1.0, -0.3, 0.0])
+        ssp_lg_age_gyr = np.array([-3.0, -2.0, -1.0, 0.0])
+        ssp_wave = np.array([100.0, 500.0, 900.0, 2000.0, 5000.0, 10000.0])
+        ssp_flux = np.ones((4, 4, 6))
+
+    broadened_grids = []
+
+    def _identity_broaden(lnwave, spectrum, v_kms, sigma_kms):
+        broadened_grids.append(np.asarray(lnwave).size)
+        return spectrum
+
+    monkeypatch.setattr("grahspj.preload._SSP_DATA_CACHE", {})
+    monkeypatch.setattr("grahspj.preload._HOST_BASIS_CACHE", {})
+    monkeypatch.setattr("grahspj.preload._load_ssp_templates", lambda fn: _SSPData())
+    monkeypatch.setattr("grahspj.model._shift_and_broaden_single_spectrum_lnlam", _identity_broaden)
+
+    cfg = FitConfig(
+        observation=Observation(object_id="obj", redshift=0.1),
+        photometry=PhotometryData(filter_names=["f1"], fluxes=[1.0], errors=[0.1]),
+        filters=FilterSet(curves=[FilterCurve(name="f1", wave=[1000.0, 2000.0, 3000.0], transmission=[0.0, 1.0, 0.0])], use_grahsp_database=False),
+        galaxy=GalaxyConfig(
+            dsps_ssp_fn="fake.h5",
+            n_wave=16,
+            fit_host=True,
+            fit_host_kinematics=True,
+        ),
+        agn=AGNConfig(fit_agn=False),
+        nebular=NebularConfig(enabled=False),
+        likelihood=LikelihoodConfig(
+            fit_intrinsic_scatter=False,
+            variability_uncertainty=False,
+            use_absolute_flux_scale_prior=False,
+        ),
+        spectroscopy=SpectroscopyData(
+            wave_obs=[5000.0, 5100.0, 5200.0],
+            fluxes=[2.0, 4.0, 5.0],
+            errors=[0.1, 0.1, 0.1],
+            instrument="sdss",
+        ),
+        spectroscopy_config=SpectroscopyConfig(
+            enabled=True,
+            backend="jaxqsofit",
+            fit_scale=False,
+            jaxqsofit=JaxQSOFitConfig(
+                use_spectral_lines=False,
+                use_spectral_feii=False,
+                use_spectral_balmer_continuum=False,
+            ),
+        ),
+        inference=InferenceConfig(map_steps=2),
+        prior_config={"log_stellar_mass": {"dist": "uniform", "low": 8.0, "high": 8.0}},
+    )
+    context = build_model_context(cfg)
+
+    tr = trace(
+        substitute(
+            seed(grahsp_photometric_model, jax.random.PRNGKey(3)),
+            data={
+                "gal_v_kms": np.array(0.0),
+                "gal_sigma_kms": np.array(120.0),
+                "ebv_gal": np.array(0.0),
+                "dust_alpha": np.array(2.0),
+            },
+        )
+    ).get_trace(context, include_components=False)
+
+    assert context.spec_host_basis_jax is not None
+    assert sorted(broadened_grids) == [len(cfg.spectroscopy.wave_obs), cfg.galaxy.n_wave]
+    assert np.asarray(tr["pred_spectrum_fluxes"]["value"]).shape == (3,)
+
+
+def test_jaxqsofit_backend_always_uses_dynamic_nebular_width(monkeypatch):
+    class _SSPData:
+        ssp_lgmet = np.array([-1.0, 0.0])
+        ssp_lg_age_gyr = np.array([-1.0, 0.0])
+        ssp_wave = np.array([900.0, 2000.0, 5000.0, 10000.0])
+        ssp_flux = np.ones((2, 2, 4))
+
+    monkeypatch.setattr("grahspj.preload._load_ssp_templates", lambda fn: _SSPData())
+
+    cfg = FitConfig(
+        observation=Observation(object_id="obj", redshift=0.0),
+        photometry=PhotometryData(filter_names=["f1"], fluxes=[1.0], errors=[0.1]),
+        filters=FilterSet(curves=[FilterCurve(name="f1", wave=[1000.0, 2000.0, 3000.0], transmission=[0.0, 1.0, 0.0])], use_grahsp_database=False),
+        galaxy=GalaxyConfig(dsps_ssp_fn="fake.h5", n_wave=64, fit_host=True),
+        agn=AGNConfig(
+            feii_template=FeIITemplate(name="fe", wave=[1000.0, 2000.0], lumin=[0.0, 0.0]),
+            emission_line_template=EmissionLineTemplate(
+                wave=[5000.0],
+                lumin_blagn=[0.0],
+                lumin_sy2=[0.0],
+                lumin_liner=[0.0],
+            ),
+        ),
+        nebular=NebularConfig(enabled=True, zgas=0.02),
+        likelihood=LikelihoodConfig(
+            fit_intrinsic_scatter=False,
+            variability_uncertainty=False,
+            use_absolute_flux_scale_prior=False,
+        ),
+        spectroscopy=SpectroscopyData(
+            wave_obs=[4995.0, 5000.0, 5005.0],
+            fluxes=[0.1, 0.12, 0.11],
+            errors=[0.02, 0.02, 0.02],
+            instrument="sdss",
+        ),
+        spectroscopy_config=SpectroscopyConfig(
+            enabled=True,
+            backend="jaxqsofit",
+            fit_scale=False,
+            jaxqsofit=JaxQSOFitConfig(
+                use_spectral_lines=True,
+                use_spectral_feii=False,
+                use_spectral_balmer_continuum=False,
+            ),
+        ),
+        inference=InferenceConfig(map_steps=2),
+    )
+    context = build_model_context(cfg)
+
+    assert context.fixed_nebular_line_profile_jax is None
+    assert context.nebular_rest_templates_jax.line_profile_per_photon is None
 
 
 def test_grahspj_model_can_call_jaxqsofit_backend(monkeypatch):
@@ -875,6 +1059,9 @@ def test_plot_jaxqsofit_spectrum_adapts_joint_predictive(monkeypatch):
     fitter.predict = lambda posterior="latest": {
         "obs_wave": np.asarray([[4000.0, 5000.0, 6000.0], [4000.0, 5000.0, 6000.0]]),
         "pred_spectrum_fluxes": np.asarray([[1.1, 2.2, 3.3], [1.3, 2.4, 3.5]]),
+        "spec_host_model_fluxes": np.asarray([[0.2, 0.3, 0.4], [0.25, 0.35, 0.45]]),
+        "spec_disk_model_fluxes": np.asarray([[0.5, 0.6, 0.7], [0.55, 0.65, 0.75]]),
+        "spec_torus_model_fluxes": np.asarray([[0.05, 0.06, 0.07], [0.055, 0.065, 0.075]]),
         "jqf_continuum_model": np.asarray([[1.0, 2.0, 3.0], [1.0, 2.0, 3.0]]),
         "jqf_line_model": np.asarray([[0.1, 0.2, 0.3], [0.3, 0.4, 0.5]]),
         "spectrum_scale_fit": np.asarray([2.0, 2.0]),
@@ -883,6 +1070,9 @@ def test_plot_jaxqsofit_spectrum_adapts_joint_predictive(monkeypatch):
         "disk_obs_sed": np.asarray([[2.0e-20, 2.0e-20, 2.0e-20], [2.0e-20, 2.0e-20, 2.0e-20]]),
         "torus_obs_sed": np.asarray([[0.5e-20, 0.5e-20, 0.5e-20], [0.5e-20, 0.5e-20, 0.5e-20]]),
         "dust_obs_sed": np.asarray([[0.1e-20, 0.1e-20, 0.1e-20], [0.1e-20, 0.1e-20, 0.1e-20]]),
+        "line_obs_sed": np.zeros((2, 3)),
+        "feii_obs_sed": np.zeros((2, 3)),
+        "nebular_lines_obs_sed": np.asarray([[0.2e-20, 0.3e-20, 0.2e-20], [0.2e-20, 0.3e-20, 0.2e-20]]),
     }
 
     fig = fitter.plot_jaxqsofit_spectrum(show_plot=False, plot_residual=False)
@@ -894,6 +1084,8 @@ def test_plot_jaxqsofit_spectrum_adapts_joint_predictive(monkeypatch):
     assert np.all(captured["line"] > 0.0)
     assert "grahspj_torus" in captured["custom_components"]
     assert "grahspj_host_dust" in captured["custom_components"]
+    assert "grahspj_sed_lines" in captured["custom_components"]
+    assert np.nanmax(captured["custom_components"]["grahspj_sed_lines"]) > 0.0
     assert captured["kwargs"]["show_plot"] is False
     assert captured["kwargs"]["plot_residual"] is False
 
