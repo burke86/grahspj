@@ -1638,7 +1638,6 @@ def evaluate_photometric_state(
         fit_agn
         and include_sed_agn_features
         and bool(cfg.likelihood.use_local_line_photometry)
-        and not include_components
     )
     if correct_agn_line_photometry:
         if agn_type == 1:
@@ -1966,6 +1965,9 @@ def evaluate_photometric_state(
         line_liner_fluxes = _project_filters(line_liner_obs, context.packed_filters_jax)
         balmer_fluxes = _project_filters(balmer_obs, context.packed_filters_jax)
         trans_fluxes = _project_filters(transmitted_fraction_obs, context.packed_filters_jax)
+        if correct_agn_line_photometry:
+            agn_fluxes = agn_fluxes - coarse_agn_line_fluxes + local_agn_line_fluxes
+            line_fluxes = local_agn_line_fluxes
     else:
         nebular_lines_local_obs_wave = jnp.zeros((1,), dtype=jnp.float64)
         nebular_lines_local_obs = jnp.zeros((1,), dtype=jnp.float64)
