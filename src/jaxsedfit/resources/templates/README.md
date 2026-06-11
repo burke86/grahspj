@@ -1,10 +1,10 @@
 # Template provenance
 
-This directory contains vendored template files redistributed with `grahspj`.
+This directory contains vendored template files redistributed with `jaxsedfit`.
 
 - Upstream project: `GRAHSP`
 - Upstream license: `CeCILL v2`
-- Local license copy: [CeCILL-v2.txt](/Users/colinburke/research/grahspj/LICENSES/CeCILL-v2.txt)
+- Local license copy: [CeCILL-v2.txt](../../../../LICENSES/CeCILL-v2.txt)
 
 Vendored files:
 

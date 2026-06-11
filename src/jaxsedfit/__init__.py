@@ -26,7 +26,7 @@ __all__ = [
     "FilterSet",
     "FitConfig",
     "GalaxyConfig",
-    "GRAHSPJ",
+    "JAXSEDFit",
     "InferenceConfig",
     "JaxQSOFitConfig",
     "LikelihoodConfig",
@@ -47,10 +47,10 @@ __all__ = [
 
 def __getattr__(name):
     """Lazily expose heavier public objects and helpers on first access."""
-    if name == "GRAHSPJ":
-        from .core import GRAHSPJ
+    if name == "JAXSEDFit":
+        from .core import JAXSEDFit
 
-        return GRAHSPJ
+        return JAXSEDFit
     if name == "plot_fit_sed":
         from .plotting import plot_fit_sed
 

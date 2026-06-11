@@ -10,9 +10,9 @@ import jax
 import numpy as np
 from numpyro.infer.util import log_density
 
-from grahspj.config import AGNConfig, FilterSet, FitConfig, GalaxyConfig, InferenceConfig, LikelihoodConfig, Observation, PhotometryData
-from grahspj.core import GRAHSPJ
-from grahspj.model import grahsp_photometric_model
+from jaxsedfit.config import AGNConfig, FilterSet, FitConfig, GalaxyConfig, InferenceConfig, LikelihoodConfig, Observation, PhotometryData
+from jaxsedfit.core import JAXSEDFit
+from jaxsedfit.model import grahsp_photometric_model
 
 
 def _repo_root() -> Path:
@@ -91,7 +91,7 @@ def build_fairall9_fixedz_config() -> FitConfig:
 def benchmark_log_density(num_calls: int = 200, map_steps: int = 80, progress_bar: bool = False) -> dict[str, float]:
     cfg = build_fairall9_fixedz_config()
     cfg.inference.map_steps = int(map_steps)
-    fitter = GRAHSPJ(cfg)
+    fitter = JAXSEDFit(cfg)
     fitter.fit_map(steps=cfg.inference.map_steps, learning_rate=cfg.inference.learning_rate, progress_bar=progress_bar)
     params = fitter.map_result["median"]
     model = partial(grahsp_photometric_model, fitter.context, include_components=False)

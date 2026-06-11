@@ -206,7 +206,7 @@ class JaxQSOFitConfig:
     """Spectroscopy-only jaxqsofit component configuration.
 
     These flags affect only the spectroscopic likelihood. Broadband
-    photometry continues to use grahspj's native SED-scale AGN lines,
+    photometry continues to use jaxsedfit's native SED-scale AGN lines,
     Fe II, and Balmer continuum components.
     """
     use_spectral_lines: bool = True
@@ -226,7 +226,7 @@ class JaxQSOFitConfig:
 class SpectroscopyConfig:
     """Spectroscopic likelihood configuration."""
     enabled: bool = False
-    backend: str = "grahspj"
+    backend: str = "jaxsedfit"
     student_t_df: float = 5.0
     systematics_width: float = 0.05
     fit_scale: bool = True
@@ -248,7 +248,7 @@ class InferenceConfig:
 
 @dataclass
 class FitConfig:
-    """Top-level configuration bundle for a single grahspj fit."""
+    """Top-level configuration bundle for a single jaxsedfit fit."""
     observation: Observation
     photometry: PhotometryData
     filters: FilterSet = field(default_factory=FilterSet)

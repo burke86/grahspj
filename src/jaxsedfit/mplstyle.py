@@ -6,7 +6,7 @@ from importlib import resources
 
 def style_path() -> str:
     """Return the packaged Matplotlib style file path."""
-    return str(resources.files("grahspj").joinpath("resources/styles/grahspj.mplstyle"))
+    return str(resources.files("jaxsedfit").joinpath("resources/styles/jaxsedfit.mplstyle"))
 
 
 @contextmanager

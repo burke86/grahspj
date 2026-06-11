@@ -1,4 +1,4 @@
-"""Run the grahspj likelihood benchmarks used by PR benchmark workflows."""
+"""Run the jaxsedfit likelihood benchmarks used by PR benchmark workflows."""
 
 from __future__ import annotations
 
@@ -25,9 +25,9 @@ from diffstar.defaults import FB as DIFFSTAR_FB
 from diffstar.defaults import LGT0 as DIFFSTAR_LGT0
 from dsps.sed.ssp_weights import calc_ssp_weights_sfh_table_lognormal_mdf
 
-from grahspj.config import AGNConfig, FilterSet, FitConfig, GalaxyConfig, InferenceConfig, LikelihoodConfig, Observation, PhotometryData
-from grahspj.core import GRAHSPJ
-from grahspj.model import (
+from jaxsedfit.config import AGNConfig, FilterSet, FitConfig, GalaxyConfig, InferenceConfig, LikelihoodConfig, Observation, PhotometryData
+from jaxsedfit.core import JAXSEDFit
+from jaxsedfit.model import (
     AGN_BOLOMETRIC_CORRECTION_5100,
     GRAHSP_BIATTENUATION_BREAK_A,
     GRAHSP_PL_BEND_LOC_A,
@@ -195,7 +195,7 @@ def _bench_jitted(name: str, fn: Callable[[], Any], repeats: int, trials: int) -
     }
 
 
-def _build_component_functions(fitter: GRAHSPJ) -> dict[str, Callable[[], Any]]:
+def _build_component_functions(fitter: JAXSEDFit) -> dict[str, Callable[[], Any]]:
     ctx = fitter.context
     rest_wave = ctx.rest_wave_jax
     obs_wave = ctx.obs_wave_jax
@@ -403,7 +403,7 @@ def run_benchmark(
     setup_start = time.perf_counter()
     cfg = build_fairall9_fixedz_config(dsps_ssp_fn)
     cfg.inference.map_steps = int(map_steps)
-    fitter = GRAHSPJ(cfg)
+    fitter = JAXSEDFit(cfg)
     setup_seconds = time.perf_counter() - setup_start
 
     fit_start = time.perf_counter()
@@ -476,8 +476,8 @@ def _component_map(result: dict[str, Any]) -> dict[str, dict[str, Any]]:
 def render_markdown(result: dict[str, Any], *, workflow_url: str) -> str:
     whole_ms = _metric_mean(result["whole_log_density"], "ms_per_eval")
     lines = [
-        "<!-- grahspj benchmark -->",
-        "### grahspj PR benchmark",
+        "<!-- jaxsedfit benchmark -->",
+        "### jaxsedfit PR benchmark",
         "",
         "Benchmark input: fixed-z Fairall 9 photometry from `notebooks/04_fairall9_fake_photoz.ipynb`.",
         "",
@@ -513,8 +513,8 @@ def render_comparison_markdown(baseline: dict[str, Any], candidate: dict[str, An
     base_no_features_se = _metric_stderr(baseline["whole_log_density_no_sed_agn_features"], "ms_per_eval")
     cand_no_features_se = _metric_stderr(candidate["whole_log_density_no_sed_agn_features"], "ms_per_eval")
     lines = [
-        "<!-- grahspj benchmark -->",
-        "### grahspj PR benchmark",
+        "<!-- jaxsedfit benchmark -->",
+        "### jaxsedfit PR benchmark",
         "",
         "Benchmark input: fixed-z Fairall 9 photometry from `notebooks/04_fairall9_fake_photoz.ipynb`.",
         "",
@@ -580,11 +580,11 @@ def _add_run_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--label", default="benchmark")
     parser.add_argument("--sha", default=os.getenv("GITHUB_SHA", "local"))
-    parser.add_argument("--dsps-ssp-fn", default=os.getenv("GRAHSPJ_BENCH_DSPS_SSP_FN", str(DEFAULT_DSP_SSP)))
-    parser.add_argument("--map-steps", type=int, default=int(os.getenv("GRAHSPJ_BENCH_MAP_STEPS", "40")))
-    parser.add_argument("--repeats", type=int, default=int(os.getenv("GRAHSPJ_BENCH_REPEATS", "100")))
-    parser.add_argument("--component-repeats", type=int, default=int(os.getenv("GRAHSPJ_BENCH_COMPONENT_REPEATS", "100")))
-    parser.add_argument("--trials", type=int, default=int(os.getenv("GRAHSPJ_BENCH_TRIALS", "3")))
+    parser.add_argument("--dsps-ssp-fn", default=os.getenv("JAXSEDFIT_BENCH_DSPS_SSP_FN", str(DEFAULT_DSP_SSP)))
+    parser.add_argument("--map-steps", type=int, default=int(os.getenv("JAXSEDFIT_BENCH_MAP_STEPS", "40")))
+    parser.add_argument("--repeats", type=int, default=int(os.getenv("JAXSEDFIT_BENCH_REPEATS", "100")))
+    parser.add_argument("--component-repeats", type=int, default=int(os.getenv("JAXSEDFIT_BENCH_COMPONENT_REPEATS", "100")))
+    parser.add_argument("--trials", type=int, default=int(os.getenv("JAXSEDFIT_BENCH_TRIALS", "3")))
 
 
 def main() -> None:

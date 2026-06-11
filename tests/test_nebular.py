@@ -2,7 +2,7 @@ import numpy as np
 from numpyro.handlers import seed, substitute, trace
 from pathlib import Path
 
-from grahspj.config import (
+from jaxsedfit.config import (
     AGNConfig,
     EmissionLineTemplate,
     FeIITemplate,
@@ -15,8 +15,8 @@ from grahspj.config import (
     Observation,
     PhotometryData,
 )
-from grahspj.model import _cigale_nebular_correction, grahsp_photometric_model
-from grahspj.preload import _load_nebular_templates_jax, build_model_context
+from jaxsedfit.model import _cigale_nebular_correction, grahsp_photometric_model
+from jaxsedfit.preload import _load_nebular_templates_jax, build_model_context
 
 
 REFERENCE = Path(__file__).parent / "fixtures" / "cigale_v2025_1_nebular_reference.npz"
@@ -49,9 +49,9 @@ def _patch_ssp(monkeypatch):
         ssp_wave = np.array([100.0, 500.0, 900.0, 2000.0, 5000.0, 10000.0])
         ssp_flux = np.ones((4, 4, 6))
 
-    monkeypatch.setattr("grahspj.preload._load_ssp_templates", lambda fn: _SSPData())
-    monkeypatch.setattr("grahspj.preload._SSP_DATA_CACHE", {})
-    monkeypatch.setattr("grahspj.preload._HOST_BASIS_CACHE", {})
+    monkeypatch.setattr("jaxsedfit.preload._load_ssp_templates", lambda fn: _SSPData())
+    monkeypatch.setattr("jaxsedfit.preload._SSP_DATA_CACHE", {})
+    monkeypatch.setattr("jaxsedfit.preload._HOST_BASIS_CACHE", {})
 
 
 def test_nebular_config_validates_escape_and_dust_fraction():
@@ -73,8 +73,8 @@ def test_cigale_nebular_correction_limits():
 
 
 def test_vendored_nebular_resources_are_cigale_v2025_1():
-    with np.load("src/grahspj/resources/nebular/nebular_lines.npz") as lines, np.load(
-        "src/grahspj/resources/nebular/nebular_continuum.npz"
+    with np.load("src/jaxsedfit/resources/nebular/nebular_lines.npz") as lines, np.load(
+        "src/jaxsedfit/resources/nebular/nebular_continuum.npz"
     ) as cont:
         assert str(lines["cigale_version"]) == "2025.1"
         assert str(cont["cigale_version"]) == "2025.1"
@@ -86,8 +86,8 @@ def test_vendored_nebular_resources_are_cigale_v2025_1():
 
 
 def test_nebular_resources_match_cigale_v2025_1_static_reference():
-    with np.load(REFERENCE) as ref, np.load("src/grahspj/resources/nebular/nebular_lines.npz") as lines, np.load(
-        "src/grahspj/resources/nebular/nebular_continuum.npz"
+    with np.load(REFERENCE) as ref, np.load("src/jaxsedfit/resources/nebular/nebular_lines.npz") as lines, np.load(
+        "src/jaxsedfit/resources/nebular/nebular_continuum.npz"
     ) as cont:
         z_idx = int(np.where(np.isclose(lines["z_grid"], 0.02))[0][0])
         u_idx = int(np.where(np.isclose(lines["logu_grid"], -2.0))[0][0])
@@ -196,7 +196,7 @@ def test_fixed_nebular_line_profile_skips_dynamic_gaussian(monkeypatch):
     def _raise_if_called(*args, **kwargs):
         raise AssertionError("Fixed nebular line profile should skip dynamic Gaussian construction.")
 
-    monkeypatch.setattr("grahspj.model._flux_conserving_line_gaussians", _raise_if_called)
+    monkeypatch.setattr("jaxsedfit.model._flux_conserving_line_gaussians", _raise_if_called)
     tr = trace(seed(lambda: grahsp_photometric_model(context, include_components=True), 4)).get_trace()
 
     assert np.any(np.asarray(tr["nebular_lines_rest_sed"]["value"]) > 0.0)

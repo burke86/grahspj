@@ -1,7 +1,7 @@
 import numpy as np
 from numpyro.handlers import seed, trace
 
-from grahspj.config import (
+from jaxsedfit.config import (
     AGNConfig,
     EmissionLineTemplate,
     FeIITemplate,
@@ -14,9 +14,9 @@ from grahspj.config import (
     Observation,
     PhotometryData,
 )
-from grahspj.core import GRAHSPJ
-from grahspj.model import _default_gal_lgmet_loc, _mass_metallicity_relation_logprior, _luminosity_distance_m_jax, grahsp_photometric_model
-from grahspj.preload import build_model_context
+from jaxsedfit.core import JAXSEDFit
+from jaxsedfit.model import _default_gal_lgmet_loc, _mass_metallicity_relation_logprior, _luminosity_distance_m_jax, grahsp_photometric_model
+from jaxsedfit.preload import build_model_context
 
 
 def _mock_config():
@@ -46,8 +46,8 @@ def test_diffstar_host_model_exposes_log_stellar_mass(monkeypatch):
         ssp_wave = np.array([900.0, 2000.0, 5000.0, 10000.0])
         ssp_flux = np.ones((4, 4, 4))
 
-    monkeypatch.setattr("grahspj.preload._load_ssp_templates", lambda fn: _SSPData())
-    monkeypatch.setattr("grahspj.preload._SSP_DATA_CACHE", {})
+    monkeypatch.setattr("jaxsedfit.preload._load_ssp_templates", lambda fn: _SSPData())
+    monkeypatch.setattr("jaxsedfit.preload._SSP_DATA_CACHE", {})
     cfg = _mock_config()
     cfg.galaxy.dsps_ssp_fn = "fake-diffstar.h5"
     cfg.galaxy.host_sfh_model = "diffstar"
@@ -76,8 +76,8 @@ def test_delayed_host_model_is_default(monkeypatch):
         ssp_wave = np.array([900.0, 2000.0, 5000.0, 10000.0])
         ssp_flux = np.ones((4, 4, 4))
 
-    monkeypatch.setattr("grahspj.preload._load_ssp_templates", lambda fn: _SSPData())
-    monkeypatch.setattr("grahspj.preload._SSP_DATA_CACHE", {})
+    monkeypatch.setattr("jaxsedfit.preload._load_ssp_templates", lambda fn: _SSPData())
+    monkeypatch.setattr("jaxsedfit.preload._SSP_DATA_CACHE", {})
     cfg = _mock_config()
     cfg.galaxy.dsps_ssp_fn = "fake-delayed.h5"
     context = build_model_context(cfg)
@@ -100,8 +100,8 @@ def test_agn_type_2_uses_sy2_narrow_lines_only(monkeypatch):
         ssp_wave = np.array([900.0, 2000.0, 5000.0, 10000.0])
         ssp_flux = np.ones((4, 4, 4))
 
-    monkeypatch.setattr("grahspj.preload._load_ssp_templates", lambda fn: _SSPData())
-    monkeypatch.setattr("grahspj.preload._SSP_DATA_CACHE", {})
+    monkeypatch.setattr("jaxsedfit.preload._load_ssp_templates", lambda fn: _SSPData())
+    monkeypatch.setattr("jaxsedfit.preload._SSP_DATA_CACHE", {})
     cfg = _mock_config()
     cfg.galaxy.dsps_ssp_fn = "fake-diffstar.h5"
     cfg.agn.agn_type = 2
@@ -122,8 +122,8 @@ def test_agn_type_3_uses_liner_lines_only(monkeypatch):
         ssp_wave = np.array([900.0, 2000.0, 5000.0, 10000.0])
         ssp_flux = np.ones((4, 4, 4))
 
-    monkeypatch.setattr("grahspj.preload._load_ssp_templates", lambda fn: _SSPData())
-    monkeypatch.setattr("grahspj.preload._SSP_DATA_CACHE", {})
+    monkeypatch.setattr("jaxsedfit.preload._load_ssp_templates", lambda fn: _SSPData())
+    monkeypatch.setattr("jaxsedfit.preload._SSP_DATA_CACHE", {})
     cfg = _mock_config()
     cfg.galaxy.dsps_ssp_fn = "fake-diffstar.h5"
     cfg.agn.agn_type = 3
@@ -144,8 +144,8 @@ def test_energy_balance_can_be_disabled(monkeypatch):
         ssp_wave = np.array([900.0, 2000.0, 5000.0, 10000.0])
         ssp_flux = np.ones((4, 4, 4))
 
-    monkeypatch.setattr("grahspj.preload._load_ssp_templates", lambda fn: _SSPData())
-    monkeypatch.setattr("grahspj.preload._SSP_DATA_CACHE", {})
+    monkeypatch.setattr("jaxsedfit.preload._load_ssp_templates", lambda fn: _SSPData())
+    monkeypatch.setattr("jaxsedfit.preload._SSP_DATA_CACHE", {})
     cfg = _mock_config()
     cfg.galaxy.dsps_ssp_fn = "fake-diffstar.h5"
     cfg.galaxy.use_energy_balance = False
@@ -164,8 +164,8 @@ def test_optional_mass_metallicity_prior_is_exposed(monkeypatch):
         ssp_wave = np.array([900.0, 2000.0, 5000.0, 10000.0])
         ssp_flux = np.ones((4, 4, 4))
 
-    monkeypatch.setattr("grahspj.preload._load_ssp_templates", lambda fn: _SSPData())
-    monkeypatch.setattr("grahspj.preload._SSP_DATA_CACHE", {})
+    monkeypatch.setattr("jaxsedfit.preload._load_ssp_templates", lambda fn: _SSPData())
+    monkeypatch.setattr("jaxsedfit.preload._SSP_DATA_CACHE", {})
     cfg = _mock_config()
     cfg.galaxy.dsps_ssp_fn = "fake-diffstar.h5"
     cfg.prior_config["mass_metallicity_relation"] = {
@@ -190,8 +190,8 @@ def test_mass_metallicity_prior_is_enabled_by_default(monkeypatch):
         ssp_wave = np.array([900.0, 2000.0, 5000.0, 10000.0])
         ssp_flux = np.ones((4, 4, 4))
 
-    monkeypatch.setattr("grahspj.preload._load_ssp_templates", lambda fn: _SSPData())
-    monkeypatch.setattr("grahspj.preload._SSP_DATA_CACHE", {})
+    monkeypatch.setattr("jaxsedfit.preload._load_ssp_templates", lambda fn: _SSPData())
+    monkeypatch.setattr("jaxsedfit.preload._SSP_DATA_CACHE", {})
     cfg = _mock_config()
     cfg.galaxy.dsps_ssp_fn = "fake-diffstar.h5"
     context = build_model_context(cfg)
@@ -232,8 +232,8 @@ def test_mass_metallicity_prior_can_be_disabled(monkeypatch):
         ssp_wave = np.array([900.0, 2000.0, 5000.0, 10000.0])
         ssp_flux = np.ones((4, 4, 4))
 
-    monkeypatch.setattr("grahspj.preload._load_ssp_templates", lambda fn: _SSPData())
-    monkeypatch.setattr("grahspj.preload._SSP_DATA_CACHE", {})
+    monkeypatch.setattr("jaxsedfit.preload._load_ssp_templates", lambda fn: _SSPData())
+    monkeypatch.setattr("jaxsedfit.preload._SSP_DATA_CACHE", {})
     cfg = _mock_config()
     cfg.galaxy.dsps_ssp_fn = "fake-diffstar.h5"
     cfg.prior_config["mass_metallicity_relation"] = {"enabled": False}
@@ -252,8 +252,8 @@ def test_uniform_log_stellar_mass_prior_is_supported(monkeypatch):
         ssp_wave = np.array([900.0, 2000.0, 5000.0, 10000.0])
         ssp_flux = np.ones((4, 4, 4))
 
-    monkeypatch.setattr("grahspj.preload._load_ssp_templates", lambda fn: _SSPData())
-    monkeypatch.setattr("grahspj.preload._SSP_DATA_CACHE", {})
+    monkeypatch.setattr("jaxsedfit.preload._load_ssp_templates", lambda fn: _SSPData())
+    monkeypatch.setattr("jaxsedfit.preload._SSP_DATA_CACHE", {})
     cfg = _mock_config()
     cfg.galaxy.dsps_ssp_fn = "fake-diffstar.h5"
     cfg.prior_config["log_stellar_mass"] = {"dist": "uniform", "low": 6.0, "high": 8.0}
@@ -271,8 +271,8 @@ def test_tabulated_redshift_pdf_prior_is_supported(monkeypatch):
         ssp_wave = np.array([900.0, 2000.0, 5000.0, 10000.0])
         ssp_flux = np.ones((4, 4, 4))
 
-    monkeypatch.setattr("grahspj.preload._load_ssp_templates", lambda fn: _SSPData())
-    monkeypatch.setattr("grahspj.preload._SSP_DATA_CACHE", {})
+    monkeypatch.setattr("jaxsedfit.preload._load_ssp_templates", lambda fn: _SSPData())
+    monkeypatch.setattr("jaxsedfit.preload._SSP_DATA_CACHE", {})
     cfg = _mock_config()
     cfg.galaxy.dsps_ssp_fn = "fake-diffstar.h5"
     cfg.observation.fit_redshift = True
@@ -300,7 +300,7 @@ def test_luminosity_distance_jax_depends_on_redshift():
 
 
 def test_summary_uses_log_stellar_mass_and_host_weights():
-    fitter = GRAHSPJ.__new__(GRAHSPJ)
+    fitter = JAXSEDFit.__new__(JAXSEDFit)
     fitter.samples = {
         "log_stellar_mass": np.array([10.2, 10.4]),
         "host_age_weights": np.array([[0.2, 0.8], [0.3, 0.7]]),
@@ -323,7 +323,7 @@ def test_summary_uses_log_stellar_mass_and_host_weights():
             )()
         },
     )()
-    summary = GRAHSPJ.summary(fitter)
+    summary = JAXSEDFit.summary(fitter)
 
     assert "log_stellar_mass_fit" in summary
     assert "host_age_weighted_gyr" in summary
@@ -332,7 +332,7 @@ def test_summary_uses_log_stellar_mass_and_host_weights():
 
 
 def test_fit_dispatch_methods(monkeypatch):
-    fitter = GRAHSPJ.__new__(GRAHSPJ)
+    fitter = JAXSEDFit.__new__(JAXSEDFit)
     calls = []
 
     def _fit_map(self, **kwargs):
@@ -347,11 +347,11 @@ def test_fit_dispatch_methods(monkeypatch):
         calls.append(("ns", kwargs))
         return {"nested": "ok"}
 
-    monkeypatch.setattr(GRAHSPJ, "fit_map", _fit_map)
-    monkeypatch.setattr(GRAHSPJ, "fit_nuts", _fit_nuts)
-    monkeypatch.setattr(GRAHSPJ, "fit_ns", _fit_ns)
+    monkeypatch.setattr(JAXSEDFit, "fit_map", _fit_map)
+    monkeypatch.setattr(JAXSEDFit, "fit_nuts", _fit_nuts)
+    monkeypatch.setattr(JAXSEDFit, "fit_ns", _fit_ns)
 
-    out = GRAHSPJ.fit(fitter, fit_method="optax+nuts", progress_bar=True, steps=7, learning_rate=1e-2, num_warmup=3, num_samples=4)
+    out = JAXSEDFit.fit(fitter, fit_method="optax+nuts", progress_bar=True, steps=7, learning_rate=1e-2, num_warmup=3, num_samples=4)
     assert list(out) == ["map", "nuts"]
     assert calls[0][0] == "optax"
     assert calls[0][1]["steps"] == 7
@@ -363,19 +363,19 @@ def test_fit_dispatch_methods(monkeypatch):
     assert calls[1][1]["progress_bar"] is True
 
     calls.clear()
-    GRAHSPJ.fit(fitter, fit_method="optax", progress_bar=False, steps=2)
+    JAXSEDFit.fit(fitter, fit_method="optax", progress_bar=False, steps=2)
     assert calls == [("optax", {"steps": 2, "progress_bar": False, "staged": True})]
 
     calls.clear()
-    GRAHSPJ.fit(fitter, fit_method="optax", progress_bar=False, steps=2, staged_map=False)
+    JAXSEDFit.fit(fitter, fit_method="optax", progress_bar=False, steps=2, staged_map=False)
     assert calls == [("optax", {"steps": 2, "progress_bar": False, "staged": False})]
 
     calls.clear()
-    GRAHSPJ.fit(fitter, fit_method="nuts", progress_bar=False, num_warmup=2)
+    JAXSEDFit.fit(fitter, fit_method="nuts", progress_bar=False, num_warmup=2)
     assert calls == [("nuts", {"num_warmup": 2, "progress_bar": False})]
 
     calls.clear()
-    GRAHSPJ.fit(
+    JAXSEDFit.fit(
         fitter,
         fit_method="ns",
         progress_bar=False,
@@ -431,15 +431,15 @@ def test_fit_ns_populates_samples(monkeypatch):
                 "host_lgmet_weights": np.tile(np.array([[0.6, 0.4]]), (num_samples, 1)),
             }
 
-    monkeypatch.setattr("grahspj.core._get_nested_sampler_cls", lambda: _FakeNestedSampler)
+    monkeypatch.setitem(JAXSEDFit.fit_ns.__globals__, "_get_nested_sampler_cls", lambda: _FakeNestedSampler)
 
-    fitter = GRAHSPJ.__new__(GRAHSPJ)
+    fitter = JAXSEDFit.__new__(JAXSEDFit)
     fitter.config = _mock_config()
     fitter.config.inference.num_samples = 5
     fitter.predictive = {"stale": True}
     fitter._model = lambda: None
 
-    result = GRAHSPJ.fit_ns(
+    result = JAXSEDFit.fit_ns(
         fitter,
         num_live_points=17,
         max_samples=123,
@@ -486,21 +486,21 @@ def test_fit_ns_passes_explicit_none_max_samples(monkeypatch):
         def get_samples(self, rng_key, num_samples, *, group_by_chain=False):
             return {"log_stellar_mass": np.linspace(10.0, 10.4, num_samples)}
 
-    monkeypatch.setattr("grahspj.core._get_nested_sampler_cls", lambda: _FakeNestedSampler)
+    monkeypatch.setitem(JAXSEDFit.fit_ns.__globals__, "_get_nested_sampler_cls", lambda: _FakeNestedSampler)
 
-    fitter = GRAHSPJ.__new__(GRAHSPJ)
+    fitter = JAXSEDFit.__new__(JAXSEDFit)
     fitter.config = _mock_config()
     fitter.config.inference.num_samples = 5
     fitter.predictive = None
     fitter._model = lambda: None
 
-    GRAHSPJ.fit_ns(fitter, num_live_points=17, progress_bar=False)
+    JAXSEDFit.fit_ns(fitter, num_live_points=17, progress_bar=False)
 
     assert captured["constructor_kwargs"]["max_samples"] is None
 
 
 def test_ns_samples_work_with_summary_and_predict(monkeypatch):
-    fitter = GRAHSPJ.__new__(GRAHSPJ)
+    fitter = JAXSEDFit.__new__(JAXSEDFit)
     fitter.samples = {
         "log_stellar_mass": np.array([10.2, 10.4]),
         "host_age_weights": np.array([[0.2, 0.8], [0.3, 0.7]]),
@@ -523,10 +523,10 @@ def test_ns_samples_work_with_summary_and_predict(monkeypatch):
     )()
 
     expected_predictive = {"pred_fluxes": np.array([[1.0, 2.0]])}
-    monkeypatch.setattr(GRAHSPJ, "_compute_predictive", lambda self: expected_predictive)
+    monkeypatch.setattr(JAXSEDFit, "_compute_predictive", lambda self: expected_predictive)
 
-    summary = GRAHSPJ.summary(fitter)
-    pred = GRAHSPJ.predict(fitter)
+    summary = JAXSEDFit.summary(fitter)
+    pred = JAXSEDFit.predict(fitter)
 
     assert "log_stellar_mass_fit" in summary
     assert np.isclose(summary["log_stellar_mass_fit"], 10.3)

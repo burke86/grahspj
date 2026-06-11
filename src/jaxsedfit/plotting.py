@@ -340,7 +340,7 @@ def plot_fit_sed(
     show: bool = False,
     annotate_band_names: bool = True,
 ):
-    """Render a component SED plot for a fitted grahspj object."""
+    """Render a component SED plot for a fitted jaxsedfit object."""
     pred = fitter.predict(posterior=posterior)
     obs_wave = _median_site(pred, "obs_wave")
     x_min = min(1.0e2, float(np.nanmin(obs_wave)))

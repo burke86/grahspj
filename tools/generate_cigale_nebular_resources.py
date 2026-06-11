@@ -92,13 +92,13 @@ def convert_nebular_tables(source_dir: Path, output_dir: Path) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Convert CIGALE v2025.1 nebular source tables to grahspj resources.")
+    parser = argparse.ArgumentParser(description="Convert CIGALE v2025.1 nebular source tables to jaxsedfit resources.")
     parser.add_argument("source_dir", type=Path, help="Path to CIGALE database_builder/nebular/data.")
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("src/grahspj/resources/nebular"),
-        help="Output directory for compact grahspj .npz resources.",
+        default=Path("src/jaxsedfit/resources/nebular"),
+        help="Output directory for compact jaxsedfit .npz resources.",
     )
     args = parser.parse_args()
     convert_nebular_tables(args.source_dir, args.output_dir)
