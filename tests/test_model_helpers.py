@@ -62,6 +62,8 @@ from grahspj.preload import (
     _build_fixed_filter_projection_matrices,
     _build_host_basis,
     _lnu_lsun_per_hz_to_llambda_w_per_a_np,
+    _mw_band_attenuation_factor,
+    _mw_pixel_attenuation_factor,
     _load_vendored_filter_curve,
     _load_vendored_dale2014_templates,
 )
@@ -589,6 +591,56 @@ def test_build_context_with_inline_templates(monkeypatch):
     assert context.spec_mask.tolist() == [True, False, True]
     assert context.spec_spectrum_index.tolist() == [0, 0, 0]
     assert context.spec_instruments == ("test",)
+
+
+def test_mw_dereddening_applies_to_photometry_and_spectra(monkeypatch):
+    class _SSPData:
+        ssp_lgmet = np.array([-1.0, 0.0])
+        ssp_lg_age_gyr = np.array([-1.0, 0.0])
+        ssp_wave = np.array([900.0, 2000.0, 5000.0, 10000.0])
+        ssp_flux = np.ones((2, 2, 4))
+
+    monkeypatch.setattr("grahspj.preload._load_ssp_templates", lambda fn: _SSPData())
+    monkeypatch.setattr("grahspj.preload._get_sfd_query", lambda: (lambda coord: 0.1))
+
+    filt_wave = np.asarray([1000.0, 2000.0, 3000.0])
+    filt_trans = np.asarray([0.0, 1.0, 0.0])
+    spec_wave = np.asarray([3500.0, 4500.0, 5500.0])
+    spec_flux = np.asarray([0.1, 0.2, 0.15])
+    spec_err = np.asarray([0.01, 0.02, 0.015])
+    cfg = FitConfig(
+        observation=Observation(
+            object_id="obj",
+            redshift=0.1,
+            ra=180.0,
+            dec=0.0,
+            apply_mw_deredden=True,
+        ),
+        photometry=PhotometryData(filter_names=["f1"], fluxes=[1.0], errors=[0.1]),
+        filters=FilterSet(curves=[FilterCurve(name="f1", wave=filt_wave, transmission=filt_trans)], use_grahsp_database=False),
+        galaxy=GalaxyConfig(dsps_ssp_fn="fake.h5", n_wave=64),
+        agn=AGNConfig(),
+        likelihood=LikelihoodConfig(),
+        spectroscopy=SpectroscopyData(
+            wave_obs=spec_wave,
+            fluxes=spec_flux,
+            errors=spec_err,
+            instrument="test",
+        ),
+        spectroscopy_config=SpectroscopyConfig(enabled=True),
+        inference=InferenceConfig(map_steps=2),
+    )
+
+    context = build_model_context(cfg)
+
+    loaded_filter = context.filters[0]
+    band_factor = _mw_band_attenuation_factor(loaded_filter.work_wave, loaded_filter.transmission, 0.1)
+    spec_factors = _mw_pixel_attenuation_factor(spec_wave, 0.1)
+    assert context.mw_ebv == pytest.approx(0.1)
+    np.testing.assert_allclose(context.fluxes, np.asarray([1.0]) / band_factor)
+    np.testing.assert_allclose(context.errors, np.asarray([0.1]) / band_factor)
+    np.testing.assert_allclose(context.spec_fluxes, spec_flux / spec_factors)
+    np.testing.assert_allclose(context.spec_errors, spec_err / spec_factors)
 
 
 def test_context_accepts_multiple_spectra(monkeypatch):
