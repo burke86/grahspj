@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 
 from .config import FitConfig, fit_config_from_mapping
-from .core import GRAHSPJ
+from .core import JAXSEDFit
 
 
 def _load_config(path: str) -> FitConfig:
@@ -15,7 +15,7 @@ def _load_config(path: str) -> FitConfig:
     if cfg_path.suffix == ".json":
         with open(cfg_path, "r", encoding="utf-8") as fh:
             return fit_config_from_mapping(json.load(fh))
-    spec = importlib.util.spec_from_file_location("grahspj_user_config", cfg_path)
+    spec = importlib.util.spec_from_file_location("jaxsedfit_user_config", cfg_path)
     if spec is None or spec.loader is None:
         raise RuntimeError(f"Could not load config module from {path}")
     module = importlib.util.module_from_spec(spec)
@@ -34,15 +34,15 @@ def _load_config(path: str) -> FitConfig:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Run the grahspj single-object CLI entrypoint."""
-    parser = argparse.ArgumentParser(description="Run a single-source grahspj fit.")
+    """Run the jaxsedfit single-object CLI entrypoint."""
+    parser = argparse.ArgumentParser(description="Run a single-source jaxsedfit fit.")
     parser.add_argument("config", help="Path to a Python or JSON fit config.")
     parser.add_argument("--method", choices=("map", "nuts"), default="map")
     parser.add_argument("--output-dir", default=".")
     args = parser.parse_args(argv)
 
     config = _load_config(args.config)
-    fitter = GRAHSPJ(config)
+    fitter = JAXSEDFit(config)
     if args.method == "map":
         fitter.fit_map()
     else:

@@ -51,7 +51,7 @@ jobs:
         with:
           issue-number: ${{ steps.pr-info.outputs.pr }}
           comment-author: "github-actions[bot]"
-          body-includes: "grahspj PR benchmark"
+          body-includes: "jaxsedfit PR benchmark"
 
       - name: Create or update benchmarks comment
         uses: peter-evans/create-or-update-comment@v5

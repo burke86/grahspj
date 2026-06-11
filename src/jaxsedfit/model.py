@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 # Portions of this file are derived from or closely based on GRAHSP/pcigale
-# model logic, translated into JAX/NumPyro for grahspj.
+# model logic, translated into JAX/NumPyro for jaxsedfit.
 # Relevant upstream sources include:
 # - pcigale/creation_modules/activate.py
 # - pcigale/creation_modules/activategtorus.py
@@ -1251,7 +1251,7 @@ def _evaluate_jaxqsofit_backend(
     fixed_narrow_fwhm_kms=None,
     fixed_narrow_amp_scale=None,
 ):
-    """Evaluate optional jaxqsofit spectral components inside grahspj."""
+    """Evaluate optional jaxqsofit spectral components inside jaxsedfit."""
     try:
         from jaxqsofit.components import SpectralComponentConfig, evaluate_joint_spectral_components
     except Exception as exc:  # pragma: no cover - exercised only without optional dependency
@@ -1297,7 +1297,7 @@ def evaluate_photometric_state(
     return_state: bool = True,
     force_component_fluxes: bool = False,
 ):
-    """Evaluate one grahspj photometric model state inside a NumPyro trace."""
+    """Evaluate one jaxsedfit photometric model state inside a NumPyro trace."""
     cfg = context.fit_config
     prior_config = cfg.prior_config
     rest_wave = context.rest_wave_jax
@@ -1872,7 +1872,7 @@ def evaluate_photometric_state(
                 spec_host_model_fluxes = _flambda_to_mjy(spec_wave_obs, spec_host_lambda)
                 spec_model_fluxes = _flambda_to_mjy(spec_wave_obs, spec_model_lambda)
             spec_continuum_model_fluxes = spec_model_fluxes
-        elif backend != "grahspj":
+        elif backend != "jaxsedfit":
             raise ValueError(f"Unsupported spectroscopy backend: {cfg.spectroscopy_config.backend!r}")
         else:
             spec_model_lambda = jnp.interp(spec_wave_obs, obs_wave, total_obs, left=0.0, right=0.0)
@@ -2219,7 +2219,7 @@ def grahsp_photometric_model(
     include_sed_agn_features: bool = True,
     include_spectral_features: bool = True,
 ):
-    """NumPyro model for one grahspj photometric fit or predictive expansion."""
+    """NumPyro model for one jaxsedfit photometric fit or predictive expansion."""
     return evaluate_photometric_state(
         context,
         include_components=include_components,

@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-# This module loads vendored resources and model assets used by grahspj.
+# This module loads vendored resources and model assets used by jaxsedfit.
 # Some of those bundled resources originate from GRAHSP/pcigale template and
 # filter data distributed under the CeCILL v2 license.
 # See LICENSES/CeCILL-v2.txt, LICENSES/THIRD_PARTY_NOTICES.md, and the README
-# files in src/grahspj/resources/ for provenance details.
+# files in src/jaxsedfit/resources/ for provenance details.
 
 import importlib.util
 from importlib import resources
@@ -206,7 +206,7 @@ def _empty_host_basis_jax(rest_wave: np.ndarray, gal_t_table: np.ndarray) -> Hos
 
 @dataclass
 class ModelContext:
-    """Static arrays and metadata required by one grahspj model evaluation."""
+    """Static arrays and metadata required by one jaxsedfit model evaluation."""
     fit_config: FitConfig
     rest_wave: np.ndarray
     obs_wave: np.ndarray
@@ -289,8 +289,8 @@ _FILTER_NAME_ALIASES = {
     "W4": "wise.W4",
 }
 def _package_resource_path(relpath: str) -> Path:
-    """Return an absolute path to a packaged grahspj resource."""
-    return Path(str(resources.files("grahspj").joinpath(relpath)))
+    """Return an absolute path to a packaged jaxsedfit resource."""
+    return Path(str(resources.files("jaxsedfit").joinpath(relpath)))
 
 _registry_path = _package_resource_path("resources/filters/filter_registry.txt")
 data = np.loadtxt(_registry_path, dtype=str, comments="#")
@@ -482,7 +482,7 @@ def _load_filter_type(path: str) -> str:
 
 
 def _load_vendored_filter_curve(filter_name: str) -> FilterCurve | None:
-    """Load one vendored filter curve if grahspj ships it locally."""
+    """Load one vendored filter curve if jaxsedfit ships it locally."""
     relpath = _VENDORED_FILTER_FILES.get(filter_name)
     if relpath is None:
         return None
@@ -1434,7 +1434,7 @@ def _build_fixed_local_line_projection_cache_jax(
 
 
 def build_model_context(cfg: FitConfig) -> ModelContext:
-    """Construct the static context consumed by the grahspj NumPyro model."""
+    """Construct the static context consumed by the jaxsedfit NumPyro model."""
     cfg.validate()
     raw_fluxes = np.asarray(cfg.photometry.fluxes, dtype=float)
     raw_errors = np.asarray(cfg.photometry.errors, dtype=float)

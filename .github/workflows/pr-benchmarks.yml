@@ -53,29 +53,29 @@ jobs:
 
       - name: Run likelihood benchmarks
         env:
-          GRAHSPJ_BENCH_MAP_STEPS: "40"
-          GRAHSPJ_BENCH_REPEATS: "100"
-          GRAHSPJ_BENCH_COMPONENT_REPEATS: "100"
-          GRAHSPJ_BENCH_TRIALS: "3"
+          JAXSEDFIT_BENCH_MAP_STEPS: "40"
+          JAXSEDFIT_BENCH_REPEATS: "100"
+          JAXSEDFIT_BENCH_COMPONENT_REPEATS: "100"
+          JAXSEDFIT_BENCH_TRIALS: "3"
           MPLCONFIGDIR: ${{ runner.temp }}/matplotlib
         run: |
           mkdir -p benchmark-artifacts
 
           python -m pip install --force-reinstall --no-deps -e benchmark-base
-          python benchmark-head/benchmarks/grahspj_pr_benchmark.py run \
+          python benchmark-head/benchmarks/jaxsedfit_pr_benchmark.py run \
             --output-dir benchmark-artifacts/base \
             --label base \
             --sha "${{ github.event.pull_request.base.sha || 'main' }}" \
             --dsps-ssp-fn tempdata.h5
 
           python -m pip install --force-reinstall --no-deps -e benchmark-head
-          python benchmark-head/benchmarks/grahspj_pr_benchmark.py run \
+          python benchmark-head/benchmarks/jaxsedfit_pr_benchmark.py run \
             --output-dir benchmark-artifacts/head \
             --label pr \
             --sha "${{ github.event.pull_request.head.sha || github.sha }}" \
             --dsps-ssp-fn tempdata.h5
 
-          python benchmark-head/benchmarks/grahspj_pr_benchmark.py compare \
+          python benchmark-head/benchmarks/jaxsedfit_pr_benchmark.py compare \
             --baseline-json benchmark-artifacts/base/benchmark.json \
             --candidate-json benchmark-artifacts/head/benchmark.json \
             --output-dir benchmark-artifacts

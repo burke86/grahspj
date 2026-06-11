@@ -4,7 +4,7 @@ import jax
 from types import SimpleNamespace
 from numpyro.handlers import seed, substitute, trace
 
-from grahspj.config import (
+from jaxsedfit.config import (
     AGNConfig,
     EmissionLineTemplate,
     FeIITemplate,
@@ -23,8 +23,8 @@ from grahspj.config import (
     _coerce_spectroscopy_config,
     fit_config_from_mapping,
 )
-from grahspj.core import GRAHSPJ
-from grahspj.model import (
+from jaxsedfit.core import JAXSEDFit
+from jaxsedfit.model import (
     GRAHSP_BIATTENUATION_BREAK_A,
     GRAHSP_PL_BEND_LOC_A,
     GRAHSP_PL_BEND_WIDTH,
@@ -52,8 +52,8 @@ from grahspj.model import (
     grahsp_photometric_model,
     photometric_loglike,
 )
-from grahspj.preload import _build_fixed_igm_jax, _build_igm_cache_jax, build_model_context
-from grahspj.preload import (
+from jaxsedfit.preload import _build_fixed_igm_jax, _build_igm_cache_jax, build_model_context
+from jaxsedfit.preload import (
     ModelContext,
     PackedFilters,
     PackedFiltersJax,
@@ -129,7 +129,7 @@ def test_agn_disk_grahsp_default_wavelength_parameters_are_converted_to_angstrom
         bend_width_nm=10.0,
     )
     grahsp_nm *= -np.expm1(-(10000.0 / wave_nm))
-    grahspj_a = np.asarray(
+    jaxsedfit_a = np.asarray(
         _powerlaw_jax(
             wave_a,
             norm=2.0,
@@ -142,7 +142,7 @@ def test_agn_disk_grahsp_default_wavelength_parameters_are_converted_to_angstrom
         )
     )
 
-    np.testing.assert_allclose(grahspj_a, grahsp_nm, rtol=1.0e-12, atol=0.0)
+    np.testing.assert_allclose(jaxsedfit_a, grahsp_nm, rtol=1.0e-12, atol=0.0)
 
 
 def test_flux_conserving_lines_preserve_integrated_luminosity():
@@ -606,7 +606,7 @@ def test_build_context_with_inline_templates(monkeypatch):
         ssp_wave = np.array([900.0, 2000.0, 5000.0, 10000.0])
         ssp_flux = np.ones((2, 2, 4))
 
-    monkeypatch.setattr("grahspj.preload._load_ssp_templates", lambda fn: _SSPData())
+    monkeypatch.setattr("jaxsedfit.preload._load_ssp_templates", lambda fn: _SSPData())
 
     cfg = FitConfig(
         observation=Observation(object_id="obj", redshift=0.1),
@@ -656,8 +656,8 @@ def test_mw_dereddening_applies_to_photometry_and_spectra(monkeypatch):
         ssp_wave = np.array([900.0, 2000.0, 5000.0, 10000.0])
         ssp_flux = np.ones((2, 2, 4))
 
-    monkeypatch.setattr("grahspj.preload._load_ssp_templates", lambda fn: _SSPData())
-    monkeypatch.setattr("grahspj.preload._get_sfd_query", lambda: (lambda coord: 0.1))
+    monkeypatch.setattr("jaxsedfit.preload._load_ssp_templates", lambda fn: _SSPData())
+    monkeypatch.setattr("jaxsedfit.preload._get_sfd_query", lambda: (lambda coord: 0.1))
 
     filt_wave = np.asarray([1000.0, 2000.0, 3000.0])
     filt_trans = np.asarray([0.0, 1.0, 0.0])
@@ -706,7 +706,7 @@ def test_context_accepts_multiple_spectra(monkeypatch):
         ssp_wave = np.array([100.0, 500.0, 900.0, 2000.0, 5000.0, 10000.0])
         ssp_flux = np.ones((4, 4, 6))
 
-    monkeypatch.setattr("grahspj.preload._load_ssp_templates", lambda fn: _SSPData())
+    monkeypatch.setattr("jaxsedfit.preload._load_ssp_templates", lambda fn: _SSPData())
 
     cfg = FitConfig(
         observation=Observation(object_id="obj", redshift=0.1),
@@ -820,7 +820,7 @@ def test_jaxqsofit_joint_backend_builds_flux_scaled_smart_priors(monkeypatch):
         ssp_wave = np.array([900.0, 2000.0, 5000.0, 10000.0])
         ssp_flux = np.ones((2, 2, 4))
 
-    monkeypatch.setattr("grahspj.preload._load_ssp_templates", lambda fn: _SSPData())
+    monkeypatch.setattr("jaxsedfit.preload._load_ssp_templates", lambda fn: _SSPData())
 
     cfg = FitConfig(
         observation=Observation(object_id="obj", redshift=0.1),
@@ -860,7 +860,7 @@ def test_context_builds_spectrum_resolution_host_basis(monkeypatch):
         ssp_wave = np.array([900.0, 2000.0, 5000.0, 10000.0])
         ssp_flux = np.ones((2, 2, 4))
 
-    monkeypatch.setattr("grahspj.preload._load_ssp_templates", lambda fn: _SSPData())
+    monkeypatch.setattr("jaxsedfit.preload._load_ssp_templates", lambda fn: _SSPData())
 
     cfg = FitConfig(
         observation=Observation(object_id="obj", redshift=0.1),
@@ -904,10 +904,10 @@ def test_jaxqsofit_spectrum_resolution_host_basis_uses_host_kinematics(monkeypat
         broadened_grids.append(np.asarray(lnwave).size)
         return spectrum
 
-    monkeypatch.setattr("grahspj.preload._SSP_DATA_CACHE", {})
-    monkeypatch.setattr("grahspj.preload._HOST_BASIS_CACHE", {})
-    monkeypatch.setattr("grahspj.preload._load_ssp_templates", lambda fn: _SSPData())
-    monkeypatch.setattr("grahspj.model._shift_and_broaden_single_spectrum_lnlam", _identity_broaden)
+    monkeypatch.setattr("jaxsedfit.preload._SSP_DATA_CACHE", {})
+    monkeypatch.setattr("jaxsedfit.preload._HOST_BASIS_CACHE", {})
+    monkeypatch.setattr("jaxsedfit.preload._load_ssp_templates", lambda fn: _SSPData())
+    monkeypatch.setattr("jaxsedfit.model._shift_and_broaden_single_spectrum_lnlam", _identity_broaden)
 
     cfg = FitConfig(
         observation=Observation(object_id="obj", redshift=0.1),
@@ -971,7 +971,7 @@ def test_jaxqsofit_backend_always_uses_dynamic_nebular_width(monkeypatch):
         ssp_wave = np.array([900.0, 2000.0, 5000.0, 10000.0])
         ssp_flux = np.ones((2, 2, 4))
 
-    monkeypatch.setattr("grahspj.preload._load_ssp_templates", lambda fn: _SSPData())
+    monkeypatch.setattr("jaxsedfit.preload._load_ssp_templates", lambda fn: _SSPData())
 
     cfg = FitConfig(
         observation=Observation(object_id="obj", redshift=0.0),
@@ -1018,7 +1018,7 @@ def test_jaxqsofit_backend_always_uses_dynamic_nebular_width(monkeypatch):
     assert context.nebular_rest_templates_jax.line_profile_per_photon is None
 
 
-def test_grahspj_model_can_call_jaxqsofit_backend(monkeypatch):
+def test_jaxsedfit_model_can_call_jaxqsofit_backend(monkeypatch):
     pytest.importorskip("jaxqsofit.components")
 
     class _SSPData:
@@ -1027,7 +1027,7 @@ def test_grahspj_model_can_call_jaxqsofit_backend(monkeypatch):
         ssp_wave = np.array([900.0, 2000.0, 5000.0, 10000.0])
         ssp_flux = np.ones((2, 2, 4))
 
-    monkeypatch.setattr("grahspj.preload._load_ssp_templates", lambda fn: _SSPData())
+    monkeypatch.setattr("jaxsedfit.preload._load_ssp_templates", lambda fn: _SSPData())
 
     cfg = FitConfig(
         observation=Observation(object_id="obj", redshift=0.1),
@@ -1106,7 +1106,7 @@ def test_grahspj_model_can_call_jaxqsofit_backend(monkeypatch):
     assert np.asarray(tr["pred_spectrum_fluxes"]["value"]).shape == (3,)
 
 
-def test_grahspj_jaxqsofit_backend_uses_nested_tied_line_config(monkeypatch):
+def test_jaxsedfit_jaxqsofit_backend_uses_nested_tied_line_config(monkeypatch):
     pytest.importorskip("jaxqsofit.components")
 
     class _SSPData:
@@ -1115,7 +1115,7 @@ def test_grahspj_jaxqsofit_backend_uses_nested_tied_line_config(monkeypatch):
         ssp_wave = np.array([900.0, 2000.0, 5000.0, 10000.0])
         ssp_flux = np.ones((2, 2, 4))
 
-    monkeypatch.setattr("grahspj.preload._load_ssp_templates", lambda fn: _SSPData())
+    monkeypatch.setattr("jaxsedfit.preload._load_ssp_templates", lambda fn: _SSPData())
 
     cfg = FitConfig(
         observation=Observation(object_id="obj", redshift=0.0),
@@ -1187,7 +1187,7 @@ def test_grahspj_jaxqsofit_backend_uses_nested_tied_line_config(monkeypatch):
     assert np.asarray(tr["pred_spectrum_fluxes"]["value"]).shape == (3,)
 
 
-def test_grahspj_jaxqsofit_tied_line_backend_runs_svi_jit(monkeypatch):
+def test_jaxsedfit_jaxqsofit_tied_line_backend_runs_svi_jit(monkeypatch):
     pytest.importorskip("jaxqsofit.components")
 
     class _SSPData:
@@ -1196,7 +1196,7 @@ def test_grahspj_jaxqsofit_tied_line_backend_runs_svi_jit(monkeypatch):
         ssp_wave = np.array([900.0, 2000.0, 5000.0, 10000.0])
         ssp_flux = np.ones((2, 2, 4))
 
-    monkeypatch.setattr("grahspj.preload._load_ssp_templates", lambda fn: _SSPData())
+    monkeypatch.setattr("jaxsedfit.preload._load_ssp_templates", lambda fn: _SSPData())
 
     line_table = [
         {
@@ -1248,7 +1248,7 @@ def test_grahspj_jaxqsofit_tied_line_backend_runs_svi_jit(monkeypatch):
         inference=InferenceConfig(map_steps=1, learning_rate=1.0e-3),
     )
 
-    fitter = GRAHSPJ(cfg)
+    fitter = JAXSEDFit(cfg)
     result = fitter.fit_map(steps=1, progress_bar=False)
 
     assert np.asarray(result["losses"]).shape == (1,)
@@ -1271,7 +1271,7 @@ def test_plot_jaxqsofit_spectrum_adapts_joint_predictive(monkeypatch):
 
     monkeypatch.setattr(jaxqsofit.QSOFit, "plot_fig", _fake_plot_fig)
 
-    fitter = GRAHSPJ.__new__(GRAHSPJ)
+    fitter = JAXSEDFit.__new__(JAXSEDFit)
     fitter.config = SimpleNamespace(
         observation=SimpleNamespace(object_id="obj", redshift=1.0),
         spectroscopy_config=SimpleNamespace(backend="jaxqsofit"),
@@ -1309,10 +1309,10 @@ def test_plot_jaxqsofit_spectrum_adapts_joint_predictive(monkeypatch):
     assert np.all(captured["model_total"] > captured["flux"] * 0.0)
     assert np.all(captured["host"] > 0.0)
     assert np.all(captured["line"] > 0.0)
-    assert "grahspj_torus" in captured["custom_components"]
-    assert "grahspj_host_dust" in captured["custom_components"]
-    assert "grahspj_sed_lines" in captured["custom_components"]
-    assert np.nanmax(captured["custom_components"]["grahspj_sed_lines"]) > 0.0
+    assert "jaxsedfit_torus" in captured["custom_components"]
+    assert "jaxsedfit_host_dust" in captured["custom_components"]
+    assert "jaxsedfit_sed_lines" in captured["custom_components"]
+    assert np.nanmax(captured["custom_components"]["jaxsedfit_sed_lines"]) > 0.0
     assert captured["kwargs"]["show_plot"] is False
     assert captured["kwargs"]["plot_residual"] is False
 

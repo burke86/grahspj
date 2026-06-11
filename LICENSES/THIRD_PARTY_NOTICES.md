@@ -2,7 +2,7 @@
 
 ## GRAHSP / pcigale
 
-Portions of `grahspj` are derived from or closely based on code and data from `GRAHSP` / `pcigale`.
+Portions of `jaxsedfit` are derived from or closely based on code and data from `GRAHSP` / `pcigale`.
 
 - Upstream project: `GRAHSP`
 - Upstream license: `CeCILL v2`
@@ -21,7 +21,7 @@ This repository contains JAX/NumPyro ports and modifications of selected model b
 
 ## Vendored resource files
 
-The following bundled resource categories in `src/grahspj/resources/` originate from upstream `GRAHSP` resources or associated template bundles used by `GRAHSP`:
+The following bundled resource categories in `src/jaxsedfit/resources/` originate from upstream `GRAHSP` resources or associated template bundles used by `GRAHSP`:
 
 - `resources/filters/filter_registry.txt`
 - `resources/filters/*`

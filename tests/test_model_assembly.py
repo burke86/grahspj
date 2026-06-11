@@ -1,7 +1,7 @@
 import numpy as np
 from numpyro.handlers import seed, substitute, trace
 
-from grahspj.config import (
+from jaxsedfit.config import (
     AGNConfig,
     EmissionLineTemplate,
     FeIITemplate,
@@ -15,8 +15,8 @@ from grahspj.config import (
     Observation,
     PhotometryData,
 )
-from grahspj.model import GRAHSP_PL_BEND_LOC_A, GRAHSP_PL_BEND_WIDTH, GRAHSP_PL_CUTOFF_A, _project_filters, _redshift_to_obs, evaluate_photometric_state, grahsp_photometric_model
-from grahspj.preload import build_model_context
+from jaxsedfit.model import GRAHSP_PL_BEND_LOC_A, GRAHSP_PL_BEND_WIDTH, GRAHSP_PL_CUTOFF_A, _project_filters, _redshift_to_obs, evaluate_photometric_state, grahsp_photometric_model
+from jaxsedfit.preload import build_model_context
 
 
 def _patch_ssp(monkeypatch):
@@ -26,9 +26,9 @@ def _patch_ssp(monkeypatch):
         ssp_wave = np.array([100.0, 500.0, 900.0, 2000.0, 5000.0, 10000.0])
         ssp_flux = np.ones((4, 4, 6))
 
-    monkeypatch.setattr("grahspj.preload._load_ssp_templates", lambda fn: _SSPData())
-    monkeypatch.setattr("grahspj.preload._SSP_DATA_CACHE", {})
-    monkeypatch.setattr("grahspj.preload._HOST_BASIS_CACHE", {})
+    monkeypatch.setattr("jaxsedfit.preload._load_ssp_templates", lambda fn: _SSPData())
+    monkeypatch.setattr("jaxsedfit.preload._SSP_DATA_CACHE", {})
+    monkeypatch.setattr("jaxsedfit.preload._HOST_BASIS_CACHE", {})
 
 
 def _cfg(
@@ -306,7 +306,7 @@ def test_host_kinematics_default_off_skips_broadening_call(monkeypatch):
     def _raise_if_called(*args, **kwargs):
         raise AssertionError("host broadening should be skipped when fit_host_kinematics=False")
 
-    monkeypatch.setattr("grahspj.model._shift_and_broaden_single_spectrum_lnlam", _raise_if_called)
+    monkeypatch.setattr("jaxsedfit.model._shift_and_broaden_single_spectrum_lnlam", _raise_if_called)
     context = build_model_context(_cfg(fit_agn=False))
     tr = _deterministic_trace(context, {"ebv_gal": np.array(0.2), "dust_alpha": np.array(2.0)})
 
@@ -323,7 +323,7 @@ def test_host_kinematics_enabled_samples_and_broadens(monkeypatch):
         calls["n"] += 1
         return spectrum
 
-    monkeypatch.setattr("grahspj.model._shift_and_broaden_single_spectrum_lnlam", _identity_broaden)
+    monkeypatch.setattr("jaxsedfit.model._shift_and_broaden_single_spectrum_lnlam", _identity_broaden)
     context = build_model_context(_cfg(fit_agn=False, fit_host_kinematics=True))
     tr = _deterministic_trace(
         context,
@@ -341,13 +341,13 @@ def test_host_kinematics_enabled_samples_and_broadens(monkeypatch):
 
 
 def test_agn_only_context_skips_host_ssp_loading(monkeypatch):
-    monkeypatch.setattr("grahspj.preload._SSP_DATA_CACHE", {})
-    monkeypatch.setattr("grahspj.preload._HOST_BASIS_CACHE", {})
+    monkeypatch.setattr("jaxsedfit.preload._SSP_DATA_CACHE", {})
+    monkeypatch.setattr("jaxsedfit.preload._HOST_BASIS_CACHE", {})
 
     def _raise_if_called(*args, **kwargs):
         raise AssertionError("AGN-only contexts should not load host SSP templates")
 
-    monkeypatch.setattr("grahspj.preload._load_ssp_templates", _raise_if_called)
+    monkeypatch.setattr("jaxsedfit.preload._load_ssp_templates", _raise_if_called)
     context = build_model_context(_cfg(fit_host=False))
 
     assert context.ssp_data.ssp_flux.shape == (1, 1, 1)
@@ -357,13 +357,13 @@ def test_agn_only_context_skips_host_ssp_loading(monkeypatch):
 
 def test_host_only_context_skips_agn_template_loading(monkeypatch):
     _patch_ssp(monkeypatch)
-    monkeypatch.setattr("grahspj.preload._TEMPLATE_CACHE", {})
-    monkeypatch.setattr("grahspj.preload._REST_TEMPLATE_CACHE", {})
+    monkeypatch.setattr("jaxsedfit.preload._TEMPLATE_CACHE", {})
+    monkeypatch.setattr("jaxsedfit.preload._REST_TEMPLATE_CACHE", {})
 
     def _raise_loadtxt(*args, **kwargs):
         raise AssertionError("Host-only contexts should not load FeII or AGN emission-line templates")
 
-    monkeypatch.setattr("grahspj.preload.np.loadtxt", _raise_loadtxt)
+    monkeypatch.setattr("jaxsedfit.preload.np.loadtxt", _raise_loadtxt)
     context = build_model_context(_cfg(fit_agn=False))
 
     assert np.allclose(np.asarray(context.feii_template_on_rest_jax, dtype=float), 0.0)
@@ -376,7 +376,7 @@ def test_balmer_continuum_default_off_skips_balmer_kernel(monkeypatch):
     def _raise_if_called(*args, **kwargs):
         raise AssertionError("Balmer continuum should be skipped unless fit_balmer_continuum=True")
 
-    monkeypatch.setattr("grahspj.model._balmer_continuum_jax", _raise_if_called)
+    monkeypatch.setattr("jaxsedfit.model._balmer_continuum_jax", _raise_if_called)
     context = build_model_context(_cfg(fit_balmer_continuum=False))
     tr = _deterministic_trace(
         context,
@@ -401,7 +401,7 @@ def test_feii_broadening_default_off_uses_direct_template(monkeypatch):
     def _raise_if_called(*args, **kwargs):
         raise AssertionError("FeII broadening should be skipped unless fit_feii_broadening=True")
 
-    monkeypatch.setattr("grahspj.model._feii_component", _raise_if_called)
+    monkeypatch.setattr("jaxsedfit.model._feii_component", _raise_if_called)
     context = build_model_context(_cfg(fit_feii_broadening=False))
     tr = _deterministic_trace(
         context,
@@ -427,7 +427,7 @@ def test_feii_broadening_enabled_samples_and_calls_kernel(monkeypatch):
         calls["n"] += 1
         return norm * template_flux_on_wave
 
-    monkeypatch.setattr("grahspj.model._feii_component", _identity_feii)
+    monkeypatch.setattr("jaxsedfit.model._feii_component", _identity_feii)
     context = build_model_context(_cfg(fit_feii_broadening=True))
     tr = _deterministic_trace(context, _fixed_component_data())
 

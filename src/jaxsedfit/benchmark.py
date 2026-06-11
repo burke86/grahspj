@@ -2,7 +2,7 @@ from __future__ import annotations
 
 # The Chimera benchmark path vendors selected filter and template files that
 # originate from GRAHSP resources. Those assets are documented under
-# src/grahspj/resources/ and are redistributed here with provenance notes.
+# src/jaxsedfit/resources/ and are redistributed here with provenance notes.
 
 import csv
 import json
@@ -92,13 +92,13 @@ class _BenchmarkWorkerTask:
 
 
 def _package_root() -> Path:
-    """Return the grahspj project root from the installed package layout."""
+    """Return the jaxsedfit project root from the installed package layout."""
     return Path(__file__).resolve().parents[2]
 
 
 def _package_resource_path(relpath: str) -> Path:
     """Return an absolute path to a packaged benchmark resource."""
-    return Path(str(resources.files("grahspj").joinpath(relpath)))
+    return Path(str(resources.files("jaxsedfit").joinpath(relpath)))
 
 
 def chimera_data_dir(root: str | Path | None = None) -> Path:
@@ -268,7 +268,7 @@ def select_chimera_subset(dataset: ChimeraBenchmarkDataset, root: str | Path | N
 
 
 def build_chimera_fit_config(row: dict[str, Any], dsps_ssp_fn: str = "tempdata.h5", base_config: FitConfig | None = None) -> FitConfig:
-    """Build a grahspj FitConfig for one Chimera benchmark row."""
+    """Build a jaxsedfit FitConfig for one Chimera benchmark row."""
     if base_config is None:
         cfg = FitConfig(
             observation=Observation(object_id=str(row["id"]), redshift=float(row["redshift"])),
@@ -465,9 +465,9 @@ def _failed_benchmark_row(task: _BenchmarkWorkerTask, exc: Exception) -> dict[st
 def _run_single_chimera_fit(task: _BenchmarkWorkerTask, fitter_cls=None) -> tuple[int, dict[str, Any]]:
     """Run one Chimera benchmark fit and return an ordered row payload."""
     if fitter_cls is None:
-        from .core import GRAHSPJ
+        from .core import JAXSEDFit
 
-        fitter_cls = GRAHSPJ
+        fitter_cls = JAXSEDFit
     cfg = build_chimera_fit_config(row=task.row, dsps_ssp_fn=task.dsps_ssp_fn, base_config=task.base_config)
     cfg.inference.seed = _stable_row_seed(str(task.row["id"]))
     fitter = fitter_cls(cfg)
@@ -629,9 +629,9 @@ def run_chimera_mass_benchmark(
 ) -> dict[str, Any]:
     """Run the Chimera stellar-mass recovery benchmark end to end."""
     if fitter_cls is None:
-        from .core import GRAHSPJ
+        from .core import JAXSEDFit
 
-        fitter_cls = GRAHSPJ
+        fitter_cls = JAXSEDFit
     print("[benchmark] Preparing Chimera stellar-mass recovery benchmark")
     print(f"[benchmark] Using DSPS SSP file: {Path(dsps_ssp_fn).expanduser()}")
     print(
@@ -805,7 +805,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run the Chimera stellar-mass recovery benchmark.")
     parser.add_argument("--output-dir", default="benchmark_outputs", help="Directory for benchmark artifacts.")
     parser.add_argument("--dsps-ssp-fn", default="tempdata.h5", help="Path to the DSPS SSP HDF5 file.")
-    parser.add_argument("--root", default=None, help="Optional grahspj project root override.")
+    parser.add_argument("--root", default=None, help="Optional jaxsedfit project root override.")
     parser.add_argument("--max-weighted-mae", type=float, default=DEFAULT_MAX_WEIGHTED_MAE)
     parser.add_argument("--max-abs-weighted-bias", type=float, default=DEFAULT_MAX_ABS_WEIGHTED_BIAS)
     parser.add_argument("--min-finite-fraction", type=float, default=DEFAULT_MIN_FINITE_FRACTION)

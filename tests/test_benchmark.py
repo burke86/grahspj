@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from grahspj.benchmark import (
+from jaxsedfit.benchmark import (
     build_chimera_fit_config,
     chimera_data_dir,
     load_chimera_benchmark_dataset,

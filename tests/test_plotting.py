@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pytest
 
-from grahspj.plotting import plot_corner, plot_fit_sed, plot_trace
+from jaxsedfit.plotting import plot_corner, plot_fit_sed, plot_trace
 
 
 def test_plot_fit_sed_writes_output(tmp_path):
@@ -273,17 +273,17 @@ def test_plot_trace_writes_grouped_chain_samples(tmp_path):
     assert {tick.get_fontsize() for ax in fig.axes for tick in ax.get_xticklabels() + ax.get_yticklabels()} == {8.0}
 
 
-def test_grahspj_corner_and_trace_methods_delegate(monkeypatch):
-    import grahspj.plotting as plotting
+def test_jaxsedfit_corner_and_trace_methods_delegate(monkeypatch):
+    import jaxsedfit.plotting as plotting
 
-    model = types.ModuleType("grahspj.model")
+    model = types.ModuleType("jaxsedfit.model")
     model.grahsp_photometric_model = lambda *args, **kwargs: None
-    preload = types.ModuleType("grahspj.preload")
+    preload = types.ModuleType("jaxsedfit.preload")
     preload.ModelContext = object
     preload.build_model_context = lambda config: None
-    monkeypatch.setitem(sys.modules, "grahspj.model", model)
-    monkeypatch.setitem(sys.modules, "grahspj.preload", preload)
-    sys.modules.pop("grahspj.core", None)
+    monkeypatch.setitem(sys.modules, "jaxsedfit.model", model)
+    monkeypatch.setitem(sys.modules, "jaxsedfit.preload", preload)
+    sys.modules.pop("jaxsedfit.core", None)
 
     calls = {}
 
@@ -296,11 +296,11 @@ def test_grahspj_corner_and_trace_methods_delegate(monkeypatch):
         return "trace"
 
     try:
-        from grahspj.core import GRAHSPJ
+        from jaxsedfit.core import JAXSEDFit
 
         monkeypatch.setattr(plotting, "plot_corner", _plot_corner)
         monkeypatch.setattr(plotting, "plot_trace", _plot_trace)
-        fitter = object.__new__(GRAHSPJ)
+        fitter = object.__new__(JAXSEDFit)
 
         assert fitter.plot_corner(output_path="corner.pdf", params=["alpha"]) == "corner"
         assert fitter.plot_trace(output_path="trace.pdf", params=["beta"]) == "trace"
@@ -311,4 +311,4 @@ def test_grahspj_corner_and_trace_methods_delegate(monkeypatch):
         assert calls["trace"][1]["output_path"] == "trace.pdf"
         assert calls["trace"][1]["params"] == ["beta"]
     finally:
-        sys.modules.pop("grahspj.core", None)
+        sys.modules.pop("jaxsedfit.core", None)

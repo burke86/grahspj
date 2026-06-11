@@ -21,8 +21,8 @@ def _get_nested_sampler_cls():
     return NestedSampler
 
 
-class GRAHSPJ:
-    """High-level single-object fitting interface for grahspj."""
+class JAXSEDFit:
+    """High-level single-object fitting interface for jaxsedfit."""
     def __init__(self, config: FitConfig):
         """Initialize the fitter and build its static model context."""
         self.config = config
@@ -840,10 +840,10 @@ class GRAHSPJ:
         plotter.f_line_model = component("jqf_line_model")
         spec_torus_component = component("spec_torus_model_fluxes")
         custom_components = {
-            "grahspj_torus": spec_torus_component if keep_component(spec_torus_component) else obs_sed_component("torus_obs_sed"),
-            "grahspj_host_dust": obs_sed_component("dust_obs_sed"),
-            "grahspj_sed_balmer": obs_sed_component("balmer_obs_sed"),
-            "grahspj_sed_lines": (
+            "jaxsedfit_torus": spec_torus_component if keep_component(spec_torus_component) else obs_sed_component("torus_obs_sed"),
+            "jaxsedfit_host_dust": obs_sed_component("dust_obs_sed"),
+            "jaxsedfit_sed_balmer": obs_sed_component("balmer_obs_sed"),
+            "jaxsedfit_sed_lines": (
                 obs_sed_component("line_obs_sed")
                 + obs_sed_component("feii_obs_sed")
                 + obs_sed_component("nebular_lines_obs_sed")
