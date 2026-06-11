@@ -652,7 +652,11 @@ def test_context_builds_spectrum_resolution_host_basis(monkeypatch):
             errors=[0.1, 0.1, 0.1],
             instrument="sdss",
         ),
-        spectroscopy_config=SpectroscopyConfig(enabled=True, backend="jaxqsofit"),
+        spectroscopy_config=SpectroscopyConfig(
+            enabled=True,
+            backend="jaxqsofit",
+            jaxqsofit=JaxQSOFitConfig(use_spectral_smart_priors=False),
+        ),
         inference=InferenceConfig(map_steps=2),
     )
 
@@ -781,6 +785,7 @@ def test_jaxqsofit_backend_always_uses_dynamic_nebular_width(monkeypatch):
                 use_spectral_lines=True,
                 use_spectral_feii=False,
                 use_spectral_balmer_continuum=False,
+                use_spectral_smart_priors=False,
             ),
         ),
         inference=InferenceConfig(map_steps=2),
