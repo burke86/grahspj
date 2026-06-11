@@ -318,6 +318,11 @@ def build_chimera_fit_config(row: dict[str, Any], dsps_ssp_fn: str = "tempdata.h
         num_samples=DEFAULT_BENCHMARK_NUTS_SAMPLES,
         num_chains=DEFAULT_BENCHMARK_NUTS_CHAINS,
         target_accept_prob=cfg.inference.target_accept_prob,
+        dense_mass=cfg.inference.dense_mass,
+        max_tree_depth=cfg.inference.max_tree_depth,
+        ns_num_live_points=cfg.inference.ns_num_live_points,
+        ns_max_samples=cfg.inference.ns_max_samples,
+        ns_dlogz=cfg.inference.ns_dlogz,
         seed=DEFAULT_RANDOM_SEED,
     )
     inferred_priors = _estimate_chimera_prior_config(row)

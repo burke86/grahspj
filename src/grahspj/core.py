@@ -212,7 +212,6 @@ class GRAHSPJ:
         ns_live_points: int | None = None,
         ns_max_samples: int | None = None,
         ns_dlogz: float | None = None,
-<<<<<<< Updated upstream
         ns_resamples: int | None = None,
         ns_difficult_model: bool = False,
         ns_parameter_estimation: bool = False,
@@ -220,10 +219,8 @@ class GRAHSPJ:
         ns_init_efficiency_threshold: float | None = None,
         ns_max_likelihood_evals: int | None = None,
         ns_efficiency_threshold: float | None = None,
-=======
         nuts_dense_mass: bool | None = None,
         nuts_max_tree_depth: int | None = None,
->>>>>>> Stashed changes
         plot_fig: bool = False,
         save_fig: bool = False,
         save_result: bool = False,
