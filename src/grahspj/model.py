@@ -221,6 +221,18 @@ def _ssp_lgmet_solar_offset(ssp_lgmet):
     return jnp.where(jnp.nanmax(ssp_lgmet) < -1.0, jnp.log10(DSPS_SOLAR_METALLICITY), 0.0)
 
 
+def _gal_lgmet_to_absolute_z(gal_lgmet, ssp_lgmet):
+    """Convert galaxy metallicity from the SSP-grid convention to absolute Z."""
+    gal_lgmet = jnp.asarray(gal_lgmet, dtype=jnp.float64)
+    ssp_lgmet = jnp.asarray(ssp_lgmet, dtype=jnp.float64)
+    absolute_logz = jnp.where(
+        jnp.nanmax(ssp_lgmet) < -1.0,
+        gal_lgmet,
+        gal_lgmet + jnp.log10(DSPS_SOLAR_METALLICITY),
+    )
+    return jnp.power(10.0, absolute_logz)
+
+
 def _default_gal_lgmet_loc(ssp_lgmet):
     """Default galaxy metallicity center in the SSP grid's metallicity convention."""
     ssp_lgmet = jnp.asarray(ssp_lgmet, dtype=jnp.float64)
@@ -257,7 +269,31 @@ def _mass_metallicity_relation_logprior(
     ssp_lgmet=None,
     redshift: float = 0.0,
 ):
-    """Return an optional soft stellar mass-metallicity log-prior."""
+    """Return an optional soft stellar mass-metallicity log-prior.
+
+    The ``prior_config["mass_metallicity_relation"]`` mapping defines a broad,
+    heuristic Gaussian prior on the host metallicity sampled by the stellar
+    population model. By default the metallicity keys are solar-relative
+    ``log10(Z/Zsun)`` values and are converted into the active SSP grid
+    convention before evaluating the prior. For example, ``pivot_logzsol=-0.15``
+    means 0.15 dex below solar regardless of whether the SSP grid stores
+    absolute ``log10(Z)`` or relative ``log10(Z/Zsun)`` metallicities.
+
+    Supported keys are:
+
+    - ``enabled``: set ``False`` to disable the prior.
+    - ``pivot_mass``: stellar-mass pivot in ``log10(M*/Msun)``.
+    - ``pivot_logzsol``: solar-relative metallicity at ``pivot_mass``.
+    - ``pivot_lgmet``: absolute value in the SSP grid convention, overriding
+      ``pivot_logzsol``.
+    - ``slope``: metallicity slope per dex in stellar mass.
+    - ``scale``: Gaussian prior width in dex.
+    - ``redshift_ref`` and ``redshift_slope``: optional linear redshift trend.
+    - ``min`` and ``max``: solar-relative lower and upper bounds for the prior
+      location, clipped to the SSP grid range.
+    - ``min_lgmet`` and ``max_lgmet``: bounds in the SSP grid convention,
+      overriding ``min`` and ``max``.
+    """
     cfg = prior_config.get("mass_metallicity_relation", None)
     if cfg is None:
         cfg = {}
@@ -1018,7 +1054,7 @@ def _build_nebular_components(context: ModelContext, host_state: dict[str, Any],
 
     logu = _sample_optional_normal(prior_config, "nebular_logU", float(cfg.logU), 0.3)
     default_zgas = float(cfg.zgas) if cfg.zgas is not None else None
-    host_zgas = jnp.power(10.0, host_state["gal_lgmet"])
+    host_zgas = _gal_lgmet_to_absolute_z(host_state["gal_lgmet"], host_state["ssp_lgmet"])
     zgas_default = host_zgas if default_zgas is None else jnp.asarray(default_zgas, dtype=jnp.float64)
     zgas = _sample_optional_normal(prior_config, "nebular_zgas", float(default_zgas) if default_zgas is not None else 0.02, 0.01)
     zgas = jnp.where(default_zgas is None and "nebular_zgas" not in prior_config, zgas_default, jnp.clip(zgas, 1.0e-6, 1.0))
