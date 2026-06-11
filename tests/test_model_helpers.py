@@ -62,6 +62,7 @@ from grahspj.preload import (
     _build_fixed_filter_projection_matrices,
     _build_host_basis,
     _lnu_lsun_per_hz_to_llambda_w_per_a_np,
+    _load_filter_responses,
     _mw_band_attenuation_factor,
     _mw_pixel_attenuation_factor,
     _load_vendored_filter_curve,
@@ -543,6 +544,32 @@ def test_ukidss_dr11plus_vendored_filters_load_in_angstroms():
         assert np.nanmax(trans) > 0.0
 
 
+def test_legacy_filter_aliases_resolve_to_vendored_curves():
+    cfg = FitConfig(
+        observation=Observation(object_id="obj", redshift=0.1),
+        photometry=PhotometryData(
+            filter_names=["u_sdss", "J_2mass", "W1"],
+            fluxes=[1.0, 1.0, 1.0],
+            errors=[0.1, 0.1, 0.1],
+        ),
+        filters=FilterSet(use_grahsp_database=False),
+        galaxy=GalaxyConfig(dsps_ssp_fn="fake.h5"),
+        inference=InferenceConfig(map_steps=2),
+    )
+
+    curves = _load_filter_responses(cfg)
+
+    assert [curve.name for curve in curves] == ["u_sdss", "J_2mass", "W1"]
+    for curve in curves:
+        wave = np.asarray(curve.wave, dtype=float)
+        trans = np.asarray(curve.transmission, dtype=float)
+        assert wave.ndim == 1
+        assert wave.size == trans.size
+        assert wave.size > 3
+        assert np.nanmax(trans) > 0.0
+        assert np.isfinite(curve.effective_wavelength)
+
+
 def test_build_context_with_inline_templates(monkeypatch):
     class _SSPData:
         ssp_lgmet = np.array([-1.0, 0.0])
@@ -582,7 +609,7 @@ def test_build_context_with_inline_templates(monkeypatch):
     assert context.gal_t_table.shape == (cfg.galaxy.sfh_n_steps,)
     assert context.t_obs_gyr > 0.0
     assert len(context.filters) == 1
-    assert context.filters[0].name == "inline-f1"
+    assert context.filters[0].name == "f1"
     assert context.templates.feii_wave.shape[0] == 2
     assert context.templates.dust_alpha_grid.size > 0
     assert context.templates.dust_wave.size > 0

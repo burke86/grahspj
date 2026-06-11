@@ -79,7 +79,6 @@ class FilterCurve:
 class FilterSet:
     """Filter configuration used to construct synthetic photometry."""
     curves: Sequence[FilterCurve] = field(default_factory=list)
-    speclite_names: Mapping[str, str] = field(default_factory=dict)
     use_grahsp_database: bool = True
 
 
@@ -375,7 +374,6 @@ def fit_config_from_mapping(data: Mapping[str, Any]) -> FitConfig:
         curves_raw = filters_raw.get("curves", [])
         filters_obj = FilterSet(
             curves=[_coerce_dataclass(FilterCurve, curve) if isinstance(curve, Mapping) else curve for curve in curves_raw],
-            speclite_names=dict(filters_raw.get("speclite_names", {})),
             use_grahsp_database=bool(filters_raw.get("use_grahsp_database", True)),
         )
     else:
