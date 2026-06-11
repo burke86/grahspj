@@ -126,13 +126,12 @@ Bundled third-party resources under [src/grahspj/resources](/Users/colinburke/re
 
 ## Filters
 
-`grahspj` routes all filter handling through `speclite`.
+`grahspj` uses vendored GRAHSP/pcigale-style filter curves for synthetic photometry.
 
-- Built-in mappings cover common names such as `u_sdss -> sdss2010-u` and `J_2mass -> twomass-J`
-- You can override any mapping with `filters.speclite_names`
-- Vendored IRAC benchmark filters are bundled with the package and wrapped into `speclite` objects automatically
-- If a filter is not available in `speclite` or in the vendored package resources, the optional GRAHSP database fallback is still supported, but it is no longer required for the benchmark/default supported subset
-- Inline curves are also wrapped into `speclite` objects before synthetic photometry is computed
+- Built-in aliases cover common legacy names such as `u_sdss -> sloan.sdss.u`, `J_2mass -> 2mass.J`, and `W1 -> wise.W1`
+- Vendored photon-response filters are converted to the internal energy-response convention before projection
+- If a filter is not available inline or in the vendored package resources, the optional GRAHSP database fallback is still supported
+- Inline curves are used directly as internal filter curves before synthetic photometry is computed
 
 ## Survey PSF Sizes In The Likelihood
 

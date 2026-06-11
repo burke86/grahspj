@@ -34,11 +34,14 @@ from grahspj.model import (
     GRAHSP_SI_EM_LAM_A,
     GRAHSP_SI_EM_WIDTH_A,
     GRAHSP_TORUS_NORM_A,
+    _attenuation_transmitted_fraction,
     _attenuation_curve,
     _apply_biattenuation,
     _balmer_continuum_jax,
+    _chi2_upper_limit,
     _feii_component,
     _flux_conserving_line_gaussians,
+    _gal_lgmet_to_absolute_z,
     _host_dust_emission,
     _igm_transmission,
     _line_gaussians,
@@ -47,16 +50,23 @@ from grahspj.model import (
     _redshift_to_obs,
     _torus_component,
     grahsp_photometric_model,
+    photometric_loglike,
 )
 from grahspj.preload import _build_fixed_igm_jax, _build_igm_cache_jax, build_model_context
 from grahspj.preload import (
     ModelContext,
+    PackedFilters,
     PackedFiltersJax,
     SSPData,
     _DALE2014_CACHE,
     _HOST_BASIS_CACHE,
+    _build_filter_projection_matrices_for_redshift,
+    _build_fixed_filter_projection_matrices,
     _build_host_basis,
     _lnu_lsun_per_hz_to_llambda_w_per_a_np,
+    _load_filter_responses,
+    _mw_band_attenuation_factor,
+    _mw_pixel_attenuation_factor,
     _load_vendored_filter_curve,
     _load_vendored_dale2014_templates,
 )
@@ -186,6 +196,33 @@ def test_biattenuation_routes_host_and_agn_extinction_and_dust_budget():
     assert np.allclose(np.asarray(agn_att), expected_agn)
     assert np.allclose(np.asarray(host_absorbed), host - expected_host)
     assert float(dust_luminosity) == pytest.approx(np.trapezoid(host - expected_host, x=wave))
+
+
+def test_gal_lgmet_to_absolute_z_respects_ssp_metallicity_convention():
+    absolute_grid = np.asarray([-4.34771165, -3.34771165, -2.34771165, -1.34771165])
+    relative_grid = np.asarray([-2.0, -1.0, -0.3, 0.0])
+
+    assert float(_gal_lgmet_to_absolute_z(np.log10(0.019), absolute_grid)) == pytest.approx(0.019)
+    assert float(_gal_lgmet_to_absolute_z(0.0, relative_grid)) == pytest.approx(0.019)
+    assert float(_gal_lgmet_to_absolute_z(-0.3, relative_grid)) == pytest.approx(0.019 * 10.0**-0.3)
+
+
+def test_attenuation_transmitted_fraction_uses_only_direct_light():
+    direct_intrinsic = np.asarray([10.0, 10.0, 0.0])
+    direct_attenuated = np.asarray([2.0, 8.0, 0.0])
+    reemitted_dust_or_torus = np.asarray([100.0, 100.0, 100.0])
+
+    frac = np.asarray(_attenuation_transmitted_fraction(direct_attenuated, direct_intrinsic))
+    total_emergent_fraction = np.clip(
+        (direct_attenuated + reemitted_dust_or_torus)
+        / np.maximum(direct_intrinsic + reemitted_dust_or_torus, 1.0e-30),
+        1.0e-4,
+        1.0,
+    )
+
+    np.testing.assert_allclose(frac[:2], [0.2, 0.8])
+    assert frac[2] == pytest.approx(1.0e-4)
+    assert np.all(total_emergent_fraction[:2] > frac[:2])
 
 
 def test_dale2014_host_dust_matches_cigale_v2025_1_reference():
@@ -384,6 +421,22 @@ def test_balmer_continuum_has_3646_angstrom_edge_and_blueward_emission():
     assert np.all(np.isfinite(balmer))
 
 
+def test_balmer_continuum_planck_factor_uses_angstrom_kelvin_constant():
+    wave = np.linspace(1000.0, 3646.0, 2647)
+    balmer = np.asarray(_balmer_continuum_jax(wave, balmer_norm=1.0, balmer_te=15000.0, balmer_tau=1.0, balmer_vel=0.0))
+
+    idx_1500 = np.argmin(np.abs(wave - 1500.0))
+    idx_3646 = np.argmin(np.abs(wave - 3646.0))
+    h_c_per_k_B_angstrom = 1.4388e8
+    ratio_wave = np.asarray([wave[idx_1500], wave[idx_3646]])
+    tau = (ratio_wave / 3646.0) ** 3
+    bb = (ratio_wave**-5) / np.expm1(h_c_per_k_B_angstrom / (15000.0 * ratio_wave))
+    bb0 = (3646.0**-5) / np.expm1(h_c_per_k_B_angstrom / (15000.0 * 3646.0))
+    expected = (1.0 - np.exp(-tau)) * bb / bb0
+
+    assert balmer[idx_1500] / balmer[idx_3646] == pytest.approx(expected[0] / expected[1], rel=1.0e-6)
+
+
 def test_redshift_projection_uses_luminosity_distance_and_one_plus_z():
     rest_wave = np.asarray([1000.0, 2000.0, 3000.0])
     rest_lum = np.asarray([4.0, 4.0, 4.0])
@@ -392,6 +445,47 @@ def test_redshift_projection_uses_luminosity_distance_and_one_plus_z():
     obs = np.asarray(_redshift_to_obs(rest_wave, rest_lum, obs_wave, redshift=1.0, luminosity_distance_m=d_l))
 
     assert np.allclose(obs, rest_lum / (4.0 * np.pi * d_l**2 * 2.0))
+
+
+def test_upper_limit_likelihood_uses_standard_deviation_not_variance():
+    limit = np.asarray([1.0])
+    model = np.asarray([1.2])
+    sigma = np.asarray([0.1])
+
+    chi2 = np.asarray(_chi2_upper_limit(limit, model, sigma**2))
+
+    flux_scale = 1.0e3
+    chi2_scaled = np.asarray(_chi2_upper_limit(limit * flux_scale, model * flux_scale, (sigma * flux_scale) ** 2))
+
+    assert chi2_scaled == pytest.approx(chi2, rel=1.0e-12)
+
+
+def test_lyman_break_uncertainty_threshold_uses_angstroms():
+    kwargs = dict(
+        pred_fluxes=np.asarray([100.0]),
+        obs_fluxes=np.asarray([1.0]),
+        obs_errors=np.asarray([0.1]),
+        upper_limits=np.asarray([False]),
+        data_mask=np.asarray([True]),
+        systematics_width=0.0,
+        intrinsic_scatter=0.0,
+        likelihood_family="gaussian",
+        student_t_df=5.0,
+        agn_component=np.asarray([0.0]),
+        agn_bol_lum_w=1.0e38,
+        agn_nev=0.1,
+        variability_uncertainty=False,
+        attenuation_model_uncertainty=False,
+        transmitted_fraction=np.asarray([1.0]),
+        filter_wavelength=np.asarray([1400.0]),
+        redshift=0.0,
+    )
+
+    logl_without_uncertainty = float(photometric_loglike(**kwargs, lyman_break_uncertainty=False))
+    logl_with_uncertainty = float(photometric_loglike(**kwargs, lyman_break_uncertainty=True))
+
+    assert logl_without_uncertainty < -1.0e5
+    assert logl_with_uncertainty > -100.0
 
 
 def test_filter_projection_flat_flambda_to_mjy_units():
@@ -410,6 +504,58 @@ def test_filter_projection_flat_flambda_to_mjy_units():
     assert projected[0] == pytest.approx(expected)
 
 
+def test_filter_projection_padded_rows_do_not_add_spurious_trapezoid_segment():
+    work_wave = np.asarray([[4000.0, 5000.0, 6000.0, 6000.0]], dtype=float)
+    transmission = np.asarray([[1.0, 1.0, 0.1, 0.0]], dtype=float)
+    valid_mask = np.asarray([[True, True, True, False]], dtype=bool)
+    interp_indices = np.asarray([[0, 1, 2, 2]], dtype=np.int32)
+    interp_weight = np.zeros_like(work_wave)
+    effective_wavelength = np.asarray([5000.0], dtype=float)
+    obs_flux = 1.0e-20 * (np.asarray([4000.0, 5000.0, 6000.0, 7000.0]) / 5000.0) ** 2
+    packed_jax = PackedFiltersJax(
+        interp_indices=interp_indices,
+        interp_weight=interp_weight,
+        transmission=transmission,
+        work_wave=work_wave,
+        effective_wavelength=effective_wavelength,
+        valid_mask=valid_mask,
+    )
+    packed_np = PackedFilters(
+        interp_indices=interp_indices,
+        interp_weight=interp_weight,
+        transmission=transmission,
+        work_wave=work_wave,
+        effective_wavelength=effective_wavelength,
+        valid_mask=valid_mask,
+    )
+
+    real_wave = work_wave[0, valid_mask[0]]
+    real_trans = transmission[0, valid_mask[0]]
+    real_flux = obs_flux[: real_wave.size]
+    f_lambda = np.trapezoid(real_flux * real_trans, real_wave) / np.trapezoid(real_trans, real_wave)
+    expected = 1.0e-10 / 299792458.0 * 1.0e29 * effective_wavelength[0] ** 2 * f_lambda
+
+    projected = np.asarray(_project_filters(obs_flux, packed_jax))
+    _, fixed_scalar_matrix = _build_fixed_filter_projection_matrices(
+        rest_wave=np.asarray([4000.0, 5000.0, 6000.0, 7000.0]),
+        packed_filters=packed_np,
+        fixed_igm=np.ones(4),
+        luminosity_distance_m=1.0,
+        redshift=0.0,
+    )
+    _, dynamic_scalar_matrix = _build_filter_projection_matrices_for_redshift(
+        rest_wave=np.asarray([4000.0, 5000.0, 6000.0, 7000.0]),
+        packed_filters=packed_np,
+        igm=np.ones(4),
+        luminosity_distance_m=1.0,
+        redshift=0.0,
+    )
+
+    assert projected[0] == pytest.approx(expected)
+    assert (fixed_scalar_matrix @ obs_flux)[0] == pytest.approx(expected)
+    assert (dynamic_scalar_matrix @ obs_flux)[0] == pytest.approx(expected)
+
+
 def test_ukidss_dr11plus_vendored_filters_load_in_angstroms():
     expected_ranges = {
         "ukirt.wfcam.Y": (9000.0, 12000.0),
@@ -425,6 +571,32 @@ def test_ukidss_dr11plus_vendored_filters_load_in_angstroms():
         assert wave.size == trans.size
         assert lo < wave[np.argmax(trans)] < hi
         assert np.nanmax(trans) > 0.0
+
+
+def test_legacy_filter_aliases_resolve_to_vendored_curves():
+    cfg = FitConfig(
+        observation=Observation(object_id="obj", redshift=0.1),
+        photometry=PhotometryData(
+            filter_names=["u_sdss", "J_2mass", "W1"],
+            fluxes=[1.0, 1.0, 1.0],
+            errors=[0.1, 0.1, 0.1],
+        ),
+        filters=FilterSet(use_grahsp_database=False),
+        galaxy=GalaxyConfig(dsps_ssp_fn="fake.h5"),
+        inference=InferenceConfig(map_steps=2),
+    )
+
+    curves = _load_filter_responses(cfg)
+
+    assert [curve.name for curve in curves] == ["u_sdss", "J_2mass", "W1"]
+    for curve in curves:
+        wave = np.asarray(curve.wave, dtype=float)
+        trans = np.asarray(curve.transmission, dtype=float)
+        assert wave.ndim == 1
+        assert wave.size == trans.size
+        assert wave.size > 3
+        assert np.nanmax(trans) > 0.0
+        assert np.isfinite(curve.effective_wavelength)
 
 
 def test_build_context_with_inline_templates(monkeypatch):
@@ -466,7 +638,7 @@ def test_build_context_with_inline_templates(monkeypatch):
     assert context.gal_t_table.shape == (cfg.galaxy.sfh_n_steps,)
     assert context.t_obs_gyr > 0.0
     assert len(context.filters) == 1
-    assert context.filters[0].name == "inline-f1"
+    assert context.filters[0].name == "f1"
     assert context.templates.feii_wave.shape[0] == 2
     assert context.templates.dust_alpha_grid.size > 0
     assert context.templates.dust_wave.size > 0
@@ -475,6 +647,56 @@ def test_build_context_with_inline_templates(monkeypatch):
     assert context.spec_mask.tolist() == [True, False, True]
     assert context.spec_spectrum_index.tolist() == [0, 0, 0]
     assert context.spec_instruments == ("test",)
+
+
+def test_mw_dereddening_applies_to_photometry_and_spectra(monkeypatch):
+    class _SSPData:
+        ssp_lgmet = np.array([-1.0, 0.0])
+        ssp_lg_age_gyr = np.array([-1.0, 0.0])
+        ssp_wave = np.array([900.0, 2000.0, 5000.0, 10000.0])
+        ssp_flux = np.ones((2, 2, 4))
+
+    monkeypatch.setattr("grahspj.preload._load_ssp_templates", lambda fn: _SSPData())
+    monkeypatch.setattr("grahspj.preload._get_sfd_query", lambda: (lambda coord: 0.1))
+
+    filt_wave = np.asarray([1000.0, 2000.0, 3000.0])
+    filt_trans = np.asarray([0.0, 1.0, 0.0])
+    spec_wave = np.asarray([3500.0, 4500.0, 5500.0])
+    spec_flux = np.asarray([0.1, 0.2, 0.15])
+    spec_err = np.asarray([0.01, 0.02, 0.015])
+    cfg = FitConfig(
+        observation=Observation(
+            object_id="obj",
+            redshift=0.1,
+            ra=180.0,
+            dec=0.0,
+            apply_mw_deredden=True,
+        ),
+        photometry=PhotometryData(filter_names=["f1"], fluxes=[1.0], errors=[0.1]),
+        filters=FilterSet(curves=[FilterCurve(name="f1", wave=filt_wave, transmission=filt_trans)], use_grahsp_database=False),
+        galaxy=GalaxyConfig(dsps_ssp_fn="fake.h5", n_wave=64),
+        agn=AGNConfig(),
+        likelihood=LikelihoodConfig(),
+        spectroscopy=SpectroscopyData(
+            wave_obs=spec_wave,
+            fluxes=spec_flux,
+            errors=spec_err,
+            instrument="test",
+        ),
+        spectroscopy_config=SpectroscopyConfig(enabled=True),
+        inference=InferenceConfig(map_steps=2),
+    )
+
+    context = build_model_context(cfg)
+
+    loaded_filter = context.filters[0]
+    band_factor = _mw_band_attenuation_factor(loaded_filter.work_wave, loaded_filter.transmission, 0.1)
+    spec_factors = _mw_pixel_attenuation_factor(spec_wave, 0.1)
+    assert context.mw_ebv == pytest.approx(0.1)
+    np.testing.assert_allclose(context.fluxes, np.asarray([1.0]) / band_factor)
+    np.testing.assert_allclose(context.errors, np.asarray([0.1]) / band_factor)
+    np.testing.assert_allclose(context.spec_fluxes, spec_flux / spec_factors)
+    np.testing.assert_allclose(context.spec_errors, spec_err / spec_factors)
 
 
 def test_context_accepts_multiple_spectra(monkeypatch):

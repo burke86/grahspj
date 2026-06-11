@@ -26,7 +26,7 @@ from dsps.sed.ssp_weights import calc_ssp_weights_sfh_table_lognormal_mdf
 import numpyro
 import numpyro.distributions as dist
 
-from .preload import ModelContext
+from .preload import ModelContext, _build_fixed_igm_jax as _igm_transmission
 
 C_KMS = 299792.458
 C_MS = 2.99792458e8
@@ -221,6 +221,18 @@ def _ssp_lgmet_solar_offset(ssp_lgmet):
     return jnp.where(jnp.nanmax(ssp_lgmet) < -1.0, jnp.log10(DSPS_SOLAR_METALLICITY), 0.0)
 
 
+def _gal_lgmet_to_absolute_z(gal_lgmet, ssp_lgmet):
+    """Convert galaxy metallicity from the SSP-grid convention to absolute Z."""
+    gal_lgmet = jnp.asarray(gal_lgmet, dtype=jnp.float64)
+    ssp_lgmet = jnp.asarray(ssp_lgmet, dtype=jnp.float64)
+    absolute_logz = jnp.where(
+        jnp.nanmax(ssp_lgmet) < -1.0,
+        gal_lgmet,
+        gal_lgmet + jnp.log10(DSPS_SOLAR_METALLICITY),
+    )
+    return jnp.power(10.0, absolute_logz)
+
+
 def _default_gal_lgmet_loc(ssp_lgmet):
     """Default galaxy metallicity center in the SSP grid's metallicity convention."""
     ssp_lgmet = jnp.asarray(ssp_lgmet, dtype=jnp.float64)
@@ -257,7 +269,31 @@ def _mass_metallicity_relation_logprior(
     ssp_lgmet=None,
     redshift: float = 0.0,
 ):
-    """Return an optional soft stellar mass-metallicity log-prior."""
+    """Return an optional soft stellar mass-metallicity log-prior.
+
+    The ``prior_config["mass_metallicity_relation"]`` mapping defines a broad,
+    heuristic Gaussian prior on the host metallicity sampled by the stellar
+    population model. By default the metallicity keys are solar-relative
+    ``log10(Z/Zsun)`` values and are converted into the active SSP grid
+    convention before evaluating the prior. For example, ``pivot_logzsol=-0.15``
+    means 0.15 dex below solar regardless of whether the SSP grid stores
+    absolute ``log10(Z)`` or relative ``log10(Z/Zsun)`` metallicities.
+
+    Supported keys are:
+
+    - ``enabled``: set ``False`` to disable the prior.
+    - ``pivot_mass``: stellar-mass pivot in ``log10(M*/Msun)``.
+    - ``pivot_logzsol``: solar-relative metallicity at ``pivot_mass``.
+    - ``pivot_lgmet``: absolute value in the SSP grid convention, overriding
+      ``pivot_logzsol``.
+    - ``slope``: metallicity slope per dex in stellar mass.
+    - ``scale``: Gaussian prior width in dex.
+    - ``redshift_ref`` and ``redshift_slope``: optional linear redshift trend.
+    - ``min`` and ``max``: solar-relative lower and upper bounds for the prior
+      location, clipped to the SSP grid range.
+    - ``min_lgmet`` and ``max_lgmet``: bounds in the SSP grid convention,
+      overriding ``min`` and ``max``.
+    """
     cfg = prior_config.get("mass_metallicity_relation", None)
     if cfg is None:
         cfg = {}
@@ -331,7 +367,12 @@ def _powerlaw_jax(wave, norm, lam1, lam2, x0, xbrk, bend_width, cutoff):
 
 
 def _torus_component(wave, fcov, si, cool_lam, cool_width, hot_lam, hot_width, hot_fcov, si_ratio, si_em_lam, si_abs_lam, si_em_width, si_abs_width, l_agn):
-    """Evaluate the empirical torus component on the rest-frame wavelength grid."""
+    """Evaluate the empirical torus component on the rest-frame wavelength grid.
+
+    The torus luminosity follows the GRAHSP-style empirical normalization from
+    the AGN luminosity and covering factor proxy. It is not computed from the
+    luminosity absorbed by the AGN attenuation curve.
+    """
     log_wave_um = jnp.log10(wave / 10000.0)
     log_cool = jnp.log10(cool_lam)
     log_hot = jnp.log10(hot_lam)
@@ -392,7 +433,7 @@ def _cigale_nebular_correction(f_esc, f_dust):
 def _balmer_continuum_jax(wave, balmer_norm, balmer_te, balmer_tau, balmer_vel):
     """Evaluate the broadened Balmer continuum template."""
     lam_be = 3646.0
-    h_c_per_k_B = 1.439e7
+    h_c_per_k_B = 1.4388e8
     bb = (wave**-5) / jnp.expm1(jnp.clip(h_c_per_k_B / (balmer_te * wave), 1e-9, 700.0))
     bb0 = (lam_be**-5) / jnp.expm1(jnp.clip(h_c_per_k_B / (balmer_te * lam_be), 1e-9, 700.0))
     tau = balmer_tau * (wave / lam_be) ** 3
@@ -401,70 +442,38 @@ def _balmer_continuum_jax(wave, balmer_norm, balmer_te, balmer_tau, balmer_vel):
     return _shift_and_broaden_single_spectrum_lnlam(jnp.log(wave), bc, 0.0, balmer_vel)
 
 
-def _igm_transmission(igm_cache, redshift):
-    """Approximate IGM transmission following the GRAHSP-style implementation."""
-    n_transitions_low = 10
-    gamma = 0.2788
-    n0 = 0.25
-    rest_wavelength = igm_cache.wavelength
-    fact = igm_cache.fact
-    fact_eval = igm_cache.fact_eval
-    n_eval = igm_cache.n_eval
-    one_plus_z = 1.0 + redshift
-    obs_wavelength = rest_wavelength * one_plus_z
-    z_n2 = one_plus_z * (igm_cache.z_n2 + 1.0) - 1.0
-    z_eval = one_plus_z * (igm_cache.z_eval + 1.0) - 1.0
-    z_n9 = one_plus_z * (igm_cache.z_n9 + 1.0) - 1.0
-    z_l = one_plus_z * (igm_cache.z_l + 1.0) - 1.0
-    wl_ratio = one_plus_z * igm_cache.wl_ratio
-    tau_a = jnp.where(redshift <= 4, 0.00211 * (1.0 + redshift) ** 3.7, 0.00058 * (1.0 + redshift) ** 4.5)
-    tau2 = jnp.where(redshift <= 4, 0.00211 * (1.0 + z_n2) ** 3.7, 0.00058 * (1.0 + z_n2) ** 4.5)
-    tau2 = jnp.where(z_n2 >= redshift, 0.0, tau2)
-    val_le5 = jnp.where(
-        z_eval < 3.0,
-        tau_a * fact_eval[:, None] * (0.25 * (1.0 + z_eval)) ** (1.0 / 3.0),
-        tau_a * fact_eval[:, None] * (0.25 * (1.0 + z_eval)) ** (1.0 / 6.0),
-    )
-    val_6_9 = tau_a * fact_eval[:, None] * (0.25 * (1.0 + z_eval)) ** (1.0 / 3.0)
-    tau9 = tau_a * fact[9] * (0.25 * (1.0 + z_n9)) ** (1.0 / 3.0)
-    val_gt9 = tau9[None, :] * igm_cache.val_gt9_coeff[:, None]
-    val_eval = jnp.where(
-        n_eval[:, None] <= 5.0,
-        val_le5,
-        jnp.where(n_eval[:, None] <= 9.0, val_6_9, val_gt9),
-    )
-    tau_taun = tau2 + jnp.sum(jnp.where(z_eval >= redshift, 0.0, val_eval), axis=0)
-    w = z_l < redshift
-    tau_l_igm = jnp.where(w, 0.805 * (1.0 + z_l) ** 3 * (1.0 / (1.0 + z_l) - 1.0 / (1.0 + redshift)), 0.0)
-    term1 = gamma - jnp.exp(-1.0)
-    term2 = igm_cache.term2
-    term3 = (1.0 + redshift) * wl_ratio ** 1.5 - wl_ratio ** 2.5
-    ni = jnp.arange(1, n_transitions_low, dtype=jnp.float64)
-    coeff = igm_cache.coeff
-    term4_terms = coeff[:, None] * (
-        (1.0 + redshift) ** (2.5 - (3.0 * ni[:, None])) * wl_ratio[None, :] ** (3.0 * ni[:, None])
-        - wl_ratio[None, :] ** 2.5
-    )
-    term4 = jnp.sum(term4_terms, axis=0)
-    tau_l_lls = jnp.where(w, n0 * ((term1 - term2) * term3 - term4), 0.0)
-    lambda_min_igm = (1.0 + redshift) * 70.0
-    weight = jnp.where(obs_wavelength < lambda_min_igm, (obs_wavelength / lambda_min_igm) ** 2, 1.0)
-    return jnp.exp(-tau_taun - tau_l_igm - tau_l_lls) * weight
-
-
 def _attenuation_curve(wave_rest, opt_index, nir_index, norm, lam_break):
     """Return the broken power-law attenuation curve in magnitudes."""
     return norm * (wave_rest / lam_break) ** jnp.where(wave_rest < lam_break, opt_index, nir_index)
 
 
 def _apply_biattenuation(wave_rest, gal_spec, agn_spec, ebv_gal, ebv_agn, opt_index, nir_index, norm, lam_break):
-    """Apply differential attenuation to host and AGN components."""
+    """Apply differential attenuation to host and AGN components.
+
+    The returned ``dust_luminosity`` is the host-galaxy luminosity absorbed by
+    the galaxy attenuation curve. AGN light is attenuated separately, but its
+    absorbed luminosity is not added to the host dust energy-balance budget.
+    """
     curve = _attenuation_curve(wave_rest, opt_index, nir_index, norm, lam_break)
     gal_att = gal_spec * 10 ** (ebv_gal * curve / -2.5)
     agn_att = agn_spec * 10 ** ((ebv_gal + ebv_agn) * curve / -2.5)
     host_absorbed = jnp.clip(gal_spec - gal_att, 0.0, None)
     dust_luminosity = jnp.clip(jnp.trapezoid(host_absorbed, wave_rest), 0.0, None)
     return gal_att, agn_att, host_absorbed, dust_luminosity
+
+
+def _attenuation_transmitted_fraction(direct_attenuated, direct_intrinsic):
+    """Return the attenuation-only transmitted fraction for direct components.
+
+    This excludes re-emitted host dust and empirical torus emission so the
+    attenuation model uncertainty is controlled only by components that pass
+    through the attenuation curve.
+    """
+    return jnp.clip(
+        direct_attenuated / jnp.maximum(direct_intrinsic, 1.0e-30),
+        1.0e-4,
+        1.0,
+    )
 
 
 def _redshift_to_obs(rest_wave, rest_lum, obs_wave, redshift, luminosity_distance_m):
@@ -481,7 +490,13 @@ def _redshift_scalar_to_obs(rest_wave, rest_value, obs_wave, redshift):
 
 
 def _project_filters(obs_flux, packed_filters):
-    """Project an observed-frame spectrum through all prepared filters at once."""
+    """Project an observed-frame spectrum through prepared filters.
+
+    The final f_lambda-to-mJy conversion intentionally follows the
+    GRAHSP/pcigale convention of using each filter's effective wavelength
+    squared. This is not an exact pivot-wavelength conversion, so very broad
+    filters can retain small convention-level systematics.
+    """
     interp_indices = packed_filters.interp_indices
     interp_weight = packed_filters.interp_weight
     transmission = packed_filters.transmission
@@ -494,7 +509,7 @@ def _project_filters(obs_flux, packed_filters):
     values = left * (1.0 - interp_weight) + right * interp_weight
     values = jnp.where(valid_mask, values, 0.0)
     weighted_trans = jnp.where(valid_mask, transmission, 0.0)
-    weighted_wave = jnp.where(valid_mask, work_wave, 0.0)
+    weighted_wave = work_wave
     numer = jnp.trapezoid(values * weighted_trans, weighted_wave, axis=1)
     denom = jnp.maximum(jnp.trapezoid(weighted_trans, weighted_wave, axis=1), 1e-30)
     f_lambda = numer / denom
@@ -988,7 +1003,7 @@ def _build_nebular_components(context: ModelContext, host_state: dict[str, Any],
 
     logu = _sample_optional_normal(prior_config, "nebular_logU", float(cfg.logU), 0.3)
     default_zgas = float(cfg.zgas) if cfg.zgas is not None else None
-    host_zgas = jnp.power(10.0, host_state["gal_lgmet"])
+    host_zgas = _gal_lgmet_to_absolute_z(host_state["gal_lgmet"], host_state["ssp_lgmet"])
     zgas_default = host_zgas if default_zgas is None else jnp.asarray(default_zgas, dtype=jnp.float64)
     zgas = _sample_optional_normal(prior_config, "nebular_zgas", float(default_zgas) if default_zgas is not None else 0.02, 0.01)
     zgas = jnp.where(default_zgas is None and "nebular_zgas" not in prior_config, zgas_default, jnp.clip(zgas, 1.0e-6, 1.0))
@@ -1124,7 +1139,7 @@ def _sample_redshift(context: ModelContext, prior_config: dict[str, Any], cfg) -
 
 def _chi2_upper_limit(obs_fluxes, model_fluxes, total_variance):
     """Return the one-sided chi-square contribution for upper limits."""
-    z = (obs_fluxes - model_fluxes) / (jnp.sqrt(2.0) * jnp.maximum(total_variance, 1e-30))
+    z = (obs_fluxes - model_fluxes) / jnp.sqrt(2.0 * jnp.maximum(total_variance, 1e-60))
     return -2.0 * jnp.log(0.5 * (1.0 + jax.scipy.special.erf(z)) + 1e-300)
 
 
@@ -1189,7 +1204,7 @@ def photometric_loglike(pred_fluxes, obs_fluxes, obs_errors, upper_limits, data_
         att_unc = 10 ** log_unc_frac / tf
         sys_variance = sys_variance + (att_unc * pred_fluxes) ** 2
     if lyman_break_uncertainty:
-        ly_unc = jnp.where(filter_wavelength / (1.0 + redshift) < 150.0, 1.0e8, 0.0)
+        ly_unc = jnp.where(filter_wavelength / (1.0 + redshift) < 1500.0, 1.0e8, 0.0)
         sys_variance = sys_variance + (ly_unc * pred_fluxes) ** 2
     total_variance = jnp.nan_to_num(obs_variance + sys_variance + var_variance, nan=1.0e30, posinf=1.0e30, neginf=1.0e30)
     scale = jnp.sqrt(jnp.clip(total_variance, 1e-30, 1.0e60))
@@ -1388,8 +1403,9 @@ def evaluate_photometric_state(
     if fit_agn:
         pl_loc, pl_scale, pl_low, pl_high = _cfg_truncnorm(prior_config, "pl_slope", -1.8, 0.4, -3.0, -1.0)
         pl_slope = numpyro.sample("pl_slope", dist.TruncatedNormal(pl_loc, pl_scale, low=pl_low, high=pl_high))
-        uv_slope = numpyro.sample("uv_slope", dist.Normal(*_cfg_norm(prior_config, "uv_slope", 0.0, 0.05)))
-        numpyro.factor("uv_slope_gt_pl_slope", jnp.where(uv_slope > pl_slope, 0.0, -jnp.inf))
+        uv_slope_delta = numpyro.sample("uv_slope_delta", dist.LogNormal(*_cfg_norm(prior_config, "log_uv_slope_delta", np.log(1.8), 0.4)))
+        uv_slope = pl_slope + uv_slope_delta
+        numpyro.deterministic("uv_slope", uv_slope)
         pl_bend_loc = numpyro.sample("pl_bend_loc", dist.LogNormal(*_cfg_norm(prior_config, "log_pl_bend_loc", np.log(GRAHSP_PL_BEND_LOC_A), 0.3)))
         pl_bend_width = numpyro.sample("pl_bend_width", dist.LogNormal(*_cfg_norm(prior_config, "log_pl_bend_width", np.log(GRAHSP_PL_BEND_WIDTH), 0.4)))
         pl_cutoff = numpyro.sample("pl_cutoff", dist.LogNormal(*_cfg_norm(prior_config, "log_pl_cutoff", np.log(GRAHSP_PL_CUTOFF_A), 0.6)))
@@ -1616,7 +1632,10 @@ def evaluate_photometric_state(
     )
     agn_rest = agn_attenuated_rest + torus_att_rest
     total_rest = gal_att_rest + dust_rest + agn_rest
-    transmitted_fraction = jnp.clip(total_rest / jnp.maximum(host_with_nebular_rest + disk_rest + torus_rest + feii_rest + line_rest + balmer_rest, 1e-30), 1e-4, 1.0)
+    transmitted_fraction = _attenuation_transmitted_fraction(
+        gal_att_rest + agn_attenuated_rest,
+        host_with_nebular_rest + agn_attenuated_input_rest,
+    )
     fast_projection_enabled = _can_use_fixed_filter_projection(context, cfg) and not include_components
     redshift_projection_enabled = (
         _can_use_redshift_filter_projection(context, cfg)
@@ -1638,7 +1657,6 @@ def evaluate_photometric_state(
         fit_agn
         and include_sed_agn_features
         and bool(cfg.likelihood.use_local_line_photometry)
-        and not include_components
     )
     if correct_agn_line_photometry:
         if agn_type == 1:
@@ -1966,6 +1984,9 @@ def evaluate_photometric_state(
         line_liner_fluxes = _project_filters(line_liner_obs, context.packed_filters_jax)
         balmer_fluxes = _project_filters(balmer_obs, context.packed_filters_jax)
         trans_fluxes = _project_filters(transmitted_fraction_obs, context.packed_filters_jax)
+        if correct_agn_line_photometry:
+            agn_fluxes = agn_fluxes - coarse_agn_line_fluxes + local_agn_line_fluxes
+            line_fluxes = local_agn_line_fluxes
     else:
         nebular_lines_local_obs_wave = jnp.zeros((1,), dtype=jnp.float64)
         nebular_lines_local_obs = jnp.zeros((1,), dtype=jnp.float64)

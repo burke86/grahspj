@@ -289,6 +289,17 @@ def test_host_off_mode_has_zero_host_components_and_no_total_leak(monkeypatch):
     assert np.allclose(_site(tr, "pred_fluxes"), _site(tr, "agn_fluxes"))
 
 
+def test_agn_slope_ordering_uses_positive_delta_without_hard_factor(monkeypatch):
+    _patch_ssp(monkeypatch)
+    context = build_model_context(_cfg(fit_host=False))
+    tr = _deterministic_trace(context, {"log_agn_amp": np.array(np.log(1.0e34)), "fcov": np.array(0.2), "si": np.array(0.0)})
+
+    assert "uv_slope_gt_pl_slope" not in tr
+    assert "uv_slope_delta" in tr
+    assert _site(tr, "uv_slope_delta") > 0.0
+    assert _site(tr, "uv_slope") > _site(tr, "pl_slope")
+
+
 def test_host_kinematics_default_off_skips_broadening_call(monkeypatch):
     _patch_ssp(monkeypatch)
 
@@ -519,6 +530,39 @@ def test_local_line_photometry_improves_coarse_grid_line_projection(monkeypatch)
 
     assert not np.allclose(coarse_local, coarse_legacy)
     assert np.all(local_error < legacy_error)
+
+
+def test_component_prediction_uses_local_agn_line_photometry(monkeypatch):
+    _patch_ssp(monkeypatch)
+
+    cfg = _cfg(fit_host=False, n_wave=64, rest_wave_max=2000.0)
+    cfg.photometry = PhotometryData(filter_names=["ha"], fluxes=[1.0], errors=[0.1])
+    cfg.filters = FilterSet(
+        curves=[
+            FilterCurve(
+                name="ha",
+                wave=[650.0, 690.0, 730.0],
+                transmission=[0.0, 1.0, 0.0],
+            )
+        ],
+        use_grahsp_database=False,
+    )
+    cfg.likelihood.use_fast_photometry_projection = False
+    cfg.likelihood.use_local_line_photometry = True
+    cfg.likelihood.variability_uncertainty = False
+    cfg.nebular.enabled = False
+    cfg.agn.fit_balmer_continuum = False
+    cfg.agn.feii_strength_default = 0.0
+    context = build_model_context(cfg)
+
+    data = _fixed_component_data()
+    data["line_width_kms"] = np.array(1200.0)
+    data["feii_norm"] = np.array(0.0)
+    predictive = _deterministic_trace(context, data)
+    likelihood = _deterministic_likelihood_trace(context, data)
+
+    np.testing.assert_allclose(_site(predictive, "pred_fluxes"), _site(likelihood, "pred_fluxes"), rtol=2.0e-10, atol=1.0e-30)
+    np.testing.assert_allclose(_site(predictive, "agn_fluxes"), _site(likelihood, "pred_fluxes"), rtol=2.0e-10, atol=1.0e-30)
 
 
 def test_fixed_local_line_cache_matches_exact_local_line_projection(monkeypatch):
