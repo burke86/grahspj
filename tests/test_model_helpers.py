@@ -37,6 +37,7 @@ from grahspj.model import (
     _attenuation_curve,
     _apply_biattenuation,
     _balmer_continuum_jax,
+    _chi2_upper_limit,
     _feii_component,
     _flux_conserving_line_gaussians,
     _host_dust_emission,
@@ -392,6 +393,19 @@ def test_redshift_projection_uses_luminosity_distance_and_one_plus_z():
     obs = np.asarray(_redshift_to_obs(rest_wave, rest_lum, obs_wave, redshift=1.0, luminosity_distance_m=d_l))
 
     assert np.allclose(obs, rest_lum / (4.0 * np.pi * d_l**2 * 2.0))
+
+
+def test_upper_limit_likelihood_uses_standard_deviation_not_variance():
+    limit = np.asarray([1.0])
+    model = np.asarray([1.2])
+    sigma = np.asarray([0.1])
+
+    chi2 = np.asarray(_chi2_upper_limit(limit, model, sigma**2))
+
+    flux_scale = 1.0e3
+    chi2_scaled = np.asarray(_chi2_upper_limit(limit * flux_scale, model * flux_scale, (sigma * flux_scale) ** 2))
+
+    assert chi2_scaled == pytest.approx(chi2, rel=1.0e-12)
 
 
 def test_filter_projection_flat_flambda_to_mjy_units():
