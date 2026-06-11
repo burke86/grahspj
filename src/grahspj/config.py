@@ -119,6 +119,8 @@ class GalaxyConfig:
     sfh_t_min_gyr: float = 0.01
     cosmology_h0: float = 70.0
     cosmology_om0: float = 0.3
+    # Host-galaxy dust energy balance only. AGN torus emission is modeled by the
+    # empirical AGN component, not by adding AGN-absorbed luminosity here.
     use_energy_balance: bool = True
     dust_alpha: float = 2.0
 
