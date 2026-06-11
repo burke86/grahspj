@@ -392,7 +392,7 @@ def _cigale_nebular_correction(f_esc, f_dust):
 def _balmer_continuum_jax(wave, balmer_norm, balmer_te, balmer_tau, balmer_vel):
     """Evaluate the broadened Balmer continuum template."""
     lam_be = 3646.0
-    h_c_per_k_B = 1.439e7
+    h_c_per_k_B = 1.4388e8
     bb = (wave**-5) / jnp.expm1(jnp.clip(h_c_per_k_B / (balmer_te * wave), 1e-9, 700.0))
     bb0 = (lam_be**-5) / jnp.expm1(jnp.clip(h_c_per_k_B / (balmer_te * lam_be), 1e-9, 700.0))
     tau = balmer_tau * (wave / lam_be) ** 3

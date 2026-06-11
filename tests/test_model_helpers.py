@@ -388,6 +388,22 @@ def test_balmer_continuum_has_3646_angstrom_edge_and_blueward_emission():
     assert np.all(np.isfinite(balmer))
 
 
+def test_balmer_continuum_planck_factor_uses_angstrom_kelvin_constant():
+    wave = np.linspace(1000.0, 3646.0, 2647)
+    balmer = np.asarray(_balmer_continuum_jax(wave, balmer_norm=1.0, balmer_te=15000.0, balmer_tau=1.0, balmer_vel=0.0))
+
+    idx_1500 = np.argmin(np.abs(wave - 1500.0))
+    idx_3646 = np.argmin(np.abs(wave - 3646.0))
+    h_c_per_k_B_angstrom = 1.4388e8
+    ratio_wave = np.asarray([wave[idx_1500], wave[idx_3646]])
+    tau = (ratio_wave / 3646.0) ** 3
+    bb = (ratio_wave**-5) / np.expm1(h_c_per_k_B_angstrom / (15000.0 * ratio_wave))
+    bb0 = (3646.0**-5) / np.expm1(h_c_per_k_B_angstrom / (15000.0 * 3646.0))
+    expected = (1.0 - np.exp(-tau)) * bb / bb0
+
+    assert balmer[idx_1500] / balmer[idx_3646] == pytest.approx(expected[0] / expected[1], rel=1.0e-6)
+
+
 def test_redshift_projection_uses_luminosity_distance_and_one_plus_z():
     rest_wave = np.asarray([1000.0, 2000.0, 3000.0])
     rest_lum = np.asarray([4.0, 4.0, 4.0])
