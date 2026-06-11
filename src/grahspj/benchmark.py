@@ -53,15 +53,6 @@ _CHIMERA_FILTER_COLUMN_MAP = {
     "spitzer.irac.I1": "IRAC1",
     "spitzer.irac.I2": "IRAC2",
 }
-_CHIMERA_SPECLITE_NAME_MAP = {
-    "u_sdss": "sdss2010-u",
-    "r_sdss": "sdss2010-r",
-    "i_sdss": "sdss2010-i",
-    "z_sdss": "sdss2010-z",
-    "J_2mass": "twomass-J",
-    "H_2mass": "twomass-H",
-    "Ks_2mass": "twomass-Ks",
-}
 _BENCHMARK_RESOURCE_CACHE: dict[str, Any] = {}
 _CHIMERA_EFFECTIVE_WAVELENGTHS_A = {
     "u_sdss": 3543.0,
@@ -144,7 +135,6 @@ def _build_chimera_filter_set() -> FilterSet:
     ]
     return FilterSet(
         curves=curves,
-        speclite_names=dict(_CHIMERA_SPECLITE_NAME_MAP),
         use_grahsp_database=False,
     )
 

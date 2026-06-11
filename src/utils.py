@@ -19,23 +19,23 @@ from astropy.table import Table
 #
 # These are survey-level nominal values, not per-source PSFs from the VizieR SED service.
 FILTER_MAP = {
-    "GALEX:FUV": {"grahsp_filter": "FUV_galex", "speclite_name": "galex-fuv", "psf_fwhm_arcsec": 4.3},
-    "GALEX:NUV": {"grahsp_filter": "NUV_galex", "speclite_name": "galex-nuv", "psf_fwhm_arcsec": 5.3},
-    "Johnson:B": {"grahsp_filter": "B_johnson", "speclite_name": "bessell-B", "psf_fwhm_arcsec": None},
-    "Johnson:V": {"grahsp_filter": "V_johnson", "speclite_name": "bessell-V", "psf_fwhm_arcsec": None},
-    "SDSS:u": {"grahsp_filter": "u_sdss", "speclite_name": "sdss2010-u", "psf_fwhm_arcsec": 1.53},
-    "SDSS:g": {"grahsp_filter": "g_sdss", "speclite_name": "sdss2010-g", "psf_fwhm_arcsec": 1.44},
-    "SDSS:r": {"grahsp_filter": "r_sdss", "speclite_name": "sdss2010-r", "psf_fwhm_arcsec": 1.32},
-    "SDSS:i": {"grahsp_filter": "i_sdss", "speclite_name": "sdss2010-i", "psf_fwhm_arcsec": 1.26},
-    "SDSS:z": {"grahsp_filter": "z_sdss", "speclite_name": "sdss2010-z", "psf_fwhm_arcsec": 1.29},
-    "2MASS:J": {"grahsp_filter": "J_2mass", "speclite_name": "twomass-J", "psf_fwhm_arcsec": 2.5},
-    "2MASS:H": {"grahsp_filter": "H_2mass", "speclite_name": "twomass-H", "psf_fwhm_arcsec": 2.5},
-    "2MASS:Ks": {"grahsp_filter": "Ks_2mass", "speclite_name": "twomass-Ks", "psf_fwhm_arcsec": 2.5},
-    "2MASS:K": {"grahsp_filter": "Ks_2mass", "speclite_name": "twomass-Ks", "psf_fwhm_arcsec": 2.5},
-    "WISE:W1": {"grahsp_filter": "W1", "speclite_name": "wise2010-W1", "psf_fwhm_arcsec": 6.08},
-    "WISE:W2": {"grahsp_filter": "W2", "speclite_name": "wise2010-W2", "psf_fwhm_arcsec": 6.84},
-    "WISE:W3": {"grahsp_filter": "W3", "speclite_name": "wise2010-W3", "psf_fwhm_arcsec": 7.36},
-    "WISE:W4": {"grahsp_filter": "W4", "speclite_name": "wise2010-W4", "psf_fwhm_arcsec": 11.99},
+    "GALEX:FUV": {"grahsp_filter": "FUV_galex", "psf_fwhm_arcsec": 4.3},
+    "GALEX:NUV": {"grahsp_filter": "NUV_galex", "psf_fwhm_arcsec": 5.3},
+    "Johnson:B": {"grahsp_filter": "B_johnson", "psf_fwhm_arcsec": None},
+    "Johnson:V": {"grahsp_filter": "V_johnson", "psf_fwhm_arcsec": None},
+    "SDSS:u": {"grahsp_filter": "u_sdss", "psf_fwhm_arcsec": 1.53},
+    "SDSS:g": {"grahsp_filter": "g_sdss", "psf_fwhm_arcsec": 1.44},
+    "SDSS:r": {"grahsp_filter": "r_sdss", "psf_fwhm_arcsec": 1.32},
+    "SDSS:i": {"grahsp_filter": "i_sdss", "psf_fwhm_arcsec": 1.26},
+    "SDSS:z": {"grahsp_filter": "z_sdss", "psf_fwhm_arcsec": 1.29},
+    "2MASS:J": {"grahsp_filter": "J_2mass", "psf_fwhm_arcsec": 2.5},
+    "2MASS:H": {"grahsp_filter": "H_2mass", "psf_fwhm_arcsec": 2.5},
+    "2MASS:Ks": {"grahsp_filter": "Ks_2mass", "psf_fwhm_arcsec": 2.5},
+    "2MASS:K": {"grahsp_filter": "Ks_2mass", "psf_fwhm_arcsec": 2.5},
+    "WISE:W1": {"grahsp_filter": "W1", "psf_fwhm_arcsec": 6.08},
+    "WISE:W2": {"grahsp_filter": "W2", "psf_fwhm_arcsec": 6.84},
+    "WISE:W3": {"grahsp_filter": "W3", "psf_fwhm_arcsec": 7.36},
+    "WISE:W4": {"grahsp_filter": "W4", "psf_fwhm_arcsec": 11.99},
 }
 
 
@@ -111,12 +111,10 @@ def query_vizier_sed(
                     continue
                 filter_info = FILTER_MAP[sed_filter]
                 grahsp_name = str(filter_info["grahsp_filter"])
-                speclite_name = str(filter_info["speclite_name"])
                 frac_err = err_jy / flux_jy
                 candidate = {
                     "vizier_filter": sed_filter,
                     "grahsp_filter": grahsp_name,
-                    "speclite_name": speclite_name,
                     "psf_fwhm_arcsec": filter_info["psf_fwhm_arcsec"],
                     "freq_ghz": freq_ghz,
                     "flux_mjy": 1.0e3 * flux_jy,

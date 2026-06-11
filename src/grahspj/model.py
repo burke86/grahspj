@@ -481,7 +481,13 @@ def _redshift_scalar_to_obs(rest_wave, rest_value, obs_wave, redshift):
 
 
 def _project_filters(obs_flux, packed_filters):
-    """Project an observed-frame spectrum through all prepared filters at once."""
+    """Project an observed-frame spectrum through prepared filters.
+
+    The final f_lambda-to-mJy conversion intentionally follows the
+    GRAHSP/pcigale convention of using each filter's effective wavelength
+    squared. This is not an exact pivot-wavelength conversion, so very broad
+    filters can retain small convention-level systematics.
+    """
     interp_indices = packed_filters.interp_indices
     interp_weight = packed_filters.interp_weight
     transmission = packed_filters.transmission

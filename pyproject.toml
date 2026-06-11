@@ -17,7 +17,6 @@ dependencies = [
   "setuptools>=68,<81",
   "astropy",
   "tqdm",
-  "speclite",
   "extinction",
   "matplotlib",
   "corner",

@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import importlib.util
 from importlib import resources
-import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,7 +21,6 @@ from astropy.cosmology import FlatLambdaCDM
 from astropy import units as u
 from dustmaps.sfd import SFDQuery
 import extinction
-from speclite import filters as speclite_filters
 
 from .config import EmissionLineTemplate, FeIITemplate, FilterCurve, FitConfig
 
@@ -272,19 +270,23 @@ _NEBULAR_REST_TEMPLATE_CACHE: dict[tuple[Any, ...], tuple[np.ndarray | None, np.
 _FIXED_NEBULAR_LINE_PROFILE_CACHE: dict[tuple[Any, ...], np.ndarray] = {}
 _REDSHIFT_PROJECTION_CACHE: dict[tuple[Any, ...], tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
 _FIXED_LOCAL_LINE_PROJECTION_CACHE: dict[tuple[Any, ...], tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = {}
-_DEFAULT_SPECLITE_NAME_MAP = {
-    "u_sdss": "sdss2010-u",
-    "g_sdss": "sdss2010-g",
-    "r_sdss": "sdss2010-r",
-    "i_sdss": "sdss2010-i",
-    "z_sdss": "sdss2010-z",
-    "J_2mass": "twomass-J",
-    "H_2mass": "twomass-H",
-    "Ks_2mass": "twomass-Ks",
-    "W1": "wise2010-W1",
-    "W2": "wise2010-W2",
-    "W3": "wise2010-W3",
-    "W4": "wise2010-W4",
+_FILTER_NAME_ALIASES = {
+    "FUV_galex": "galex.FUV",
+    "NUV_galex": "galex.NUV",
+    "B_johnson": "generic.johnson.B",
+    "V_johnson": "generic.johnson.V",
+    "u_sdss": "sloan.sdss.u",
+    "g_sdss": "sloan.sdss.g",
+    "r_sdss": "sloan.sdss.r",
+    "i_sdss": "sloan.sdss.i",
+    "z_sdss": "sloan.sdss.z",
+    "J_2mass": "2mass.J",
+    "H_2mass": "2mass.H",
+    "Ks_2mass": "2mass.Ks",
+    "W1": "wise.W1",
+    "W2": "wise.W2",
+    "W3": "wise.W3",
+    "W4": "wise.W4",
 }
 def _package_resource_path(relpath: str) -> Path:
     """Return an absolute path to a packaged grahspj resource."""
@@ -308,16 +310,6 @@ def _get_sfd_query():
     if cache_key not in _SFD_QUERY_CACHE:
         _SFD_QUERY_CACHE[cache_key] = SFDQuery()
     return _SFD_QUERY_CACHE[cache_key]
-
-
-def _sanitize_speclite_token(value: str, prefix: str) -> str:
-    """Normalize a token for safe use in generated speclite filter names."""
-    token = re.sub(r"[^0-9A-Za-z_]+", "_", str(value)).strip("_")
-    if not token:
-        token = prefix
-    if token[0].isdigit():
-        token = f"{prefix}_{token}"
-    return token
 
 
 def _as_angstrom_values(values) -> np.ndarray:
@@ -424,27 +416,42 @@ def _get_pcigale_database_cls():
             return None
 
 
-def _curve_to_speclite_filter(curve: FilterCurve, group_name: str) -> speclite_filters.FilterResponse:
-    """Wrap an inline filter curve into a speclite FilterResponse."""
+def _filter_effective_wavelength(wave: np.ndarray, trans: np.ndarray) -> float:
+    """Compute a pcigale-style effective wavelength for an internal filter curve."""
+    denom = float(np.trapezoid(trans, wave))
+    if denom <= 0.0:
+        return float(np.nanmean(wave))
+    return float(np.trapezoid(wave * trans, wave) / denom)
+
+
+def _normalize_filter_curve(curve: FilterCurve, name: str | None = None) -> FilterCurve:
+    """Return a sorted, unique, non-negative internal filter curve."""
     wave = np.asarray(curve.wave, dtype=float)
     trans = np.clip(np.asarray(curve.transmission, dtype=float), 0.0, None)
     if wave.ndim != 1 or trans.ndim != 1 or wave.size != trans.size:
         raise ValueError(f"Filter curve {curve.name!r} must have 1D wave/transmission arrays of equal length.")
     if wave.size < 3:
         raise ValueError(f"Filter curve {curve.name!r} must have at least 3 wavelength samples.")
-    if trans[0] != 0.0 or trans[-1] != 0.0:
-        wave = wave.copy()
-        trans = trans.copy()
-        trans[0] = 0.0
-        trans[-1] = 0.0
-    meta = {
-        "group_name": _sanitize_speclite_token(group_name, "filter"),
-        "band_name": _sanitize_speclite_token(curve.name, "band"),
-    }
-    return speclite_filters.FilterResponse(
-        wavelength=wave * u.AA,
-        response=trans,
-        meta=meta,
+    finite = np.isfinite(wave) & np.isfinite(trans)
+    wave = wave[finite]
+    trans = trans[finite]
+    if wave.size < 3:
+        raise ValueError(f"Filter curve {curve.name!r} must have at least 3 finite wavelength samples.")
+    order = np.argsort(wave, kind="stable")
+    wave, trans = wave[order], trans[order]
+    unique = np.concatenate(([True], np.diff(wave) > 0))
+    wave, trans = wave[unique], trans[unique]
+    if wave.size < 3:
+        raise ValueError(f"Filter curve {curve.name!r} must have at least 3 unique wavelength samples.")
+    wave = wave.copy()
+    trans = trans.copy()
+    trans[0] = 0.0
+    trans[-1] = 0.0
+    return FilterCurve(
+        name=name if name is not None else curve.name,
+        wave=wave,
+        transmission=trans,
+        effective_wavelength=_filter_effective_wavelength(wave, trans),
     )
 
 
@@ -490,28 +497,7 @@ def _load_vendored_filter_curve(filter_name: str) -> FilterCurve | None:
         trans *= wave
     trans = np.clip(trans, 0.0, None)
 
-    # ensure strictly increasing wavelength (speclite requirement)
-    order = np.argsort(wave, kind="stable")
-    wave, trans = wave[order], trans[order]
-    unique = np.concatenate(([True], np.diff(wave) > 0))
-    wave, trans = wave[unique], trans[unique]
-
-    trans[0] = 0.0
-    trans[-1] = 0.0
-
-    return FilterCurve(name=filter_name, wave=wave, transmission=trans)
-
-
-def _load_named_speclite_filter(filter_name: str, cfg: FitConfig):
-    """Resolve a configured filter name to a built-in speclite response."""
-    speclite_name = cfg.filters.speclite_names.get(filter_name, _DEFAULT_SPECLITE_NAME_MAP.get(filter_name, filter_name))
-    try:
-        loaded = speclite_filters.load_filters(speclite_name)
-    except Exception:
-        return None
-    if len(loaded) != 1:
-        raise ValueError(f"Expected a single speclite filter for {filter_name!r}, got {len(loaded)} from {speclite_name!r}.")
-    return loaded[0]
+    return _normalize_filter_curve(FilterCurve(name=filter_name, wave=wave, transmission=trans), name=filter_name)
 
 
 def _filter_response_cache_key(cfg: FitConfig) -> tuple[Any, ...]:
@@ -519,13 +505,12 @@ def _filter_response_cache_key(cfg: FitConfig) -> tuple[Any, ...]:
     return (
         tuple(str(name) for name in cfg.photometry.filter_names),
         tuple((curve.name, id(curve.wave), id(curve.transmission), curve.effective_wavelength) for curve in cfg.filters.curves),
-        tuple(sorted((str(k), str(v)) for k, v in cfg.filters.speclite_names.items())),
         bool(cfg.filters.use_grahsp_database),
     )
 
 
 def _load_filter_responses(cfg: FitConfig):
-    """Resolve configured filters to speclite responses, using caching."""
+    """Resolve configured filters to internal filter curves, using caching."""
     cache_key = _filter_response_cache_key(cfg)
     cached = _FILTER_RESPONSE_CACHE.get(cache_key)
     if cached is not None:
@@ -534,22 +519,19 @@ def _load_filter_responses(cfg: FitConfig):
     responses = []
     for filter_name in cfg.photometry.filter_names:
         if filter_name in inline_curves:
-            responses.append(_curve_to_speclite_filter(inline_curves[filter_name], group_name="inline"))
+            responses.append(_normalize_filter_curve(inline_curves[filter_name], name=filter_name))
             continue
-        builtin = _load_named_speclite_filter(filter_name, cfg)
-        if builtin is not None:
-            responses.append(builtin)
-            continue
-        vendored = _load_vendored_filter_curve(filter_name)
+        resolved_name = _FILTER_NAME_ALIASES.get(filter_name, filter_name)
+        vendored = _load_vendored_filter_curve(resolved_name)
         if vendored is not None:
-            responses.append(_curve_to_speclite_filter(vendored, group_name="grahspj"))
+            responses.append(_normalize_filter_curve(vendored, name=filter_name))
             continue
         if not cfg.filters.use_grahsp_database:
             raise ValueError(
-                f"Filter {filter_name!r} was not provided inline and could not be loaded by speclite; "
+                f"Filter {filter_name!r} was not provided inline and is not available in vendored filters; "
                 "GRAHSP database fallback is disabled."
             )
-        responses.append(_curve_to_speclite_filter(_fetch_database_filter_curve(filter_name), group_name="grahsp"))
+        responses.append(_normalize_filter_curve(_fetch_database_filter_curve(resolved_name), name=filter_name))
     _FILTER_RESPONSE_CACHE[cache_key] = responses
     return responses
 
@@ -727,11 +709,15 @@ def _load_vendored_dale2014_templates() -> tuple[np.ndarray, np.ndarray, np.ndar
     return loaded
 
 
-def _prepare_loaded_filter(obs_wave: np.ndarray, response: speclite_filters.FilterResponse) -> LoadedFilter:
+def _prepare_loaded_filter(obs_wave: np.ndarray, response: FilterCurve) -> LoadedFilter:
     """Precompute interpolation metadata for one filter on the model grid."""
-    filt_wave = _as_angstrom_values(response.wavelength)
-    trans = np.clip(np.asarray(response.response, dtype=float), 0.0, None)
-    effective = _scalar_angstrom_value(response.effective_wavelength)
+    filt_wave = _as_angstrom_values(response.wave)
+    trans = np.clip(np.asarray(response.transmission, dtype=float), 0.0, None)
+    effective = (
+        _filter_effective_wavelength(filt_wave, trans)
+        if response.effective_wavelength is None
+        else _scalar_angstrom_value(response.effective_wavelength)
+    )
     mask = (obs_wave >= filt_wave[0]) & (obs_wave <= filt_wave[-1])
     work_wave = obs_wave[mask]
     if work_wave.size < 2:
