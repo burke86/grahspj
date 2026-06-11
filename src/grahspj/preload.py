@@ -350,6 +350,20 @@ def _mw_band_attenuation_factor(wave_obs, filt_trans, ebv, r_v=3.1):
     return numer / denom
 
 
+def _mw_pixel_attenuation_factor(wave_obs, ebv, r_v=3.1):
+    """Compute the Milky Way attenuation factor at observed-frame wavelengths."""
+    wave_obs = np.asarray(wave_obs, dtype=float)
+    factors = np.ones_like(wave_obs, dtype=float)
+    if (not np.isfinite(ebv)) or ebv == 0.0 or wave_obs.size == 0:
+        return factors
+    valid = np.isfinite(wave_obs) & (wave_obs > 0.0)
+    if not np.any(valid):
+        return factors
+    a_lambda = extinction.fitzpatrick99(wave_obs[valid], a_v=float(r_v) * float(ebv), r_v=float(r_v))
+    factors[valid] = 10.0 ** (-0.4 * np.asarray(a_lambda, dtype=float))
+    return factors
+
+
 def _map_logzsol_to_dsps_lgmet(logzsol_grid: Sequence[float], ssp_lgmet: np.ndarray) -> np.ndarray:
     """Map log(Z/Zsun) fitting values onto the DSPS metallicity convention."""
     logzsol_grid = np.asarray(logzsol_grid, dtype=float)
@@ -1533,7 +1547,6 @@ def build_model_context(cfg: FitConfig) -> ModelContext:
         spec_effective_spatial_scale_arcsec = np.array([], dtype=float)
         spec_aperture_diameter_arcsec = np.array([], dtype=float)
         spec_instruments = ()
-    jaxqsofit_prior_config = _build_jaxqsofit_prior_config(cfg, spec_fluxes, spec_mask)
 
     rest_wave = np.geomspace(cfg.galaxy.rest_wave_min, cfg.galaxy.rest_wave_max, cfg.galaxy.n_wave).astype(float)
     obs_wave = rest_wave * (1.0 + max(cfg.observation.redshift, 0.0))
@@ -1630,6 +1643,12 @@ def build_model_context(cfg: FitConfig) -> ModelContext:
         )
         fluxes = fluxes / np.clip(factors, 1e-12, None)
         errors = errors / np.clip(factors, 1e-12, None)
+        if spec_wave_obs.size > 0:
+            spec_factors = _mw_pixel_attenuation_factor(spec_wave_obs, mw_ebv)
+            spec_fluxes = spec_fluxes / np.clip(spec_factors, 1e-12, None)
+            spec_errors = spec_errors / np.clip(spec_factors, 1e-12, None)
+
+    jaxqsofit_prior_config = _build_jaxqsofit_prior_config(cfg, spec_fluxes, spec_mask)
 
     return ModelContext(
         fit_config=cfg,
