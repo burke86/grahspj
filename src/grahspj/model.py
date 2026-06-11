@@ -392,7 +392,7 @@ def _cigale_nebular_correction(f_esc, f_dust):
 def _balmer_continuum_jax(wave, balmer_norm, balmer_te, balmer_tau, balmer_vel):
     """Evaluate the broadened Balmer continuum template."""
     lam_be = 3646.0
-    h_c_per_k_B = 1.439e7
+    h_c_per_k_B = 1.4388e8
     bb = (wave**-5) / jnp.expm1(jnp.clip(h_c_per_k_B / (balmer_te * wave), 1e-9, 700.0))
     bb0 = (lam_be**-5) / jnp.expm1(jnp.clip(h_c_per_k_B / (balmer_te * lam_be), 1e-9, 700.0))
     tau = balmer_tau * (wave / lam_be) ** 3
@@ -494,7 +494,7 @@ def _project_filters(obs_flux, packed_filters):
     values = left * (1.0 - interp_weight) + right * interp_weight
     values = jnp.where(valid_mask, values, 0.0)
     weighted_trans = jnp.where(valid_mask, transmission, 0.0)
-    weighted_wave = jnp.where(valid_mask, work_wave, 0.0)
+    weighted_wave = work_wave
     numer = jnp.trapezoid(values * weighted_trans, weighted_wave, axis=1)
     denom = jnp.maximum(jnp.trapezoid(weighted_trans, weighted_wave, axis=1), 1e-30)
     f_lambda = numer / denom
@@ -1189,7 +1189,7 @@ def photometric_loglike(pred_fluxes, obs_fluxes, obs_errors, upper_limits, data_
         att_unc = 10 ** log_unc_frac / tf
         sys_variance = sys_variance + (att_unc * pred_fluxes) ** 2
     if lyman_break_uncertainty:
-        ly_unc = jnp.where(filter_wavelength / (1.0 + redshift) < 150.0, 1.0e8, 0.0)
+        ly_unc = jnp.where(filter_wavelength / (1.0 + redshift) < 1500.0, 1.0e8, 0.0)
         sys_variance = sys_variance + (ly_unc * pred_fluxes) ** 2
     total_variance = jnp.nan_to_num(obs_variance + sys_variance + var_variance, nan=1.0e30, posinf=1.0e30, neginf=1.0e30)
     scale = jnp.sqrt(jnp.clip(total_variance, 1e-30, 1.0e60))

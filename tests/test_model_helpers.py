@@ -48,14 +48,18 @@ from grahspj.model import (
     _redshift_to_obs,
     _torus_component,
     grahsp_photometric_model,
+    photometric_loglike,
 )
 from grahspj.preload import _build_fixed_igm_jax, _build_igm_cache_jax, build_model_context
 from grahspj.preload import (
     ModelContext,
+    PackedFilters,
     PackedFiltersJax,
     SSPData,
     _DALE2014_CACHE,
     _HOST_BASIS_CACHE,
+    _build_filter_projection_matrices_for_redshift,
+    _build_fixed_filter_projection_matrices,
     _build_host_basis,
     _lnu_lsun_per_hz_to_llambda_w_per_a_np,
     _load_vendored_filter_curve,
@@ -385,6 +389,22 @@ def test_balmer_continuum_has_3646_angstrom_edge_and_blueward_emission():
     assert np.all(np.isfinite(balmer))
 
 
+def test_balmer_continuum_planck_factor_uses_angstrom_kelvin_constant():
+    wave = np.linspace(1000.0, 3646.0, 2647)
+    balmer = np.asarray(_balmer_continuum_jax(wave, balmer_norm=1.0, balmer_te=15000.0, balmer_tau=1.0, balmer_vel=0.0))
+
+    idx_1500 = np.argmin(np.abs(wave - 1500.0))
+    idx_3646 = np.argmin(np.abs(wave - 3646.0))
+    h_c_per_k_B_angstrom = 1.4388e8
+    ratio_wave = np.asarray([wave[idx_1500], wave[idx_3646]])
+    tau = (ratio_wave / 3646.0) ** 3
+    bb = (ratio_wave**-5) / np.expm1(h_c_per_k_B_angstrom / (15000.0 * ratio_wave))
+    bb0 = (3646.0**-5) / np.expm1(h_c_per_k_B_angstrom / (15000.0 * 3646.0))
+    expected = (1.0 - np.exp(-tau)) * bb / bb0
+
+    assert balmer[idx_1500] / balmer[idx_3646] == pytest.approx(expected[0] / expected[1], rel=1.0e-6)
+
+
 def test_redshift_projection_uses_luminosity_distance_and_one_plus_z():
     rest_wave = np.asarray([1000.0, 2000.0, 3000.0])
     rest_lum = np.asarray([4.0, 4.0, 4.0])
@@ -408,6 +428,34 @@ def test_upper_limit_likelihood_uses_standard_deviation_not_variance():
     assert chi2_scaled == pytest.approx(chi2, rel=1.0e-12)
 
 
+def test_lyman_break_uncertainty_threshold_uses_angstroms():
+    kwargs = dict(
+        pred_fluxes=np.asarray([100.0]),
+        obs_fluxes=np.asarray([1.0]),
+        obs_errors=np.asarray([0.1]),
+        upper_limits=np.asarray([False]),
+        data_mask=np.asarray([True]),
+        systematics_width=0.0,
+        intrinsic_scatter=0.0,
+        likelihood_family="gaussian",
+        student_t_df=5.0,
+        agn_component=np.asarray([0.0]),
+        agn_bol_lum_w=1.0e38,
+        agn_nev=0.1,
+        variability_uncertainty=False,
+        attenuation_model_uncertainty=False,
+        transmitted_fraction=np.asarray([1.0]),
+        filter_wavelength=np.asarray([1400.0]),
+        redshift=0.0,
+    )
+
+    logl_without_uncertainty = float(photometric_loglike(**kwargs, lyman_break_uncertainty=False))
+    logl_with_uncertainty = float(photometric_loglike(**kwargs, lyman_break_uncertainty=True))
+
+    assert logl_without_uncertainty < -1.0e5
+    assert logl_with_uncertainty > -100.0
+
+
 def test_filter_projection_flat_flambda_to_mjy_units():
     packed = PackedFiltersJax(
         interp_indices=np.asarray([[0, 1, 2]], dtype=np.int32),
@@ -422,6 +470,58 @@ def test_filter_projection_flat_flambda_to_mjy_units():
     expected = 1.0e-10 / 299792458.0 * 1.0e29 * 5000.0**2 * 2.0e-20
 
     assert projected[0] == pytest.approx(expected)
+
+
+def test_filter_projection_padded_rows_do_not_add_spurious_trapezoid_segment():
+    work_wave = np.asarray([[4000.0, 5000.0, 6000.0, 6000.0]], dtype=float)
+    transmission = np.asarray([[1.0, 1.0, 0.1, 0.0]], dtype=float)
+    valid_mask = np.asarray([[True, True, True, False]], dtype=bool)
+    interp_indices = np.asarray([[0, 1, 2, 2]], dtype=np.int32)
+    interp_weight = np.zeros_like(work_wave)
+    effective_wavelength = np.asarray([5000.0], dtype=float)
+    obs_flux = 1.0e-20 * (np.asarray([4000.0, 5000.0, 6000.0, 7000.0]) / 5000.0) ** 2
+    packed_jax = PackedFiltersJax(
+        interp_indices=interp_indices,
+        interp_weight=interp_weight,
+        transmission=transmission,
+        work_wave=work_wave,
+        effective_wavelength=effective_wavelength,
+        valid_mask=valid_mask,
+    )
+    packed_np = PackedFilters(
+        interp_indices=interp_indices,
+        interp_weight=interp_weight,
+        transmission=transmission,
+        work_wave=work_wave,
+        effective_wavelength=effective_wavelength,
+        valid_mask=valid_mask,
+    )
+
+    real_wave = work_wave[0, valid_mask[0]]
+    real_trans = transmission[0, valid_mask[0]]
+    real_flux = obs_flux[: real_wave.size]
+    f_lambda = np.trapezoid(real_flux * real_trans, real_wave) / np.trapezoid(real_trans, real_wave)
+    expected = 1.0e-10 / 299792458.0 * 1.0e29 * effective_wavelength[0] ** 2 * f_lambda
+
+    projected = np.asarray(_project_filters(obs_flux, packed_jax))
+    _, fixed_scalar_matrix = _build_fixed_filter_projection_matrices(
+        rest_wave=np.asarray([4000.0, 5000.0, 6000.0, 7000.0]),
+        packed_filters=packed_np,
+        fixed_igm=np.ones(4),
+        luminosity_distance_m=1.0,
+        redshift=0.0,
+    )
+    _, dynamic_scalar_matrix = _build_filter_projection_matrices_for_redshift(
+        rest_wave=np.asarray([4000.0, 5000.0, 6000.0, 7000.0]),
+        packed_filters=packed_np,
+        igm=np.ones(4),
+        luminosity_distance_m=1.0,
+        redshift=0.0,
+    )
+
+    assert projected[0] == pytest.approx(expected)
+    assert (fixed_scalar_matrix @ obs_flux)[0] == pytest.approx(expected)
+    assert (dynamic_scalar_matrix @ obs_flux)[0] == pytest.approx(expected)
 
 
 def test_ukidss_dr11plus_vendored_filters_load_in_angstroms():

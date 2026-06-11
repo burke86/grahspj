@@ -382,6 +382,13 @@ def test_fit_dispatch_methods(monkeypatch):
         ns_live_points=25,
         ns_max_samples=200,
         ns_dlogz=0.1,
+        ns_resamples=30,
+        ns_difficult_model=True,
+        ns_parameter_estimation=True,
+        ns_num_parallel_workers=3,
+        ns_init_efficiency_threshold=0.2,
+        ns_max_likelihood_evals=5000,
+        ns_efficiency_threshold=0.001,
     )
     assert calls == [
         (
@@ -390,6 +397,13 @@ def test_fit_dispatch_methods(monkeypatch):
                 "num_live_points": 25,
                 "max_samples": 200,
                 "dlogz": 0.1,
+                "num_resamples": 30,
+                "difficult_model": True,
+                "parameter_estimation": True,
+                "num_parallel_workers": 3,
+                "init_efficiency_threshold": 0.2,
+                "max_likelihood_evals": 5000,
+                "efficiency_threshold": 0.001,
                 "progress_bar": False,
             },
         )
@@ -409,7 +423,7 @@ def test_fit_ns_populates_samples(monkeypatch):
             self.run_args = (rng_key, args, kwargs)
 
         def get_samples(self, rng_key, num_samples, *, group_by_chain=False):
-            assert num_samples == 5
+            assert num_samples == 7
             assert group_by_chain is False
             return {
                 "log_stellar_mass": np.linspace(10.0, 10.4, num_samples),
@@ -430,6 +444,13 @@ def test_fit_ns_populates_samples(monkeypatch):
         num_live_points=17,
         max_samples=123,
         dlogz=0.05,
+        ns_difficult_model=True,
+        ns_parameter_estimation=True,
+        ns_num_parallel_workers=2,
+        ns_init_efficiency_threshold=0.15,
+        ns_max_likelihood_evals=1000,
+        ns_efficiency_threshold=0.01,
+        ns_resamples=7,
         progress_bar=False,
     )
 
@@ -437,11 +458,45 @@ def test_fit_ns_populates_samples(monkeypatch):
     assert result["constructor_kwargs"]["num_live_points"] == 17
     assert result["constructor_kwargs"]["max_samples"] == 123
     assert result["constructor_kwargs"]["verbose"] is False
+    assert result["constructor_kwargs"]["difficult_model"] is True
+    assert result["constructor_kwargs"]["parameter_estimation"] is True
+    assert result["constructor_kwargs"]["num_parallel_workers"] == 2
+    assert result["constructor_kwargs"]["init_efficiency_threshold"] == 0.15
     assert result["termination_kwargs"]["dlogZ"] == 0.05
+    assert result["termination_kwargs"]["max_num_likelihood_evaluations"] == 1000
+    assert result["termination_kwargs"]["efficiency_threshold"] == 0.01
+    assert result["num_resamples"] == 7
     assert fitter.ns_result is result
     assert set(fitter.samples) == {"log_stellar_mass", "host_age_weights", "host_lgmet_weights"}
-    assert fitter.samples["log_stellar_mass"].shape == (5,)
+    assert fitter.samples["log_stellar_mass"].shape == (7,)
     assert fitter.predictive is None
+
+
+def test_fit_ns_passes_explicit_none_max_samples(monkeypatch):
+    captured = {}
+
+    class _FakeNestedSampler:
+        def __init__(self, model, *, constructor_kwargs=None, termination_kwargs=None):
+            captured["constructor_kwargs"] = constructor_kwargs or {}
+            self._results = {"status": "ok"}
+
+        def run(self, rng_key, *args, **kwargs):
+            return None
+
+        def get_samples(self, rng_key, num_samples, *, group_by_chain=False):
+            return {"log_stellar_mass": np.linspace(10.0, 10.4, num_samples)}
+
+    monkeypatch.setattr("grahspj.core._get_nested_sampler_cls", lambda: _FakeNestedSampler)
+
+    fitter = GRAHSPJ.__new__(GRAHSPJ)
+    fitter.config = _mock_config()
+    fitter.config.inference.num_samples = 5
+    fitter.predictive = None
+    fitter._model = lambda: None
+
+    GRAHSPJ.fit_ns(fitter, num_live_points=17, progress_bar=False)
+
+    assert captured["constructor_kwargs"]["max_samples"] is None
 
 
 def test_ns_samples_work_with_summary_and_predict(monkeypatch):

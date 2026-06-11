@@ -212,6 +212,13 @@ class GRAHSPJ:
         ns_live_points: int | None = None,
         ns_max_samples: int | None = None,
         ns_dlogz: float | None = None,
+        ns_resamples: int | None = None,
+        ns_difficult_model: bool = False,
+        ns_parameter_estimation: bool = False,
+        ns_num_parallel_workers: int | None = None,
+        ns_init_efficiency_threshold: float | None = None,
+        ns_max_likelihood_evals: int | None = None,
+        ns_efficiency_threshold: float | None = None,
         plot_fig: bool = False,
         save_fig: bool = False,
         save_result: bool = False,
@@ -241,6 +248,20 @@ class GRAHSPJ:
             ns_max_samples = kwargs.pop("ns_max_samples")
         if "ns_dlogz" in kwargs and ns_dlogz is None:
             ns_dlogz = kwargs.pop("ns_dlogz")
+        if "ns_resamples" in kwargs and ns_resamples is None:
+            ns_resamples = kwargs.pop("ns_resamples")
+        if "ns_difficult_model" in kwargs:
+            ns_difficult_model = kwargs.pop("ns_difficult_model")
+        if "ns_parameter_estimation" in kwargs:
+            ns_parameter_estimation = kwargs.pop("ns_parameter_estimation")
+        if "ns_num_parallel_workers" in kwargs and ns_num_parallel_workers is None:
+            ns_num_parallel_workers = kwargs.pop("ns_num_parallel_workers")
+        if "ns_init_efficiency_threshold" in kwargs and ns_init_efficiency_threshold is None:
+            ns_init_efficiency_threshold = kwargs.pop("ns_init_efficiency_threshold")
+        if "ns_max_likelihood_evals" in kwargs and ns_max_likelihood_evals is None:
+            ns_max_likelihood_evals = kwargs.pop("ns_max_likelihood_evals")
+        if "ns_efficiency_threshold" in kwargs and ns_efficiency_threshold is None:
+            ns_efficiency_threshold = kwargs.pop("ns_efficiency_threshold")
         if "target_accept_prob" in kwargs and target_accept_prob is None:
             target_accept_prob = kwargs.pop("target_accept_prob")
         use_map_init_explicit = "use_map_init" in kwargs
@@ -324,6 +345,20 @@ class GRAHSPJ:
                 ns_kwargs["max_samples"] = ns_max_samples
             if ns_dlogz is not None:
                 ns_kwargs["dlogz"] = ns_dlogz
+            if ns_resamples is not None:
+                ns_kwargs["num_resamples"] = ns_resamples
+            if ns_difficult_model:
+                ns_kwargs["difficult_model"] = bool(ns_difficult_model)
+            if ns_parameter_estimation:
+                ns_kwargs["parameter_estimation"] = bool(ns_parameter_estimation)
+            if ns_num_parallel_workers is not None:
+                ns_kwargs["num_parallel_workers"] = ns_num_parallel_workers
+            if ns_init_efficiency_threshold is not None:
+                ns_kwargs["init_efficiency_threshold"] = ns_init_efficiency_threshold
+            if ns_max_likelihood_evals is not None:
+                ns_kwargs["max_likelihood_evals"] = ns_max_likelihood_evals
+            if ns_efficiency_threshold is not None:
+                ns_kwargs["efficiency_threshold"] = ns_efficiency_threshold
             fit_output = self.fit_ns(**ns_kwargs)
         else:
             raise ValueError("fit_method must be one of: 'optax+nuts', 'optax', 'nuts', 'ns'")
@@ -475,19 +510,59 @@ class GRAHSPJ:
         num_live_points: int | None = None,
         max_samples: int | None = None,
         dlogz: float | None = None,
+        num_resamples: int | None = None,
+        difficult_model: bool | None = None,
+        parameter_estimation: bool | None = None,
+        num_parallel_workers: int | None = None,
+        init_efficiency_threshold: float | None = None,
+        max_likelihood_evals: int | None = None,
+        efficiency_threshold: float | None = None,
+        ns_difficult_model: bool | None = None,
+        ns_parameter_estimation: bool | None = None,
+        ns_num_parallel_workers: int | None = None,
+        ns_init_efficiency_threshold: float | None = None,
+        ns_max_likelihood_evals: int | None = None,
+        ns_efficiency_threshold: float | None = None,
+        ns_resamples: int | None = None,
         progress_bar: bool = True,
     ):
         """Run full-model nested sampling and resample equal-weight posterior draws."""
         NestedSampler = _get_nested_sampler_cls()
 
+        if ns_difficult_model is not None:
+            difficult_model = ns_difficult_model
+        if ns_parameter_estimation is not None:
+            parameter_estimation = ns_parameter_estimation
+        if ns_num_parallel_workers is not None and num_parallel_workers is None:
+            num_parallel_workers = ns_num_parallel_workers
+        if ns_init_efficiency_threshold is not None and init_efficiency_threshold is None:
+            init_efficiency_threshold = ns_init_efficiency_threshold
+        if ns_max_likelihood_evals is not None and max_likelihood_evals is None:
+            max_likelihood_evals = ns_max_likelihood_evals
+        if ns_efficiency_threshold is not None and efficiency_threshold is None:
+            efficiency_threshold = ns_efficiency_threshold
+        if ns_resamples is not None and num_resamples is None:
+            num_resamples = ns_resamples
+
         constructor_kwargs: dict[str, Any] = {"verbose": bool(progress_bar)}
         if num_live_points is not None:
             constructor_kwargs["num_live_points"] = int(num_live_points)
-        if max_samples is not None:
-            constructor_kwargs["max_samples"] = int(max_samples)
+        constructor_kwargs["max_samples"] = None if max_samples is None else int(max_samples)
+        if difficult_model:
+            constructor_kwargs["difficult_model"] = bool(difficult_model)
+        if parameter_estimation:
+            constructor_kwargs["parameter_estimation"] = bool(parameter_estimation)
+        if num_parallel_workers is not None:
+            constructor_kwargs["num_parallel_workers"] = int(num_parallel_workers)
+        if init_efficiency_threshold is not None:
+            constructor_kwargs["init_efficiency_threshold"] = float(init_efficiency_threshold)
         termination_kwargs: dict[str, Any] = {}
         if dlogz is not None:
             termination_kwargs["dlogZ"] = float(dlogz)
+        if max_likelihood_evals is not None:
+            termination_kwargs["max_num_likelihood_evaluations"] = int(max_likelihood_evals)
+        if efficiency_threshold is not None:
+            termination_kwargs["efficiency_threshold"] = float(efficiency_threshold)
 
         sampler = NestedSampler(
             self._model,
@@ -497,9 +572,10 @@ class GRAHSPJ:
         rng_key = jax.random.PRNGKey(self.config.inference.seed + 2)
         sampler.run(rng_key)
         posterior_rng_key = jax.random.PRNGKey(self.config.inference.seed + 3)
+        posterior_num_samples = int(self.config.inference.num_samples if num_resamples is None else num_resamples)
         samples = sampler.get_samples(
             posterior_rng_key,
-            num_samples=int(self.config.inference.num_samples),
+            num_samples=posterior_num_samples,
             group_by_chain=False,
         )
         self.ns_result = {
@@ -507,6 +583,7 @@ class GRAHSPJ:
             "results": getattr(sampler, "_results", None),
             "constructor_kwargs": dict(getattr(sampler, "constructor_kwargs", constructor_kwargs)),
             "termination_kwargs": dict(getattr(sampler, "termination_kwargs", termination_kwargs)),
+            "num_resamples": posterior_num_samples,
         }
         self.samples = {k: np.asarray(v) for k, v in samples.items()}
         self.predictive = None
