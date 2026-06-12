@@ -26,6 +26,7 @@ __all__ = [
     "FilterSet",
     "FitConfig",
     "GalaxyConfig",
+    "HostBasisJax",
     "JAXSEDFit",
     "InferenceConfig",
     "JaxQSOFitConfig",
@@ -35,6 +36,9 @@ __all__ = [
     "PhotometryData",
     "SpectroscopyConfig",
     "SpectroscopyData",
+    "build_host_basis_jax",
+    "build_host_state",
+    "host_rest_on_basis",
     "plot_corner",
     "plot_fit_sed",
     "plot_trace",
@@ -77,4 +81,8 @@ def __getattr__(name):
         from . import benchmark as _benchmark
 
         return getattr(_benchmark, name)
+    if name in {"HostBasisJax", "build_host_basis_jax", "build_host_state", "host_rest_on_basis"}:
+        from . import host as _host
+
+        return getattr(_host, name)
     raise AttributeError(name)
