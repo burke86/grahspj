@@ -56,8 +56,8 @@ class _FakeFitter:
         }
         return {"median": {"log_stellar_mass": self._mass}}
 
-    def fit(self, fit_method="optax+nuts", **kwargs):
-        assert fit_method == "optax+nuts"
+    def fit(self, **kwargs):
+        assert self.config.inference.method == "optax+nuts"
         return {"fit": self.fit_map()}
 
     def recovered_log_stellar_mass(self):
@@ -73,8 +73,8 @@ class _FailingFakeFitter(_FakeFitter):
             raise RuntimeError("intentional benchmark failure")
         return super().fit_map()
 
-    def fit(self, fit_method="optax+nuts", **kwargs):
-        assert fit_method == "optax+nuts"
+    def fit(self, **kwargs):
+        assert self.config.inference.method == "optax+nuts"
         return {"fit": self.fit_map()}
 
 

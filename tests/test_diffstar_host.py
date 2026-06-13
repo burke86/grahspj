@@ -23,7 +23,7 @@ def _mock_config():
     return FitConfig(
         observation=Observation(object_id="obj", redshift=0.1),
         photometry=PhotometryData(filter_names=["f1"], fluxes=[1.0], errors=[0.1]),
-        filters=FilterSet(curves=[FilterCurve(name="f1", wave=[1000.0, 2000.0, 3000.0], transmission=[0.0, 1.0, 0.0])], use_grahsp_database=False),
+        filters=FilterSet(curves=[FilterCurve(name="f1", wave=[1000.0, 2000.0, 3000.0], transmission=[0.0, 1.0, 0.0])]),
         galaxy=GalaxyConfig(dsps_ssp_fn="fake.h5", n_wave=64, sfh_n_steps=16),
         agn=AGNConfig(
             feii_template=FeIITemplate(name="fe", wave=[1000.0, 2000.0], lumin=[1.0, 0.5]),
@@ -350,9 +350,10 @@ def test_fit_dispatch_methods(monkeypatch):
     monkeypatch.setattr(JAXSEDFit, "fit_map", _fit_map)
     monkeypatch.setattr(JAXSEDFit, "fit_nuts", _fit_nuts)
     monkeypatch.setattr(JAXSEDFit, "fit_ns", _fit_ns)
+    fitter.config = type("_Cfg", (), {"inference": InferenceConfig(method="optax+nuts")})()
 
-    out = JAXSEDFit.fit(fitter, fit_method="optax+nuts", progress_bar=True, steps=7, learning_rate=1e-2, num_warmup=3, num_samples=4)
-    assert list(out) == ["map", "nuts"]
+    out = JAXSEDFit.fit(fitter, progress_bar=True, steps=7, learning_rate=1e-2, num_warmup=3, num_samples=4)
+    assert list(out["fit"]) == ["map", "nuts"]
     assert calls[0][0] == "optax"
     assert calls[0][1]["steps"] == 7
     assert calls[0][1]["progress_bar"] is True
@@ -363,21 +364,27 @@ def test_fit_dispatch_methods(monkeypatch):
     assert calls[1][1]["progress_bar"] is True
 
     calls.clear()
-    JAXSEDFit.fit(fitter, fit_method="optax", progress_bar=False, steps=2)
+    fitter.config.inference.method = "optax"
+    out = JAXSEDFit.fit(fitter, progress_bar=False, steps=2)
+    assert out["fit"] == {"median": {"log_stellar_mass": 10.0}}
     assert calls == [("optax", {"steps": 2, "progress_bar": False, "staged": True})]
 
     calls.clear()
-    JAXSEDFit.fit(fitter, fit_method="optax", progress_bar=False, steps=2, staged_map=False)
+    fitter.config.inference.method = "optax"
+    out = JAXSEDFit.fit(fitter, progress_bar=False, steps=2, staged_map=False)
+    assert out["fit"] == {"median": {"log_stellar_mass": 10.0}}
     assert calls == [("optax", {"steps": 2, "progress_bar": False, "staged": False})]
 
     calls.clear()
-    JAXSEDFit.fit(fitter, fit_method="nuts", progress_bar=False, num_warmup=2)
+    fitter.config.inference.method = "nuts"
+    out = JAXSEDFit.fit(fitter, progress_bar=False, num_warmup=2)
+    assert out["fit"] == {"mcmc": "ok"}
     assert calls == [("nuts", {"num_warmup": 2, "progress_bar": False})]
 
     calls.clear()
-    JAXSEDFit.fit(
+    fitter.config.inference.method = "ns"
+    out = JAXSEDFit.fit(
         fitter,
-        fit_method="ns",
         progress_bar=False,
         ns_live_points=25,
         ns_max_samples=200,
@@ -390,6 +397,7 @@ def test_fit_dispatch_methods(monkeypatch):
         ns_max_likelihood_evals=5000,
         ns_efficiency_threshold=0.001,
     )
+    assert out["fit"] == {"nested": "ok"}
     assert calls == [
         (
             "ns",

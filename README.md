@@ -2,6 +2,8 @@
 
 `JAXSEDFit` is a Bayesian SED fitting code for AGN and galaxies. It is an experimental JAX-based implementation of `CIGALE` and `GRAHSP`. It ports `GRAHSP`/`pcigale` model components into JAX/NumPyro and combines them with a JAX-native galaxy models based on `Diffstar` + `DSPS`.
 
+Documentation: [https://jaxsedfit.readthedocs.io/](https://jaxsedfit.readthedocs.io/)
+
 At a high level, `jaxsedfit` currently includes:
 
 - a JAX/NumPyro fitting engine
@@ -75,9 +77,9 @@ From Python:
 ```python
 from jaxsedfit.core import JAXSEDFit
 
+cfg.inference.method = "optax+nuts"
 fitter = JAXSEDFit(cfg)
 fitter.fit(
-    fit_method="optax+nuts",
     optax_steps=600,
     optax_lr=1e-2,
     nuts_warmup=50,
@@ -93,8 +95,8 @@ fitter.fit(
 Nested sampling is also available through NumPyro's `jaxns` wrapper:
 
 ```python
+cfg.inference.method = "ns"
 fitter.fit(
-    fit_method="ns",
     ns_live_points=200,
     ns_dlogz=0.1,
 )
@@ -130,7 +132,7 @@ Bundled third-party resources under [src/jaxsedfit/resources](src/jaxsedfit/reso
 
 - Built-in aliases cover common legacy names such as `u_sdss -> sloan.sdss.u`, `J_2mass -> 2mass.J`, and `W1 -> wise.W1`
 - Vendored photon-response filters are converted to the internal energy-response convention before projection
-- If a filter is not available inline or in the vendored package resources, the optional GRAHSP database fallback is still supported
+- Filters must be available inline or in the vendored package resources
 - Inline curves are used directly as internal filter curves before synthetic photometry is computed
 
 ## Survey PSF Sizes In The Likelihood

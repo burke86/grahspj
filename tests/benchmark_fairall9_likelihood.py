@@ -65,8 +65,7 @@ def build_fairall9_fixedz_config() -> FitConfig:
             psf_fwhm_arcsec=[None if row["psf_fwhm_arcsec"] is None else float(row["psf_fwhm_arcsec"]) for row in phot_rows],
         ),
         filters=FilterSet(
-            use_grahsp_database=False,
-        ),
+            ),
         galaxy=GalaxyConfig(dsps_ssp_fn=str(dsps_ssp_fn)),
         agn=AGNConfig(agn_type=1),
         likelihood=LikelihoodConfig(use_host_capture_model=True),

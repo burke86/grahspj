@@ -10,8 +10,8 @@ import numpy as np
 @dataclass
 class Observation:
     """Observation-level metadata for one fitted source."""
-    object_id: str
     redshift: float
+    object_id: str = "result"
     fit_redshift: bool = False
     redshift_err: float = 0.0
     ra: float | None = None
@@ -79,7 +79,6 @@ class FilterCurve:
 class FilterSet:
     """Filter configuration used to construct synthetic photometry."""
     curves: Sequence[FilterCurve] = field(default_factory=list)
-    use_grahsp_database: bool = True
 
 
 @dataclass
@@ -236,7 +235,8 @@ class SpectroscopyConfig:
 
 @dataclass
 class InferenceConfig:
-    """Inference defaults for MAP optimization and NUTS sampling."""
+    """Inference defaults for MAP optimization, NUTS sampling, and nested sampling."""
+    method: str = "optax+nuts"
     learning_rate: float = 5e-3
     map_steps: int = 1500
     num_warmup: int = 200
@@ -376,7 +376,6 @@ def fit_config_from_mapping(data: Mapping[str, Any]) -> FitConfig:
         curves_raw = filters_raw.get("curves", [])
         filters_obj = FilterSet(
             curves=[_coerce_dataclass(FilterCurve, curve) if isinstance(curve, Mapping) else curve for curve in curves_raw],
-            use_grahsp_database=bool(filters_raw.get("use_grahsp_database", True)),
         )
     else:
         filters_obj = _coerce_dataclass(FilterSet, filters_raw)
