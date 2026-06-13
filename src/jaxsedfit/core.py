@@ -9,7 +9,7 @@ import numpy as np
 from numpyro.infer import MCMC, NUTS, Predictive, SVI, Trace_ELBO, init_to_value
 from numpyro.infer.autoguide import AutoDelta
 
-from .config import FitConfig, serialize_config
+from .config import FitConfig, fit_config_from_mapping, serialize_config
 from .model import grahsp_photometric_model
 from .preload import ModelContext, build_model_context
 
@@ -658,6 +658,60 @@ class JAXSEDFit:
         with open(out, "wb") as fh:
             pickle.dump(payload, fh, protocol=pickle.HIGHEST_PROTOCOL)
         return out
+
+    @staticmethod
+    def _resolve_posterior_path(path: str | Path | None = None) -> Path:
+        """Resolve a saved posterior pickle path or unique posterior in a directory."""
+        if path is None:
+            path = "."
+        resolved = Path(path)
+        if resolved.is_dir():
+            matches = sorted(resolved.glob("*_posterior.pkl"))
+            if not matches:
+                raise FileNotFoundError(f"No *_posterior.pkl file found under: {resolved}")
+            if len(matches) > 1:
+                raise FileNotFoundError(
+                    f"Multiple *_posterior.pkl files found under: {resolved}. "
+                    "Pass an explicit posterior file path."
+                )
+            resolved = matches[0]
+        if not resolved.exists():
+            raise FileNotFoundError(f"Posterior bundle not found: {resolved}")
+        return resolved
+
+    @classmethod
+    def load_from_samples(cls, path: str | Path | None = None) -> "JAXSEDFit":
+        """Load a posterior bundle written by :meth:`save`.
+
+        Parameters
+        ----------
+        path
+            Path to a ``*_posterior.pkl`` file, or a directory containing exactly
+            one such file. Defaults to the current directory.
+
+        Returns
+        -------
+        JAXSEDFit
+            A configured fitter with posterior samples and cached predictive
+            outputs restored from disk.
+        """
+        posterior_path = cls._resolve_posterior_path(path)
+        with open(posterior_path, "rb") as fh:
+            payload = pickle.load(fh)
+        if not isinstance(payload, dict) or "config" not in payload:
+            raise ValueError(f"Unsupported posterior bundle schema: {posterior_path}")
+
+        config = payload["config"]
+        if not isinstance(config, FitConfig):
+            config = fit_config_from_mapping(config)
+        fitter = cls(config)
+        samples = payload.get("samples")
+        fitter.samples = None if samples is None else {k: np.asarray(v) for k, v in samples.items()}
+        predictive = payload.get("predictive")
+        fitter.predictive = None if predictive is None else {k: np.asarray(v) for k, v in predictive.items()}
+        fitter._saved_summary = payload.get("summary")
+        fitter._loaded_posterior_path = posterior_path
+        return fitter
 
     def plot_sed(
         self,

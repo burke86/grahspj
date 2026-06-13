@@ -39,6 +39,7 @@ __all__ = [
     "build_host_basis_jax",
     "build_host_state",
     "host_rest_on_basis",
+    "load_from_samples",
     "load_filter_curve",
     "load_filter_curves",
     "plot_corner",
@@ -57,6 +58,10 @@ def __getattr__(name):
         from .core import JAXSEDFit
 
         return JAXSEDFit
+    if name == "load_from_samples":
+        from .core import JAXSEDFit
+
+        return JAXSEDFit.load_from_samples
     if name == "plot_fit_sed":
         from .plotting import plot_fit_sed
 
