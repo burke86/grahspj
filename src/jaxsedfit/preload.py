@@ -6,9 +6,7 @@ from __future__ import annotations
 # See LICENSES/CeCILL-v2.txt, LICENSES/THIRD_PARTY_NOTICES.md, and the README
 # files in src/jaxsedfit/resources/ for provenance details.
 
-import importlib.util
 from importlib import resources
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -23,6 +21,13 @@ from dustmaps.sfd import SFDQuery
 import extinction
 
 from .config import EmissionLineTemplate, FeIITemplate, FilterCurve, FitConfig
+from .filters import (
+    filter_effective_wavelength,
+    load_filter_curve,
+    normalize_filter_curve,
+    resolve_filter_name,
+    vendored_filter_registry,
+)
 
 
 @dataclass
@@ -270,31 +275,11 @@ _NEBULAR_REST_TEMPLATE_CACHE: dict[tuple[Any, ...], tuple[np.ndarray | None, np.
 _FIXED_NEBULAR_LINE_PROFILE_CACHE: dict[tuple[Any, ...], np.ndarray] = {}
 _REDSHIFT_PROJECTION_CACHE: dict[tuple[Any, ...], tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
 _FIXED_LOCAL_LINE_PROJECTION_CACHE: dict[tuple[Any, ...], tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = {}
-_FILTER_NAME_ALIASES = {
-    "FUV_galex": "galex.FUV",
-    "NUV_galex": "galex.NUV",
-    "B_johnson": "generic.johnson.B",
-    "V_johnson": "generic.johnson.V",
-    "u_sdss": "sloan.sdss.u",
-    "g_sdss": "sloan.sdss.g",
-    "r_sdss": "sloan.sdss.r",
-    "i_sdss": "sloan.sdss.i",
-    "z_sdss": "sloan.sdss.z",
-    "J_2mass": "2mass.J",
-    "H_2mass": "2mass.H",
-    "Ks_2mass": "2mass.Ks",
-    "W1": "wise.W1",
-    "W2": "wise.W2",
-    "W3": "wise.W3",
-    "W4": "wise.W4",
-}
+
+
 def _package_resource_path(relpath: str) -> Path:
     """Return an absolute path to a packaged jaxsedfit resource."""
     return Path(str(resources.files("jaxsedfit").joinpath(relpath)))
-
-_registry_path = _package_resource_path("resources/filters/filter_registry.txt")
-data = np.loadtxt(_registry_path, dtype=str, comments="#")
-_VENDORED_FILTER_FILES = dict(zip(data[:, 0].tolist(), data[:, 1].tolist()))
 
 
 def _load_ssp_templates(dsps_ssp_fn: str):
@@ -386,126 +371,11 @@ def load_cached_ssp_data(dsps_ssp_fn: str) -> SSPData:
     return loaded
 
 
-def _locate_grahsp_repo() -> Path | None:
-    """Best-effort lookup for a local GRAHSP checkout used by optional fallbacks."""
-    candidates = []
-    env = Path(str(Path.cwd()))
-    candidates.append(env / "GRAHSP")
-    candidates.append(Path(__file__).resolve().parents[3] / "GRAHSP")
-    for candidate in candidates:
-        if candidate.exists():
-            return candidate
-    return None
-
-
-def _get_pcigale_database_cls():
-    """Import and return the optional pcigale Database class if available."""
-    try:
-        from pcigale.data import Database  # type: ignore
-        return Database
-    except Exception:
-        repo = _locate_grahsp_repo()
-        if repo is None:
-            return None
-        if str(repo) not in sys.path:
-            sys.path.insert(0, str(repo))
-        try:
-            from pcigale.data import Database  # type: ignore
-            return Database
-        except Exception:
-            return None
-
-
-def _filter_effective_wavelength(wave: np.ndarray, trans: np.ndarray) -> float:
-    """Compute a pcigale-style effective wavelength for an internal filter curve."""
-    denom = float(np.trapezoid(trans, wave))
-    if denom <= 0.0:
-        return float(np.nanmean(wave))
-    return float(np.trapezoid(wave * trans, wave) / denom)
-
-
-def _normalize_filter_curve(curve: FilterCurve, name: str | None = None) -> FilterCurve:
-    """Return a sorted, unique, non-negative internal filter curve."""
-    wave = np.asarray(curve.wave, dtype=float)
-    trans = np.clip(np.asarray(curve.transmission, dtype=float), 0.0, None)
-    if wave.ndim != 1 or trans.ndim != 1 or wave.size != trans.size:
-        raise ValueError(f"Filter curve {curve.name!r} must have 1D wave/transmission arrays of equal length.")
-    if wave.size < 3:
-        raise ValueError(f"Filter curve {curve.name!r} must have at least 3 wavelength samples.")
-    finite = np.isfinite(wave) & np.isfinite(trans)
-    wave = wave[finite]
-    trans = trans[finite]
-    if wave.size < 3:
-        raise ValueError(f"Filter curve {curve.name!r} must have at least 3 finite wavelength samples.")
-    order = np.argsort(wave, kind="stable")
-    wave, trans = wave[order], trans[order]
-    unique = np.concatenate(([True], np.diff(wave) > 0))
-    wave, trans = wave[unique], trans[unique]
-    if wave.size < 3:
-        raise ValueError(f"Filter curve {curve.name!r} must have at least 3 unique wavelength samples.")
-    wave = wave.copy()
-    trans = trans.copy()
-    trans[0] = 0.0
-    trans[-1] = 0.0
-    return FilterCurve(
-        name=name if name is not None else curve.name,
-        wave=wave,
-        transmission=trans,
-        effective_wavelength=_filter_effective_wavelength(wave, trans),
-    )
-
-
-def _fetch_database_filter_curve(filter_name: str) -> FilterCurve:
-    """Load one filter curve from the optional pcigale database backend."""
-    Database = _get_pcigale_database_cls()
-    if Database is None:
-        raise RuntimeError("Could not import pcigale Database to load filter curves.")
-    with Database() as db:
-        filt = db.get_filter(filter_name)
-    return FilterCurve(
-        name=filter_name,
-        wave=np.asarray(filt.trans_table[0], dtype=float),
-        transmission=np.asarray(filt.trans_table[1], dtype=float),
-        effective_wavelength=float(filt.effective_wavelength),
-    )
-
-
-def _load_filter_type(path: str) -> str:
-    """Read the # photon / # energy header line from a .dat filter file."""
-    with open(path) as f:
-        for line in f:
-            if line.startswith("#"):
-                stripped = line.lstrip("#").strip()
-                if stripped in ("energy", "photon"):
-                    return stripped
-    return "energy"  # default: no conversion
-
-
-def _load_vendored_filter_curve(filter_name: str) -> FilterCurve | None:
-    """Load one vendored filter curve if jaxsedfit ships it locally."""
-    relpath = _VENDORED_FILTER_FILES.get(filter_name)
-    if relpath is None:
-        return None
-    path = _package_resource_path(relpath)
-    data = np.loadtxt(path, comments="#")
-    if data.ndim != 2 or data.shape[1] < 2:
-        raise ValueError(f"Vendored filter file {path} does not contain two-column transmission data.")
-
-    wave = np.array(data[:, 0], dtype = float)  # always owns its memory
-    trans = np.array(data[:, 1], dtype = float)  # always owns its memory
-    if _load_filter_type(path) == "photon":
-        trans *= wave
-    trans = np.clip(trans, 0.0, None)
-
-    return _normalize_filter_curve(FilterCurve(name=filter_name, wave=wave, transmission=trans), name=filter_name)
-
-
 def _filter_response_cache_key(cfg: FitConfig) -> tuple[Any, ...]:
     """Build a stable cache key for resolved filter responses."""
     return (
         tuple(str(name) for name in cfg.photometry.filter_names),
         tuple((curve.name, id(curve.wave), id(curve.transmission), curve.effective_wavelength) for curve in cfg.filters.curves),
-        bool(cfg.filters.use_grahsp_database),
     )
 
 
@@ -519,19 +389,15 @@ def _load_filter_responses(cfg: FitConfig):
     responses = []
     for filter_name in cfg.photometry.filter_names:
         if filter_name in inline_curves:
-            responses.append(_normalize_filter_curve(inline_curves[filter_name], name=filter_name))
+            responses.append(normalize_filter_curve(inline_curves[filter_name], name=filter_name))
             continue
-        resolved_name = _FILTER_NAME_ALIASES.get(filter_name, filter_name)
-        vendored = _load_vendored_filter_curve(resolved_name)
-        if vendored is not None:
-            responses.append(_normalize_filter_curve(vendored, name=filter_name))
+        resolved_name = resolve_filter_name(filter_name)
+        if resolved_name in vendored_filter_registry():
+            responses.append(load_filter_curve(filter_name))
             continue
-        if not cfg.filters.use_grahsp_database:
-            raise ValueError(
-                f"Filter {filter_name!r} was not provided inline and is not available in vendored filters; "
-                "GRAHSP database fallback is disabled."
-            )
-        responses.append(_normalize_filter_curve(_fetch_database_filter_curve(resolved_name), name=filter_name))
+        raise ValueError(
+            f"Filter {filter_name!r} was not provided inline and is not available in vendored jaxsedfit filters."
+        )
     _FILTER_RESPONSE_CACHE[cache_key] = responses
     return responses
 
@@ -657,25 +523,11 @@ def _load_templates(cfg: FitConfig) -> LoadedTemplates:
         )
         _TEMPLATE_CACHE[cache_key] = loaded
         return loaded
-    Database = _get_pcigale_database_cls()
-    if Database is None:
-        raise RuntimeError("Could not import pcigale Database to load AGN templates.")
-    with Database() as db:
-        feii_db = db.get_ActivateFeII(feii.name)
-        em_db = db.get_ActivateMorNetzerEmLines()
-    loaded = LoadedTemplates(
-        feii_wave=np.asarray(feii_db.wave, dtype=float),
-        feii_lumin=np.asarray(feii_db.lumin, dtype=float),
-        line_wave=np.asarray(em_db.wave, dtype=float),
-        line_blagn=np.asarray(em_db.lumin_BLAGN, dtype=float),
-        line_sy2=np.asarray(em_db.lumin_Sy2, dtype=float),
-        line_liner=np.asarray(em_db.lumin_LINER, dtype=float),
-        dust_alpha_grid=dust_alpha_grid,
-        dust_wave=dust_wave,
-        dust_lumin=dust_lumin,
+    raise ValueError(
+        "Unsupported AGN template configuration. Provide inline feii_template and "
+        "emission_line_template arrays, or use the vendored BruhweilerVerner08/default "
+        "emission-line templates."
     )
-    _TEMPLATE_CACHE[cache_key] = loaded
-    return loaded
 
 
 def _load_vendored_dale2014_templates() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -714,7 +566,7 @@ def _prepare_loaded_filter(obs_wave: np.ndarray, response: FilterCurve) -> Loade
     filt_wave = _as_angstrom_values(response.wave)
     trans = np.clip(np.asarray(response.transmission, dtype=float), 0.0, None)
     effective = (
-        _filter_effective_wavelength(filt_wave, trans)
+        filter_effective_wavelength(filt_wave, trans)
         if response.effective_wavelength is None
         else _scalar_angstrom_value(response.effective_wavelength)
     )

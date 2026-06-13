@@ -39,6 +39,8 @@ __all__ = [
     "build_host_basis_jax",
     "build_host_state",
     "host_rest_on_basis",
+    "load_filter_curve",
+    "load_filter_curves",
     "plot_corner",
     "plot_fit_sed",
     "plot_trace",
@@ -85,4 +87,8 @@ def __getattr__(name):
         from . import host as _host
 
         return getattr(_host, name)
+    if name in {"load_filter_curve", "load_filter_curves"}:
+        from . import filters as _filters
+
+        return getattr(_filters, name)
     raise AttributeError(name)

@@ -82,7 +82,7 @@ class _BenchmarkWorkerTask:
     dsps_ssp_fn: str
     base_config: FitConfig | None
     z_edges: np.ndarray
-    fit_method: str
+    method: str
     optax_steps: int
     optax_lr: float
     nuts_warmup: int
@@ -135,7 +135,6 @@ def _build_chimera_filter_set() -> FilterSet:
     ]
     return FilterSet(
         curves=curves,
-        use_grahsp_database=False,
     )
 
 
@@ -470,9 +469,9 @@ def _run_single_chimera_fit(task: _BenchmarkWorkerTask, fitter_cls=None) -> tupl
         fitter_cls = JAXSEDFit
     cfg = build_chimera_fit_config(row=task.row, dsps_ssp_fn=task.dsps_ssp_fn, base_config=task.base_config)
     cfg.inference.seed = _stable_row_seed(str(task.row["id"]))
+    cfg.inference.method = task.method
     fitter = fitter_cls(cfg)
     fitter.fit(
-        fit_method=task.fit_method,
         progress_bar=False,
         optax_steps=task.optax_steps,
         optax_lr=task.optax_lr,
@@ -619,7 +618,7 @@ def run_chimera_mass_benchmark(
     min_finite_fraction: float = DEFAULT_MIN_FINITE_FRACTION,
     limit: int | None = None,
     num_workers: int | None = None,
-    fit_method: str = DEFAULT_BENCHMARK_FIT_METHOD,
+    method: str = DEFAULT_BENCHMARK_FIT_METHOD,
     optax_steps: int = DEFAULT_BENCHMARK_OPTAX_STEPS,
     optax_lr: float = DEFAULT_BENCHMARK_OPTAX_LR,
     nuts_warmup: int = DEFAULT_BENCHMARK_NUTS_WARMUP,
@@ -636,7 +635,7 @@ def run_chimera_mass_benchmark(
     print(f"[benchmark] Using DSPS SSP file: {Path(dsps_ssp_fn).expanduser()}")
     print(
         "[benchmark] Inference settings: "
-        f"fit_method={fit_method}, "
+        f"method={method}, "
         f"optax_steps={optax_steps}, "
         f"optax_lr={optax_lr}, "
         f"nuts_warmup={nuts_warmup}, "
@@ -666,7 +665,7 @@ def run_chimera_mass_benchmark(
             dsps_ssp_fn=dsps_ssp_fn,
             base_config=base_config,
             z_edges=z_edges,
-            fit_method=str(fit_method),
+            method=str(method),
             optax_steps=int(optax_steps),
             optax_lr=float(optax_lr),
             nuts_warmup=int(nuts_warmup),
@@ -677,7 +676,7 @@ def run_chimera_mass_benchmark(
         for i, row in enumerate(rows)
     ]
     benchmark_rows: list[dict[str, Any]] = [dict() for _ in tasks]
-    progress = tqdm(total=len(tasks), desc=f"Chimera {fit_method} fits", unit="obj")
+    progress = tqdm(total=len(tasks), desc=f"Chimera {method} fits", unit="obj")
     if num_workers == 1:
         for task in tasks:
             progress.set_postfix_str(str(task.row["id"]))
@@ -715,7 +714,7 @@ def run_chimera_mass_benchmark(
                 print(f"[benchmark] {task.row['id']} reduced chi2 = {enriched['reduced_chi2']:.3f}")
                 progress.update(1)
     progress.close()
-    print(f"[benchmark] Finished {fit_method} fitting")
+    print(f"[benchmark] Finished {method} fitting")
 
     fit = np.array([row["log_stellar_mass_fit"] for row in benchmark_rows], dtype=float)
     truth = np.array([row["log_stellar_mass_truth"] for row in benchmark_rows], dtype=float)
@@ -761,7 +760,7 @@ def run_chimera_mass_benchmark(
             "min_finite_fraction": min_finite_fraction,
         },
         "inference": {
-            "fit_method": str(fit_method),
+            "method": str(method),
             "optax_steps": int(optax_steps),
             "optax_lr": float(optax_lr),
             "nuts_warmup": int(nuts_warmup),
@@ -811,7 +810,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--min-finite-fraction", type=float, default=DEFAULT_MIN_FINITE_FRACTION)
     parser.add_argument("--limit", type=int, default=None, help="Optional number of benchmark rows to run from the deterministic subset.")
     parser.add_argument("--num-workers", type=int, default=None, help="Optional number of worker processes for parallel MAP fitting.")
-    parser.add_argument("--fit-method", default=DEFAULT_BENCHMARK_FIT_METHOD, choices=["optax", "nuts", "optax+nuts", "ns"], help="Inference path to use for each benchmark object.")
+    parser.add_argument("--method", "--fit-method", dest="method", default=DEFAULT_BENCHMARK_FIT_METHOD, choices=["optax", "nuts", "optax+nuts", "ns"], help="Inference path to use for each benchmark object.")
     parser.add_argument("--optax-steps", type=int, default=DEFAULT_BENCHMARK_OPTAX_STEPS, help="Optax/MAP optimization steps per object.")
     parser.add_argument("--optax-lr", type=float, default=DEFAULT_BENCHMARK_OPTAX_LR, help="Optax/MAP learning rate.")
     parser.add_argument("--nuts-warmup", type=int, default=DEFAULT_BENCHMARK_NUTS_WARMUP, help="NUTS warmup steps per object.")
@@ -829,7 +828,7 @@ def main(argv: list[str] | None = None) -> int:
         min_finite_fraction=args.min_finite_fraction,
         limit=args.limit,
         num_workers=args.num_workers,
-        fit_method=args.fit_method,
+        method=args.method,
         optax_steps=args.optax_steps,
         optax_lr=args.optax_lr,
         nuts_warmup=args.nuts_warmup,

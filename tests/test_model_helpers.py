@@ -53,6 +53,7 @@ from jaxsedfit.model import (
     photometric_loglike,
 )
 from jaxsedfit.preload import _build_fixed_igm_jax, _build_igm_cache_jax, build_model_context
+from jaxsedfit.filters import load_filter_curve
 from jaxsedfit.preload import (
     ModelContext,
     PackedFilters,
@@ -67,7 +68,6 @@ from jaxsedfit.preload import (
     _load_filter_responses,
     _mw_band_attenuation_factor,
     _mw_pixel_attenuation_factor,
-    _load_vendored_filter_curve,
     _load_vendored_dale2014_templates,
 )
 
@@ -564,7 +564,7 @@ def test_ukidss_dr11plus_vendored_filters_load_in_angstroms():
         "ukirt.wfcam.K": (19000.0, 25000.0),
     }
     for name, (lo, hi) in expected_ranges.items():
-        curve = _load_vendored_filter_curve(name)
+        curve = load_filter_curve(name)
         wave = np.asarray(curve.wave, dtype=float)
         trans = np.asarray(curve.transmission, dtype=float)
         assert wave.ndim == 1
@@ -581,7 +581,7 @@ def test_legacy_filter_aliases_resolve_to_vendored_curves():
             fluxes=[1.0, 1.0, 1.0],
             errors=[0.1, 0.1, 0.1],
         ),
-        filters=FilterSet(use_grahsp_database=False),
+        filters=FilterSet(),
         galaxy=GalaxyConfig(dsps_ssp_fn="fake.h5"),
         inference=InferenceConfig(map_steps=2),
     )
@@ -611,7 +611,7 @@ def test_build_context_with_inline_templates(monkeypatch):
     cfg = FitConfig(
         observation=Observation(object_id="obj", redshift=0.1),
         photometry=PhotometryData(filter_names=["f1"], fluxes=[1.0], errors=[0.1]),
-        filters=FilterSet(curves=[FilterCurve(name="f1", wave=[1000.0, 2000.0, 3000.0], transmission=[0.0, 1.0, 0.0])], use_grahsp_database=False),
+        filters=FilterSet(curves=[FilterCurve(name="f1", wave=[1000.0, 2000.0, 3000.0], transmission=[0.0, 1.0, 0.0])]),
         galaxy=GalaxyConfig(dsps_ssp_fn="fake.h5", n_wave=64),
         agn=AGNConfig(
             feii_template=FeIITemplate(name="fe", wave=[1000.0, 2000.0], lumin=[1.0, 0.5]),
@@ -673,7 +673,7 @@ def test_mw_dereddening_applies_to_photometry_and_spectra(monkeypatch):
             apply_mw_deredden=True,
         ),
         photometry=PhotometryData(filter_names=["f1"], fluxes=[1.0], errors=[0.1]),
-        filters=FilterSet(curves=[FilterCurve(name="f1", wave=filt_wave, transmission=filt_trans)], use_grahsp_database=False),
+        filters=FilterSet(curves=[FilterCurve(name="f1", wave=filt_wave, transmission=filt_trans)]),
         galaxy=GalaxyConfig(dsps_ssp_fn="fake.h5", n_wave=64),
         agn=AGNConfig(),
         likelihood=LikelihoodConfig(),
@@ -716,7 +716,7 @@ def test_context_accepts_multiple_spectra(monkeypatch):
             errors=[0.1],
             aperture_diameter_arcsec=[2.0],
         ),
-        filters=FilterSet(curves=[FilterCurve(name="f1", wave=[1000.0, 2000.0, 3000.0], transmission=[0.0, 1.0, 0.0])], use_grahsp_database=False),
+        filters=FilterSet(curves=[FilterCurve(name="f1", wave=[1000.0, 2000.0, 3000.0], transmission=[0.0, 1.0, 0.0])]),
         galaxy=GalaxyConfig(dsps_ssp_fn="fake.h5", n_wave=64),
         agn=AGNConfig(),
         likelihood=LikelihoodConfig(use_host_capture_model=True),
@@ -825,7 +825,7 @@ def test_jaxqsofit_joint_backend_builds_flux_scaled_smart_priors(monkeypatch):
     cfg = FitConfig(
         observation=Observation(object_id="obj", redshift=0.1),
         photometry=PhotometryData(filter_names=["f1"], fluxes=[1.0], errors=[0.1]),
-        filters=FilterSet(curves=[FilterCurve(name="f1", wave=[1000.0, 2000.0, 3000.0], transmission=[0.0, 1.0, 0.0])], use_grahsp_database=False),
+        filters=FilterSet(curves=[FilterCurve(name="f1", wave=[1000.0, 2000.0, 3000.0], transmission=[0.0, 1.0, 0.0])]),
         galaxy=GalaxyConfig(dsps_ssp_fn="fake.h5", n_wave=64, fit_host=False),
         agn=AGNConfig(),
         spectroscopy=SpectroscopyData(
@@ -865,7 +865,7 @@ def test_context_builds_spectrum_resolution_host_basis(monkeypatch):
     cfg = FitConfig(
         observation=Observation(object_id="obj", redshift=0.1),
         photometry=PhotometryData(filter_names=["f1"], fluxes=[1.0], errors=[0.1]),
-        filters=FilterSet(curves=[FilterCurve(name="f1", wave=[1000.0, 2000.0, 3000.0], transmission=[0.0, 1.0, 0.0])], use_grahsp_database=False),
+        filters=FilterSet(curves=[FilterCurve(name="f1", wave=[1000.0, 2000.0, 3000.0], transmission=[0.0, 1.0, 0.0])]),
         galaxy=GalaxyConfig(dsps_ssp_fn="fake.h5", n_wave=16, fit_host=True),
         agn=AGNConfig(),
         spectroscopy=SpectroscopyData(
@@ -912,7 +912,7 @@ def test_jaxqsofit_spectrum_resolution_host_basis_uses_host_kinematics(monkeypat
     cfg = FitConfig(
         observation=Observation(object_id="obj", redshift=0.1),
         photometry=PhotometryData(filter_names=["f1"], fluxes=[1.0], errors=[0.1]),
-        filters=FilterSet(curves=[FilterCurve(name="f1", wave=[1000.0, 2000.0, 3000.0], transmission=[0.0, 1.0, 0.0])], use_grahsp_database=False),
+        filters=FilterSet(curves=[FilterCurve(name="f1", wave=[1000.0, 2000.0, 3000.0], transmission=[0.0, 1.0, 0.0])]),
         galaxy=GalaxyConfig(
             dsps_ssp_fn="fake.h5",
             n_wave=16,
@@ -976,7 +976,7 @@ def test_jaxqsofit_backend_always_uses_dynamic_nebular_width(monkeypatch):
     cfg = FitConfig(
         observation=Observation(object_id="obj", redshift=0.0),
         photometry=PhotometryData(filter_names=["f1"], fluxes=[1.0], errors=[0.1]),
-        filters=FilterSet(curves=[FilterCurve(name="f1", wave=[1000.0, 2000.0, 3000.0], transmission=[0.0, 1.0, 0.0])], use_grahsp_database=False),
+        filters=FilterSet(curves=[FilterCurve(name="f1", wave=[1000.0, 2000.0, 3000.0], transmission=[0.0, 1.0, 0.0])]),
         galaxy=GalaxyConfig(dsps_ssp_fn="fake.h5", n_wave=64, fit_host=True),
         agn=AGNConfig(
             feii_template=FeIITemplate(name="fe", wave=[1000.0, 2000.0], lumin=[0.0, 0.0]),
@@ -1037,7 +1037,7 @@ def test_jaxsedfit_model_can_call_jaxqsofit_backend(monkeypatch):
             errors=[0.1],
             aperture_diameter_arcsec=[2.0],
         ),
-        filters=FilterSet(curves=[FilterCurve(name="f1", wave=[1000.0, 2000.0, 3000.0], transmission=[0.0, 1.0, 0.0])], use_grahsp_database=False),
+        filters=FilterSet(curves=[FilterCurve(name="f1", wave=[1000.0, 2000.0, 3000.0], transmission=[0.0, 1.0, 0.0])]),
         galaxy=GalaxyConfig(dsps_ssp_fn="fake.h5", n_wave=64, fit_host=False),
         agn=AGNConfig(
             feii_template=FeIITemplate(name="fe", wave=[1000.0, 2000.0], lumin=[0.0, 0.0]),
@@ -1124,7 +1124,7 @@ def test_jaxsedfit_jaxqsofit_backend_uses_nested_tied_line_config(monkeypatch):
             fluxes=[1.0],
             errors=[0.1],
         ),
-        filters=FilterSet(curves=[FilterCurve(name="f1", wave=[1000.0, 2000.0, 3000.0], transmission=[0.0, 1.0, 0.0])], use_grahsp_database=False),
+        filters=FilterSet(curves=[FilterCurve(name="f1", wave=[1000.0, 2000.0, 3000.0], transmission=[0.0, 1.0, 0.0])]),
         galaxy=GalaxyConfig(dsps_ssp_fn="fake.h5", n_wave=64, fit_host=False),
         agn=AGNConfig(),
         likelihood=LikelihoodConfig(
@@ -1220,7 +1220,7 @@ def test_jaxsedfit_jaxqsofit_tied_line_backend_runs_svi_jit(monkeypatch):
     cfg = FitConfig(
         observation=Observation(object_id="obj", redshift=0.0),
         photometry=PhotometryData(filter_names=["f1"], fluxes=[1.0], errors=[0.1]),
-        filters=FilterSet(curves=[FilterCurve(name="f1", wave=[1000.0, 2000.0, 3000.0], transmission=[0.0, 1.0, 0.0])], use_grahsp_database=False),
+        filters=FilterSet(curves=[FilterCurve(name="f1", wave=[1000.0, 2000.0, 3000.0], transmission=[0.0, 1.0, 0.0])]),
         galaxy=GalaxyConfig(dsps_ssp_fn="fake.h5", n_wave=64, fit_host=False),
         agn=AGNConfig(),
         likelihood=LikelihoodConfig(
@@ -1269,7 +1269,7 @@ def test_plot_jaxqsofit_spectrum_adapts_joint_predictive(monkeypatch):
         captured["kwargs"] = kwargs
         self.fig = "fig"
 
-    monkeypatch.setattr(jaxqsofit.QSOFit, "plot_fig", _fake_plot_fig)
+    monkeypatch.setattr(jaxqsofit.JAXQSOFit, "plot_fig", _fake_plot_fig)
 
     fitter = JAXSEDFit.__new__(JAXSEDFit)
     fitter.config = SimpleNamespace(
@@ -1321,7 +1321,7 @@ def test_config_rejects_invalid_redshift_pdf():
     cfg = FitConfig(
         observation=Observation(object_id="obj", redshift=0.1, fit_redshift=True),
         photometry=PhotometryData(filter_names=["f1"], fluxes=[1.0], errors=[0.1]),
-        filters=FilterSet(curves=[FilterCurve(name="f1", wave=[1000.0, 2000.0, 3000.0], transmission=[0.0, 1.0, 0.0])], use_grahsp_database=False),
+        filters=FilterSet(curves=[FilterCurve(name="f1", wave=[1000.0, 2000.0, 3000.0], transmission=[0.0, 1.0, 0.0])]),
         galaxy=GalaxyConfig(dsps_ssp_fn="fake.h5", n_wave=64),
         agn=AGNConfig(),
         likelihood=LikelihoodConfig(),

@@ -46,7 +46,6 @@ def _cfg(
         photometry=PhotometryData(filter_names=["f1"], fluxes=[1.0], errors=[0.1]),
         filters=FilterSet(
             curves=[FilterCurve(name="f1", wave=[1500.0, 2000.0, 2500.0], transmission=[0.0, 1.0, 0.0])],
-            use_grahsp_database=False,
         ),
         galaxy=GalaxyConfig(
             fit_host=fit_host,
@@ -498,7 +497,6 @@ def test_local_line_photometry_improves_coarse_grid_line_projection(monkeypatch)
                     transmission=[0.0, 1.0, 0.0],
                 )
             ],
-            use_grahsp_database=False,
         )
         cfg.likelihood.use_fast_photometry_projection = True
         cfg.likelihood.use_local_line_photometry = local_lines
@@ -545,7 +543,6 @@ def test_component_prediction_uses_local_agn_line_photometry(monkeypatch):
                 transmission=[0.0, 1.0, 0.0],
             )
         ],
-        use_grahsp_database=False,
     )
     cfg.likelihood.use_fast_photometry_projection = False
     cfg.likelihood.use_local_line_photometry = True
@@ -579,7 +576,6 @@ def test_fixed_local_line_cache_matches_exact_local_line_projection(monkeypatch)
                     transmission=[0.0, 1.0, 0.0],
                 )
             ],
-            use_grahsp_database=False,
         )
         cfg.likelihood.use_fast_photometry_projection = True
         cfg.likelihood.use_local_line_photometry = True
@@ -622,7 +618,6 @@ def test_local_line_photometry_improves_redshift_fit_line_projection(monkeypatch
                     transmission=[0.0, 1.0, 0.0],
                 )
             ],
-            use_grahsp_database=False,
         )
         cfg.likelihood.use_fast_photometry_projection = True
         cfg.likelihood.use_local_line_photometry = local_lines

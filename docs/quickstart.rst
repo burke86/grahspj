@@ -7,9 +7,9 @@ The high-level interface is :class:`jaxsedfit.core.JAXSEDFit`.
 
    from jaxsedfit.core import JAXSEDFit
 
+   cfg.inference.method = "optax+nuts"
    fitter = JAXSEDFit(cfg)
    fitter.fit(
-       fit_method="optax+nuts",
        optax_steps=600,
        optax_lr=1e-2,
        nuts_warmup=50,
@@ -25,8 +25,8 @@ Nested sampling is available through NumPyro's ``jaxns`` wrapper:
 
 .. code-block:: python
 
+   cfg.inference.method = "ns"
    fitter.fit(
-       fit_method="ns",
        ns_live_points=200,
        ns_dlogz=0.1,
    )

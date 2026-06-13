@@ -23,7 +23,14 @@ extensions = [
 ]
 
 autosummary_generate = True
+autosummary_generate_overwrite = True
 autodoc_member_order = "bysource"
+autodoc_default_options = {
+    "members": True,
+    "undoc-members": True,
+    "special-members": "__init__",
+    "show-inheritance": True,
+}
 napoleon_google_docstring = True
 napoleon_numpy_docstring = True
 

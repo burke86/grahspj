@@ -27,6 +27,7 @@ from dsps.sed.ssp_weights import calc_ssp_weights_sfh_table_lognormal_mdf
 
 from jaxsedfit.config import AGNConfig, FilterSet, FitConfig, GalaxyConfig, InferenceConfig, LikelihoodConfig, Observation, PhotometryData
 from jaxsedfit.core import JAXSEDFit
+from jaxsedfit.filters import load_filter_curves
 from jaxsedfit.model import (
     AGN_BOLOMETRIC_CORRECTION_5100,
     GRAHSP_BIATTENUATION_BREAK_A,
@@ -144,10 +145,7 @@ def build_fairall9_fixedz_config(dsps_ssp_fn: str | Path) -> FitConfig:
             is_upper_limit=[False] * len(phot_rows),
             psf_fwhm_arcsec=[None if row["psf_fwhm_arcsec"] is None else float(row["psf_fwhm_arcsec"]) for row in phot_rows],
         ),
-        filters=FilterSet(
-            speclite_names={str(row["grahsp_filter"]): str(row["speclite_name"]) for row in phot_rows},
-            use_grahsp_database=False,
-        ),
+        filters=FilterSet(curves=load_filter_curves([str(row["grahsp_filter"]) for row in phot_rows])),
         galaxy=GalaxyConfig(dsps_ssp_fn=str(dsps_ssp_fn)),
         agn=AGNConfig(agn_type=1),
         likelihood=LikelihoodConfig(use_host_capture_model=False),

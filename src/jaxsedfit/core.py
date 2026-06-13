@@ -200,7 +200,6 @@ class JAXSEDFit:
 
     def fit(
         self,
-        fit_method: str = "optax+nuts",
         progress_bar: bool = True,
         prior_config: dict[str, Any] | None = None,
         dsps_ssp_fn: str | None = None,
@@ -269,7 +268,8 @@ class JAXSEDFit:
             use_map_init = kwargs.pop("use_map_init")
         if hasattr(self, "_apply_runtime_overrides"):
             self._apply_runtime_overrides(prior_config=prior_config, dsps_ssp_fn=dsps_ssp_fn)
-        method = str(fit_method).lower()
+        inference = self.config.inference
+        method = str(inference.method).lower()
         output_dir = Path(output_dir)
         if method == "optax":
             if kwargs:
@@ -361,7 +361,7 @@ class JAXSEDFit:
                 ns_kwargs["efficiency_threshold"] = ns_efficiency_threshold
             fit_output = self.fit_ns(**ns_kwargs)
         else:
-            raise ValueError("fit_method must be one of: 'optax+nuts', 'optax', 'nuts', 'ns'")
+            raise ValueError("method must be one of: 'optax+nuts', 'optax', 'nuts', 'ns'")
 
         saved_result_path = None
         saved_fig_path = None
@@ -758,7 +758,7 @@ class JAXSEDFit:
         if self.context.spec_wave_obs.size == 0:
             raise RuntimeError("No spectroscopy data are available to plot.")
         try:
-            from jaxqsofit import QSOFit
+            from jaxqsofit import JAXQSOFit
         except Exception as exc:  # pragma: no cover - exercised only without optional dependency
             raise ImportError("plot_jaxqsofit_spectrum requires jaxqsofit on PYTHONPATH.") from exc
 
@@ -815,7 +815,7 @@ class JAXSEDFit:
             finite = finite[np.isfinite(finite)]
             return finite.size > 0 and float(np.nanmax(np.abs(finite))) > 0.0
 
-        plotter = QSOFit.__new__(QSOFit)
+        plotter = JAXQSOFit.__new__(JAXQSOFit)
         plotter.z = z
         plotter.wave = wave_rest
         plotter.flux = flux_rest
