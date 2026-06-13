@@ -275,7 +275,7 @@ def test_tabulated_redshift_pdf_prior_is_supported(monkeypatch):
     monkeypatch.setattr("jaxsedfit.preload._SSP_DATA_CACHE", {})
     cfg = _mock_config()
     cfg.galaxy.dsps_ssp_fn = "fake-diffstar.h5"
-    cfg.observation.fit_redshift = True
+    cfg.observation.redshift_mode = "fit"
     cfg.prior_config["redshift_pdf"] = {
         "z_grid": [0.05, 0.1, 0.2, 0.4],
         "pdf": [0.0, 1.0, 3.0, 0.0],

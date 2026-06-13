@@ -18,6 +18,10 @@ from jaxsedfit.config import (
     NebularConfig,
     Observation,
     PhotometryData,
+    PriorConfig,
+    RedshiftPriorConfig,
+    StellarMassPriorConfig,
+    MassMetallicityPriorConfig,
     SpectroscopyConfig,
     SpectroscopyData,
     _coerce_spectroscopy_config,
@@ -76,6 +80,20 @@ def test_likelihood_defaults_include_absolute_flux_scale_prior():
     cfg = LikelihoodConfig()
     assert cfg.use_absolute_flux_scale_prior is True
     assert cfg.absolute_flux_scale_prior_sigma_dex > 0.0
+
+
+def test_prior_config_object_exposes_flat_mapping():
+    prior = PriorConfig(
+        redshift=RedshiftPriorConfig(z_grid=[0.1, 0.2, 0.3], pdf=[0.2, 0.6, 0.2]),
+        stellar_mass=StellarMassPriorConfig(dist="uniform", low=8.0, high=12.0),
+        mass_metallicity=MassMetallicityPriorConfig(configured=True, enabled=False),
+    )
+    prior["log_agn_amp"] = {"loc": 44.0, "scale": 1.0}
+
+    assert "redshift_pdf" in prior
+    assert prior["log_stellar_mass"]["dist"] == "uniform"
+    assert prior["mass_metallicity_relation"]["enabled"] is False
+    assert prior.get("log_agn_amp") == {"loc": 44.0, "scale": 1.0}
 
 
 def test_agn_disk_is_normalized_at_5100_angstrom():
@@ -1319,7 +1337,7 @@ def test_plot_jaxqsofit_spectrum_adapts_joint_predictive(monkeypatch):
 
 def test_config_rejects_invalid_redshift_pdf():
     cfg = FitConfig(
-        observation=Observation(object_id="obj", redshift=0.1, fit_redshift=True),
+        observation=Observation(object_id="obj", redshift=0.1, redshift_mode="fit"),
         photometry=PhotometryData(filter_names=["f1"], fluxes=[1.0], errors=[0.1]),
         filters=FilterSet(curves=[FilterCurve(name="f1", wave=[1000.0, 2000.0, 3000.0], transmission=[0.0, 1.0, 0.0])]),
         galaxy=GalaxyConfig(dsps_ssp_fn="fake.h5", n_wave=64),

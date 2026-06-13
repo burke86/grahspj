@@ -9,7 +9,7 @@ import numpy as np
 from numpyro.infer import MCMC, NUTS, Predictive, SVI, Trace_ELBO, init_to_value
 from numpyro.infer.autoguide import AutoDelta
 
-from .config import FitConfig, fit_config_from_mapping, serialize_config
+from .config import FitConfig, _coerce_prior_config, fit_config_from_mapping, serialize_config
 from .model import grahsp_photometric_model
 from .preload import ModelContext, build_model_context
 
@@ -51,7 +51,7 @@ class JAXSEDFit:
         """Apply one-off fit-time overrides and rebuild context if required."""
         rebuild_context = False
         if prior_config is not None:
-            self.config.prior_config = dict(prior_config)
+            self.config.prior_config = _coerce_prior_config(prior_config)
             self._reset_fit_state()
         if dsps_ssp_fn is not None and str(dsps_ssp_fn) != str(self.config.galaxy.dsps_ssp_fn):
             self.config.galaxy.dsps_ssp_fn = str(dsps_ssp_fn)
@@ -680,7 +680,7 @@ class JAXSEDFit:
         return resolved
 
     @classmethod
-    def load_from_samples(cls, path: str | Path | None = None) -> "JAXSEDFit":
+    def load(cls, path: str | Path | None = None) -> "JAXSEDFit":
         """Load a posterior bundle written by :meth:`save`.
 
         Parameters
@@ -712,6 +712,8 @@ class JAXSEDFit:
         fitter._saved_summary = payload.get("summary")
         fitter._loaded_posterior_path = posterior_path
         return fitter
+
+    load_from_samples = load
 
     def plot_sed(
         self,

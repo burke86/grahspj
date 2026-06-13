@@ -12,6 +12,10 @@ from .config import (
     NebularConfig,
     Observation,
     PhotometryData,
+    PriorConfig,
+    RedshiftPriorConfig,
+    StellarMassPriorConfig,
+    MassMetallicityPriorConfig,
     SpectroscopyConfig,
     SpectroscopyData,
 )
@@ -34,12 +38,17 @@ __all__ = [
     "NebularConfig",
     "Observation",
     "PhotometryData",
+    "PriorConfig",
+    "RedshiftPriorConfig",
+    "StellarMassPriorConfig",
+    "MassMetallicityPriorConfig",
     "SpectroscopyConfig",
     "SpectroscopyData",
     "build_host_basis_jax",
     "build_host_state",
     "host_rest_on_basis",
     "load_from_samples",
+    "load",
     "load_filter_curve",
     "load_filter_curves",
     "plot_corner",
@@ -58,10 +67,10 @@ def __getattr__(name):
         from .core import JAXSEDFit
 
         return JAXSEDFit
-    if name == "load_from_samples":
+    if name in {"load_from_samples", "load"}:
         from .core import JAXSEDFit
 
-        return JAXSEDFit.load_from_samples
+        return JAXSEDFit.load
     if name == "plot_fit_sed":
         from .plotting import plot_fit_sed
 

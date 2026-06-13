@@ -607,7 +607,7 @@ def test_local_line_photometry_improves_redshift_fit_line_projection(monkeypatch
 
     def _line_cfg(n_wave, *, local_lines):
         cfg = _cfg(fit_host=False, n_wave=n_wave, rest_wave_max=2000.0)
-        cfg.observation.fit_redshift = True
+        cfg.observation.redshift_mode = "fit"
         cfg.observation.redshift_err = 0.01
         cfg.photometry = PhotometryData(filter_names=["ha"], fluxes=[1.0], errors=[0.1])
         cfg.filters = FilterSet(

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Sequence as SequenceABC
+from collections.abc import MutableMapping, Sequence as SequenceABC
 from dataclasses import asdict, dataclass, field, is_dataclass
 from typing import Any, Mapping, Sequence
 
@@ -12,11 +12,22 @@ class Observation:
     """Observation-level metadata for one fitted source."""
     redshift: float
     object_id: str = "result"
-    fit_redshift: bool = False
+    redshift_mode: str = "fixed"
     redshift_err: float = 0.0
     ra: float | None = None
     dec: float | None = None
     apply_mw_deredden: bool = False
+
+    @property
+    def fits_redshift(self) -> bool:
+        """Return True when redshift is inferred rather than fixed."""
+        return str(self.redshift_mode).lower() == "fit"
+
+    def validate(self) -> None:
+        mode = str(self.redshift_mode).lower()
+        if mode not in {"fixed", "fit"}:
+            raise ValueError("observation.redshift_mode must be either 'fixed' or 'fit'.")
+        self.redshift_mode = mode
 
 
 @dataclass
@@ -247,6 +258,166 @@ class InferenceConfig:
 
 
 @dataclass
+class RedshiftPriorConfig:
+    """Optional redshift-prior configuration."""
+    z_grid: Sequence[float] | None = None
+    pdf: Sequence[float] | None = None
+
+    @property
+    def enabled(self) -> bool:
+        return self.z_grid is not None or self.pdf is not None
+
+    def validate(self) -> None:
+        if not self.enabled:
+            return
+        if self.z_grid is None or self.pdf is None:
+            raise ValueError("redshift prior requires both z_grid and pdf.")
+        z_grid = np.asarray(self.z_grid, dtype=float)
+        pdf = np.asarray(self.pdf, dtype=float)
+        if z_grid.ndim != 1 or pdf.ndim != 1 or z_grid.size != pdf.size or z_grid.size < 2:
+            raise ValueError("redshift prior z_grid and pdf must be one-dimensional arrays of the same length >= 2.")
+        if not np.all(np.isfinite(z_grid)) or not np.all(np.isfinite(pdf)):
+            raise ValueError("redshift prior z_grid and pdf must be finite.")
+        if np.any(np.diff(z_grid) <= 0.0):
+            raise ValueError("redshift prior z_grid must be strictly increasing.")
+        if np.any(pdf < 0.0):
+            raise ValueError("redshift prior pdf must be non-negative.")
+        norm = float(np.trapezoid(pdf, z_grid))
+        if not np.isfinite(norm) or norm <= 0.0:
+            raise ValueError("redshift prior must integrate to a positive finite value.")
+
+    def to_mapping(self) -> dict[str, Any]:
+        if not self.enabled:
+            return {}
+        return {"redshift_pdf": {"z_grid": self.z_grid, "pdf": self.pdf}}
+
+
+@dataclass
+class StellarMassPriorConfig:
+    """Semantic stellar-mass prior configuration."""
+    dist: str | None = None
+    loc: float | None = None
+    scale: float | None = None
+    df: float | None = None
+    low: float | None = None
+    high: float | None = None
+
+    @property
+    def enabled(self) -> bool:
+        return any(getattr(self, name) is not None for name in ("dist", "loc", "scale", "df", "low", "high"))
+
+    def to_mapping(self) -> dict[str, Any]:
+        if not self.enabled:
+            return {}
+        out = {
+            key: value
+            for key, value in {
+                "dist": self.dist,
+                "loc": self.loc,
+                "scale": self.scale,
+                "df": self.df,
+                "low": self.low,
+                "high": self.high,
+            }.items()
+            if value is not None
+        }
+        return {"log_stellar_mass": out}
+
+
+@dataclass
+class MassMetallicityPriorConfig:
+    """Soft stellar mass-metallicity prior for host metallicity."""
+    configured: bool = False
+    enabled: bool = True
+    pivot_mass: float = 10.0
+    pivot_logzsol: float = -0.15
+    pivot_lgmet: float | None = None
+    slope: float = 0.35
+    scale: float = 0.25
+    redshift_ref: float = 0.0
+    redshift_slope: float = -0.15
+    min: float = -1.5
+    max: float = 0.3
+    min_lgmet: float | None = None
+    max_lgmet: float | None = None
+
+    def to_mapping(self) -> dict[str, Any]:
+        if not self.configured:
+            return {}
+        out: dict[str, Any] = {
+            "enabled": bool(self.enabled),
+            "pivot_mass": float(self.pivot_mass),
+            "pivot_logzsol": float(self.pivot_logzsol),
+            "slope": float(self.slope),
+            "scale": float(self.scale),
+            "redshift_ref": float(self.redshift_ref),
+            "redshift_slope": float(self.redshift_slope),
+            "min": float(self.min),
+            "max": float(self.max),
+        }
+        if self.pivot_lgmet is not None:
+            out["pivot_lgmet"] = float(self.pivot_lgmet)
+        if self.min_lgmet is not None:
+            out["min_lgmet"] = float(self.min_lgmet)
+        if self.max_lgmet is not None:
+            out["max_lgmet"] = float(self.max_lgmet)
+        return {"mass_metallicity_relation": out}
+
+
+@dataclass
+class PriorConfig(MutableMapping[str, Any]):
+    """Object-oriented prior configuration with a dict-compatible transition API.
+
+    Semantic fields cover common science-level priors. ``overrides`` stores
+    low-level model-site settings and preserves the existing mapping interface
+    used by notebooks and model internals.
+    """
+    redshift: RedshiftPriorConfig = field(default_factory=RedshiftPriorConfig)
+    stellar_mass: StellarMassPriorConfig = field(default_factory=StellarMassPriorConfig)
+    mass_metallicity: MassMetallicityPriorConfig = field(default_factory=MassMetallicityPriorConfig)
+    overrides: dict[str, Any] = field(default_factory=dict)
+
+    def validate(self) -> None:
+        self.redshift.validate()
+
+    def to_mapping(self) -> dict[str, Any]:
+        out: dict[str, Any] = dict(self.overrides)
+        out.update(self.redshift.to_mapping())
+        out.update(self.stellar_mass.to_mapping())
+        out.update(self.mass_metallicity.to_mapping())
+        return out
+
+    def __getitem__(self, key: str) -> Any:
+        return self.to_mapping()[key]
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        self.overrides[str(key)] = value
+
+    def __delitem__(self, key: str) -> None:
+        if key in self.overrides:
+            del self.overrides[key]
+            return
+        raise KeyError(key)
+
+    def __iter__(self):
+        return iter(self.to_mapping())
+
+    def __len__(self) -> int:
+        return len(self.to_mapping())
+
+    def __contains__(self, key: object) -> bool:
+        return key in self.to_mapping()
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return self.to_mapping().get(key, default)
+
+    def setdefault(self, key: str, default: Any = None) -> Any:
+        if key not in self:
+            self[key] = default
+        return self[key]
+
+
+@dataclass
 class FitConfig:
     """Top-level configuration bundle for a single jaxsedfit fit."""
     observation: Observation
@@ -259,35 +430,21 @@ class FitConfig:
     spectroscopy: SpectroscopyData | Sequence[SpectroscopyData] | None = None
     spectroscopy_config: SpectroscopyConfig = field(default_factory=SpectroscopyConfig)
     inference: InferenceConfig = field(default_factory=InferenceConfig)
-    prior_config: dict[str, Any] = field(default_factory=dict)
+    prior_config: PriorConfig = field(default_factory=PriorConfig)
+
+    def __post_init__(self) -> None:
+        self.prior_config = _coerce_prior_config(self.prior_config)
 
     def validate(self) -> None:
         """Validate nested config components that require runtime checks."""
+        self.observation.validate()
         self.photometry.validate()
         self.nebular.validate()
         for spectrum in self.spectroscopy_list:
             spectrum.validate()
         if not self.galaxy.fit_host and not self.agn.fit_agn:
             raise ValueError("At least one of galaxy.fit_host or agn.fit_agn must be True.")
-        redshift_pdf = self.prior_config.get("redshift_pdf")
-        if redshift_pdf is not None:
-            if not isinstance(redshift_pdf, Mapping):
-                raise TypeError("prior_config['redshift_pdf'] must be a mapping with 'z_grid' and 'pdf'.")
-            if "z_grid" not in redshift_pdf or "pdf" not in redshift_pdf:
-                raise ValueError("prior_config['redshift_pdf'] must contain 'z_grid' and 'pdf'.")
-            z_grid = np.asarray(redshift_pdf["z_grid"], dtype=float)
-            pdf = np.asarray(redshift_pdf["pdf"], dtype=float)
-            if z_grid.ndim != 1 or pdf.ndim != 1 or z_grid.size != pdf.size or z_grid.size < 2:
-                raise ValueError("redshift_pdf z_grid and pdf must be one-dimensional arrays of the same length >= 2.")
-            if not np.all(np.isfinite(z_grid)) or not np.all(np.isfinite(pdf)):
-                raise ValueError("redshift_pdf z_grid and pdf must be finite.")
-            if np.any(np.diff(z_grid) <= 0.0):
-                raise ValueError("redshift_pdf z_grid must be strictly increasing.")
-            if np.any(pdf < 0.0):
-                raise ValueError("redshift_pdf pdf must be non-negative.")
-            norm = float(np.trapezoid(pdf, z_grid))
-            if not np.isfinite(norm) or norm <= 0.0:
-                raise ValueError("redshift_pdf must integrate to a positive finite value.")
+        self.prior_config.validate()
 
     def to_dict(self) -> dict[str, Any]:
         """Convert the dataclass tree into a plain Python dictionary."""
@@ -308,11 +465,14 @@ def _coerce_dataclass(cls, value: Any):
     if isinstance(value, cls):
         return value
     if isinstance(value, Mapping):
+        data = dict(value)
+        if cls is Observation and "fit_redshift" in data and "redshift_mode" not in data:
+            data["redshift_mode"] = "fit" if bool(data.pop("fit_redshift")) else "fixed"
         kwargs = {}
         for field_name, field_def in cls.__dataclass_fields__.items():
-            if field_name not in value:
+            if field_name not in data:
                 continue
-            kwargs[field_name] = value[field_name]
+            kwargs[field_name] = data[field_name]
         return cls(**kwargs)
     raise TypeError(f"Cannot coerce {type(value)!r} to {cls.__name__}")
 
@@ -369,6 +529,63 @@ def _coerce_spectroscopy_config(value: Any) -> SpectroscopyConfig:
     return SpectroscopyConfig(**kwargs)
 
 
+def _coerce_prior_config(value: Any) -> PriorConfig:
+    """Coerce old flat prior mappings and new nested prior config objects."""
+    if isinstance(value, PriorConfig):
+        return value
+    if value is None:
+        return PriorConfig()
+    if not isinstance(value, Mapping):
+        return _coerce_dataclass(PriorConfig, value)
+
+    data = dict(value)
+    nested_keys = {"redshift", "stellar_mass", "mass_metallicity", "overrides"}
+    has_nested_shape = any(key in data for key in nested_keys)
+    if has_nested_shape:
+        cfg = PriorConfig(
+            redshift=_coerce_dataclass(RedshiftPriorConfig, data.get("redshift", {})),
+            stellar_mass=_coerce_dataclass(StellarMassPriorConfig, data.get("stellar_mass", {})),
+            mass_metallicity=_coerce_dataclass(MassMetallicityPriorConfig, data.get("mass_metallicity", {})),
+            overrides=dict(data.get("overrides", {})),
+        )
+        for key, value in data.items():
+            if key not in nested_keys:
+                cfg.overrides[key] = value
+        return cfg
+
+    redshift_pdf = data.pop("redshift_pdf", None)
+    redshift = RedshiftPriorConfig()
+    if redshift_pdf is not None:
+        redshift = RedshiftPriorConfig(
+            z_grid=redshift_pdf.get("z_grid") if isinstance(redshift_pdf, Mapping) else None,
+            pdf=redshift_pdf.get("pdf") if isinstance(redshift_pdf, Mapping) else None,
+        )
+
+    stellar_mass_raw = data.pop("log_stellar_mass", None)
+    stellar_mass = StellarMassPriorConfig()
+    if isinstance(stellar_mass_raw, Mapping):
+        stellar_mass = _coerce_dataclass(StellarMassPriorConfig, stellar_mass_raw)
+    elif stellar_mass_raw is not None:
+        data["log_stellar_mass"] = stellar_mass_raw
+
+    mmr_raw = data.pop("mass_metallicity_relation", None)
+    mass_metallicity = MassMetallicityPriorConfig()
+    if isinstance(mmr_raw, Mapping):
+        mmr_data = dict(mmr_raw)
+        mmr_data.setdefault("configured", True)
+        mass_metallicity = _coerce_dataclass(MassMetallicityPriorConfig, mmr_data)
+    elif mmr_raw is not None:
+        data["mass_metallicity_relation"] = mmr_raw
+
+    cfg = PriorConfig(
+        redshift=redshift,
+        stellar_mass=stellar_mass,
+        mass_metallicity=mass_metallicity,
+        overrides=data,
+    )
+    return cfg
+
+
 def fit_config_from_mapping(data: Mapping[str, Any]) -> FitConfig:
     """Build a validated FitConfig from a nested mapping."""
     filters_raw = data.get("filters", {})
@@ -420,7 +637,7 @@ def fit_config_from_mapping(data: Mapping[str, Any]) -> FitConfig:
         spectroscopy=spectroscopy_obj,
         spectroscopy_config=_coerce_spectroscopy_config(data.get("spectroscopy_config", {})),
         inference=_coerce_dataclass(InferenceConfig, data.get("inference", {})),
-        prior_config=dict(data.get("prior_config", {})),
+        prior_config=_coerce_prior_config(data.get("prior_config", {})),
     )
     cfg.validate()
     return cfg
