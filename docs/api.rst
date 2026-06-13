@@ -20,4 +20,5 @@ API Reference
    jaxsedfit.plot_fit_sed
    jaxsedfit.plot_corner
    jaxsedfit.plot_trace
+   jaxsedfit.load_from_samples
    jaxsedfit.style_path
