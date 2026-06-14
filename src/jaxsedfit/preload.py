@@ -349,6 +349,7 @@ def _map_logzsol_to_dsps_lgmet(logzsol_grid: Sequence[float], ssp_lgmet: np.ndar
     cand_shifted = logzsol_grid + np.log10(0.019)
 
     def mismatch(cand):
+        """Return the mean nearest-grid mismatch for one metallicity convention."""
         return np.mean([np.min(np.abs(ssp_lgmet - val)) for val in cand])
 
     return cand_direct if mismatch(cand_direct) <= mismatch(cand_shifted) else cand_shifted

@@ -40,6 +40,7 @@ FILTER_MAP = {
 
 
 def _as_float(value):
+    """Convert a table cell to float, using NaN for masked or invalid values."""
     if np.ma.is_masked(value):
         return np.nan
     try:

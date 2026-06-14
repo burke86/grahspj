@@ -27,6 +27,7 @@ _CORNER_ONE_SIGMA_QUANTILES = (0.16, 0.5, 0.84)
 
 
 def _posterior_samples(fitter_or_samples: Any) -> Mapping[str, Any]:
+    """Return posterior samples from either a fitter object or sample mapping."""
     if isinstance(fitter_or_samples, Mapping):
         samples = fitter_or_samples
     else:
@@ -37,6 +38,7 @@ def _posterior_samples(fitter_or_samples: Any) -> Mapping[str, Any]:
 
 
 def _grouped_trace_samples(fitter_or_samples: Any) -> tuple[Mapping[str, Any], bool]:
+    """Return trace samples and whether they are grouped by MCMC chain."""
     if not isinstance(fitter_or_samples, Mapping):
         nuts_result = getattr(fitter_or_samples, "nuts_result", None)
         if isinstance(nuts_result, Mapping):
@@ -47,6 +49,7 @@ def _grouped_trace_samples(fitter_or_samples: Any) -> tuple[Mapping[str, Any], b
 
 
 def _finite_scalar_sample_array(value: Any, *, grouped: bool) -> np.ndarray | None:
+    """Return a finite scalar sample array with the expected trace shape."""
     arr = np.asarray(value, dtype=float)
     if grouped:
         if arr.ndim != 2:
@@ -59,6 +62,7 @@ def _finite_scalar_sample_array(value: Any, *, grouped: bool) -> np.ndarray | No
 
 
 def _has_dynamic_range(value: Any, *, grouped: bool) -> bool:
+    """Return whether a scalar sample site spans more than one value."""
     arr = _finite_scalar_sample_array(value, grouped=grouped)
     if arr is None:
         return False
@@ -73,6 +77,7 @@ def _select_scalar_params(
     max_params: int | None,
     grouped: bool,
 ) -> list[str]:
+    """Select finite scalar sample sites for trace plotting."""
     if params is not None:
         selected = [str(param) for param in params]
         for param in selected:
@@ -101,6 +106,7 @@ def _select_corner_params(
     max_params: int | None,
     grouped: bool,
 ) -> list[str]:
+    """Select finite scalar sample sites with dynamic range for corner plots."""
     if params is not None:
         selected = [str(param) for param in params]
         for param in selected:
@@ -125,6 +131,7 @@ def _select_corner_params(
 
 
 def _labels_for_params(params: list[str], labels: Mapping[str, str] | list[str] | tuple[str, ...] | None) -> list[str]:
+    """Return display labels aligned with the selected parameter names."""
     if labels is None:
         return params
     if isinstance(labels, Mapping):
@@ -136,6 +143,7 @@ def _labels_for_params(params: list[str], labels: Mapping[str, str] | list[str] 
 
 
 def _truths_for_params(params: list[str], truths: Mapping[str, float | None] | list[float | None] | tuple[float | None, ...] | None):
+    """Return optional truth markers aligned with the selected parameter names."""
     if truths is None:
         return None
     if isinstance(truths, Mapping):
@@ -147,6 +155,7 @@ def _truths_for_params(params: list[str], truths: Mapping[str, float | None] | l
 
 
 def _sample_matrix(samples: Mapping[str, Any], params: list[str], *, grouped: bool) -> np.ndarray:
+    """Stack selected scalar posterior sample sites into a two-dimensional matrix."""
     columns = []
     draw_count = None
     for param in params:
@@ -311,6 +320,8 @@ def _median_effective_variance(fitter, pred: dict[str, Any]) -> np.ndarray:
     cfg = getattr(fitter.config, "likelihood", None)
     if cfg is None:
         class _FallbackLikelihood:
+            """Minimal likelihood configuration used when old fitter objects lack one."""
+
             systematics_width = 0.0
             variability_uncertainty = False
             attenuation_model_uncertainty = False

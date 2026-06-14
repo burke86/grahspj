@@ -849,6 +849,7 @@ class JAXSEDFit:
             host_capture = float(np.asarray(capture_fraction, dtype=float))
 
         def component(name: str, apply_scale: bool = True) -> np.ndarray:
+            """Return one posterior-median spectral component on the rest grid."""
             if name not in pred:
                 return np.zeros_like(wave_rest)
             comp_mjy = self._posterior_median_array(pred[name])[selected]
@@ -857,6 +858,7 @@ class JAXSEDFit:
             return self._mjy_to_rest_flambda_1e17(wave_obs, comp_mjy, z)
 
         def obs_sed_component(name: str, multiplier: float = 1.0) -> np.ndarray:
+            """Return one posterior-median observed SED component on the spectrum grid."""
             if name not in pred or "obs_wave" not in pred:
                 return np.zeros_like(wave_rest)
             source_wave = np.asarray(self._posterior_median_array(pred["obs_wave"]), dtype=float)
@@ -867,6 +869,7 @@ class JAXSEDFit:
             return self._obs_flambda_to_rest_flambda_1e17(scale_factor * multiplier * flux_lambda, z)
 
         def keep_component(arr: np.ndarray) -> bool:
+            """Return True for finite, nonzero component arrays worth plotting."""
             finite = np.asarray(arr, dtype=float)
             finite = finite[np.isfinite(finite)]
             return finite.size > 0 and float(np.nanmax(np.abs(finite))) > 0.0
