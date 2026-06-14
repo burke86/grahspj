@@ -125,7 +125,7 @@ class GalaxyConfig:
     rest_wave_min: float = 100.0
     rest_wave_max: float = 3.0e6
     n_wave: int = 1024
-    tau_host_prior_scale: float = 1.0
+    tau_host_prior_scale: float = 0.5
     sfh_n_steps: int = 64
     sfh_t_min_gyr: float = 0.01
     cosmology_h0: float = 70.0
@@ -190,7 +190,7 @@ class LikelihoodConfig:
     """Likelihood and extra model-mismatch configuration."""
     systematics_width: float = 0.05
     fit_systematics_width: bool = True
-    systematics_width_prior_scale: float = 0.01
+    systematics_width_prior_scale: float = 0.05
     likelihood_family: str = "gaussian"
     student_t_df: float = 5.0
     fit_intrinsic_scatter: bool = True

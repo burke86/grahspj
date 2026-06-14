@@ -153,6 +153,97 @@ def _cfg_exponential(prior_config: dict[str, Any], key: str, default_scale: floa
     return jnp.asarray(default_scale)
 
 
+def _log_positive_prior(
+    prior_config: dict[str, Any],
+    *,
+    value_key: str,
+    log_key: str,
+    default_value: float,
+    default_log_scale: float,
+):
+    """Return Normal prior settings for a positive value sampled in log-space."""
+    if log_key in prior_config:
+        return _cfg_norm(prior_config, log_key, np.log(max(default_value, 1.0e-30)), default_log_scale)
+    cfg = prior_config.get(value_key, None)
+    if isinstance(cfg, dict):
+        if "loc" in cfg and "scale" in cfg:
+            loc = float(np.asarray(cfg["loc"]))
+            scale = float(np.asarray(cfg["scale"]))
+            if loc > 0.0:
+                return jnp.asarray(np.log(loc)), jnp.asarray(scale)
+        if "scale" in cfg:
+            return jnp.asarray(np.log(max(0.5 * float(cfg["scale"]), 1.0e-30))), jnp.asarray(default_log_scale)
+    if isinstance(cfg, (int, float)) and float(cfg) > 0.0:
+        return jnp.asarray(np.log(float(cfg))), jnp.asarray(default_log_scale)
+    return jnp.asarray(np.log(max(default_value, 1.0e-30))), jnp.asarray(default_log_scale)
+
+
+def _sample_log_positive(
+    prior_config: dict[str, Any],
+    *,
+    value_key: str,
+    log_key: str,
+    default_value: float,
+    default_log_scale: float,
+):
+    """Sample a positive physical parameter through an unconstrained log site."""
+    log_value = numpyro.sample(
+        log_key,
+        dist.Normal(
+            *_log_positive_prior(
+                prior_config,
+                value_key=value_key,
+                log_key=log_key,
+                default_value=default_value,
+                default_log_scale=default_log_scale,
+            )
+        ),
+    )
+    value = jnp.exp(log_value)
+    numpyro.deterministic(value_key, value)
+    return value
+
+
+def _sample_positive(
+    prior_config: dict[str, Any],
+    *,
+    value_key: str,
+    log_key: str,
+    default_value: float,
+    default_log_scale: float,
+    default_family: str = "lognormal",
+):
+    """Sample a positive parameter with an explicit prior family.
+
+    ``prior_config[value_key]["family"]`` or ``["dist"]`` may be one of
+    ``"exponential"`` or ``"lognormal"``. A direct ``prior_config[log_key]``
+    override always selects the log-normal parameterization.
+    """
+    cfg = prior_config.get(value_key, None)
+    family = default_family
+    if isinstance(cfg, dict):
+        family = str(cfg.get("family", cfg.get("dist", family))).lower()
+    if log_key in prior_config:
+        family = "lognormal"
+
+    if family in {"exponential", "exp"}:
+        scale = _cfg_exponential(prior_config, value_key, default_value)
+        rate = 1.0 / jnp.maximum(scale, 1.0e-30)
+        return numpyro.sample(value_key, dist.Exponential(rate))
+    if family in {"lognormal", "log-normal", "log_normal", "normal_log"}:
+        return _sample_log_positive(
+            prior_config,
+            value_key=value_key,
+            log_key=log_key,
+            default_value=default_value,
+            default_log_scale=default_log_scale,
+        )
+    raise ValueError(
+        f"prior_config[{value_key!r}] family must be one of: "
+        "'exponential', 'lognormal'."
+    )
+
+
 def _cfg_mean_scale(prior_config: dict[str, Any], key: str, default_loc: float, default_scale: float):
     """Alias for reading mean/scale prior settings from prior_config."""
     return _cfg_norm(prior_config, key, default_loc, default_scale)
@@ -766,7 +857,13 @@ def _build_diffstar_host(context: ModelContext, prior_config: dict[str, Any], *,
     )
 
     gal_lgmet = numpyro.sample("gal_lgmet", dist.Normal(*_cfg_mean_scale(prior_config, "gal_lgmet", _default_gal_lgmet_loc(ssp_lgmet), 0.5)))
-    gal_lgmet_scatter = numpyro.sample("gal_lgmet_scatter", dist.HalfNormal(_cfg_halfnorm(prior_config, "gal_lgmet_scatter", 0.2)))
+    gal_lgmet_scatter = _sample_log_positive(
+        prior_config,
+        value_key="gal_lgmet_scatter",
+        log_key="log_gal_lgmet_scatter",
+        default_value=0.15,
+        default_log_scale=0.8,
+    )
     mmr_logprior = _mass_metallicity_relation_logprior(
         log_stellar_mass,
         gal_lgmet,
@@ -854,23 +951,33 @@ def _build_delayed_host(context: ModelContext, prior_config: dict[str, Any], *, 
             high=jnp.log(max_age),
         ),
     )
-    log_tau_gyr = numpyro.sample(
-        "log_sfh_tau_gyr",
-        dist.TruncatedNormal(
-            *_cfg_norm(prior_config, "log_sfh_tau_gyr", np.log(1.0), float(cfg.tau_host_prior_scale)),
-            low=jnp.log(jnp.asarray(0.03, dtype=jnp.float64)),
-            high=jnp.log(jnp.asarray(30.0, dtype=jnp.float64)),
+    log_tau_over_age = numpyro.sample(
+        "log_sfh_tau_over_age",
+        dist.Normal(
+            *_cfg_norm(
+                prior_config,
+                "log_sfh_tau_over_age",
+                0.0,
+                float(cfg.tau_host_prior_scale),
+            )
         ),
     )
     age_gyr = jnp.exp(log_age_gyr)
-    tau_gyr = jnp.maximum(jnp.exp(log_tau_gyr), 1.0e-4)
+    tau_gyr = jnp.clip(age_gyr * jnp.exp(log_tau_over_age), 0.03, 30.0)
+    log_tau_gyr = numpyro.deterministic("log_sfh_tau_gyr", jnp.log(tau_gyr))
     stellar_age_gyr = jnp.maximum(t_obs_gyr - gal_t_table, 0.0)
     sfh_age_gyr = age_gyr - stellar_age_gyr
     base_sfh = jnp.where((sfh_age_gyr > 0.0) & (sfh_age_gyr <= age_gyr), sfh_age_gyr * jnp.exp(-sfh_age_gyr / tau_gyr), 0.0)
     base_smh = _cumulative_trapezoid(base_sfh, gal_t_table) * 1.0e9
 
     gal_lgmet = numpyro.sample("gal_lgmet", dist.Normal(*_cfg_mean_scale(prior_config, "gal_lgmet", _default_gal_lgmet_loc(ssp_lgmet), 0.5)))
-    gal_lgmet_scatter = numpyro.sample("gal_lgmet_scatter", dist.HalfNormal(_cfg_halfnorm(prior_config, "gal_lgmet_scatter", 0.2)))
+    gal_lgmet_scatter = _sample_log_positive(
+        prior_config,
+        value_key="gal_lgmet_scatter",
+        log_key="log_gal_lgmet_scatter",
+        default_value=0.15,
+        default_log_scale=0.8,
+    )
     mmr_logprior = _mass_metallicity_relation_logprior(
         log_stellar_mass,
         gal_lgmet,
@@ -1404,23 +1511,35 @@ def evaluate_photometric_state(
 
     agn_type = int(cfg.agn.agn_type)
     if fit_agn:
-        pl_loc, pl_scale, pl_low, pl_high = _cfg_truncnorm(prior_config, "pl_slope", -1.8, 0.4, -3.0, -1.0)
+        pl_loc, pl_scale, pl_low, pl_high = _cfg_truncnorm(prior_config, "pl_slope", -1.8, 0.4, -2.5, -1.0)
         pl_slope = numpyro.sample("pl_slope", dist.TruncatedNormal(pl_loc, pl_scale, low=pl_low, high=pl_high))
         uv_slope_delta = numpyro.sample("uv_slope_delta", dist.LogNormal(*_cfg_norm(prior_config, "log_uv_slope_delta", np.log(1.8), 0.4)))
         uv_slope = pl_slope + uv_slope_delta
         numpyro.deterministic("uv_slope", uv_slope)
-        pl_bend_loc = numpyro.sample("pl_bend_loc", dist.LogNormal(*_cfg_norm(prior_config, "log_pl_bend_loc", np.log(GRAHSP_PL_BEND_LOC_A), 0.3)))
+        pl_bend_loc = numpyro.sample("pl_bend_loc", dist.LogNormal(*_cfg_norm(prior_config, "log_pl_bend_loc", np.log(GRAHSP_PL_BEND_LOC_A), 0.2)))
         pl_bend_width = numpyro.sample("pl_bend_width", dist.LogNormal(*_cfg_norm(prior_config, "log_pl_bend_width", np.log(GRAHSP_PL_BEND_WIDTH), 0.4)))
         pl_cutoff = numpyro.sample("pl_cutoff", dist.LogNormal(*_cfg_norm(prior_config, "log_pl_cutoff", np.log(GRAHSP_PL_CUTOFF_A), 0.6)))
         disk_rest = _powerlaw_jax(rest_wave, agn_amp / 5100.0, uv_slope, pl_slope, 5100.0, pl_bend_loc, pl_bend_width, pl_cutoff)
 
-        fcov = numpyro.sample("fcov", dist.Beta(2.0, 8.0))
+        fcov = _sample_log_positive(
+            prior_config,
+            value_key="fcov",
+            log_key="log_fcov",
+            default_value=0.2,
+            default_log_scale=0.6,
+        )
         si = numpyro.sample("si", dist.Normal(*_cfg_norm(prior_config, "si", 0.0, 1.0)))
         cool_lam = numpyro.sample("cool_lam", dist.LogNormal(*_cfg_norm(prior_config, "log_cool_lam", np.log(17.0), 0.2)))
         cool_width = numpyro.sample("cool_width", dist.LogNormal(*_cfg_norm(prior_config, "log_cool_width", np.log(0.45), 0.2)))
         hot_lam = numpyro.sample("hot_lam", dist.LogNormal(*_cfg_norm(prior_config, "log_hot_lam", np.log(2.0), 0.3)))
         hot_width = numpyro.sample("hot_width", dist.LogNormal(*_cfg_norm(prior_config, "log_hot_width", np.log(0.5), 0.2)))
-        hot_fcov = numpyro.sample("hot_fcov", dist.LogNormal(*_cfg_norm(prior_config, "log_hot_fcov", np.log(0.1), 0.8)))
+        hot_fcov = _sample_log_positive(
+            prior_config,
+            value_key="hot_fcov",
+            log_key="log_hot_fcov",
+            default_value=0.1,
+            default_log_scale=0.8,
+        )
         torus_rest = _torus_component(
             rest_wave,
             fcov,
@@ -1541,8 +1660,28 @@ def evaluate_photometric_state(
         feii_rest = jnp.zeros_like(rest_wave)
         balmer_rest = jnp.zeros_like(rest_wave)
 
-    ebv_gal = numpyro.sample("ebv_gal", dist.HalfNormal(_cfg_halfnorm(prior_config, "ebv_gal", 0.4))) if fit_host else jnp.asarray(0.0, dtype=jnp.float64)
-    ebv_agn = numpyro.sample("ebv_agn", dist.HalfNormal(_cfg_halfnorm(prior_config, "ebv_agn", 0.4))) if fit_agn else jnp.asarray(0.0, dtype=jnp.float64)
+    ebv_gal = (
+        _sample_log_positive(
+            prior_config,
+            value_key="ebv_gal",
+            log_key="log_ebv_gal",
+            default_value=0.05,
+            default_log_scale=1.0,
+        )
+        if fit_host
+        else jnp.asarray(0.0, dtype=jnp.float64)
+    )
+    ebv_agn = (
+        _sample_log_positive(
+            prior_config,
+            value_key="ebv_agn",
+            log_key="log_ebv_agn",
+            default_value=0.05,
+            default_log_scale=1.0,
+        )
+        if fit_agn
+        else jnp.asarray(0.0, dtype=jnp.float64)
+    )
     if cfg.galaxy.use_energy_balance and fit_host:
         dust_alpha = numpyro.sample(
             "dust_alpha",
@@ -1570,19 +1709,13 @@ def evaluate_photometric_state(
     else:
         intrinsic_scatter = jnp.asarray(float(cfg.likelihood.intrinsic_scatter_default), dtype=jnp.float64)
     if cfg.likelihood.fit_systematics_width:
-        systematics_width = numpyro.sample(
-            "systematics_width",
-            dist.Exponential(
-                1.0
-                / jnp.maximum(
-                    _cfg_exponential(
-                        prior_config,
-                        "systematics_width",
-                        cfg.likelihood.systematics_width_prior_scale,
-                    ),
-                    1.0e-12,
-                )
-            ),
+        systematics_width = _sample_positive(
+            prior_config,
+            value_key="systematics_width",
+            log_key="log_systematics_width",
+            default_value=float(cfg.likelihood.systematics_width_prior_scale),
+            default_log_scale=1.0,
+            default_family="exponential",
         )
     else:
         systematics_width = jnp.asarray(float(cfg.likelihood.systematics_width), dtype=jnp.float64)

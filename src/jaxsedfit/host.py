@@ -49,7 +49,7 @@ def build_host_state(
     t_obs_gyr: float,
     redshift: float = 0.0,
     sfh_t_min_gyr: float = 0.01,
-    tau_host_prior_scale: float = 1.0,
+    tau_host_prior_scale: float = 0.5,
     full_output: bool = True,
 ) -> dict[str, Any]:
     """Sample/build the JAXSEDFit physical host state from a host basis.

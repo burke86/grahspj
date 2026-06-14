@@ -66,7 +66,10 @@ def test_public_delayed_host_api_builds_physical_host_state():
     assert np.isclose(float(np.asarray(jnp.sum(state["host_ssp_weights"]))), 1.0)
     assert "mass_metallicity_relation_prior" in tr
     assert "log_sfh_age_gyr" in tr
+    assert "log_sfh_tau_over_age" in tr
     assert "log_sfh_tau_gyr" in tr
+    assert tr["log_sfh_tau_over_age"]["type"] == "sample"
+    assert tr["log_sfh_tau_gyr"]["type"] == "deterministic"
 
 
 def test_public_host_rest_on_basis_reuses_sampled_weights():
