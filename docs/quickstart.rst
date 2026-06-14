@@ -1,11 +1,25 @@
 Quickstart
 ==========
 
-The high-level interface is :class:`jaxsedfit.core.JAXSEDFit`.
+``jaxsedfit`` is configured through a single :class:`jaxsedfit.FitConfig`
+object. The top-level config groups the observation metadata, photometry and
+optional spectroscopy arrays, filter definitions, galaxy and AGN model options,
+likelihood settings, inference settings, and optional prior overrides. Build
+the config first, pass it to :class:`jaxsedfit.JAXSEDFit`, and then call
+:meth:`jaxsedfit.JAXSEDFit.fit`.
 
 .. code-block:: python
 
-   from jaxsedfit.core import JAXSEDFit
+   from jaxsedfit import FitConfig, JAXSEDFit, Observation, PhotometryData
+
+   cfg = FitConfig(
+       observation=Observation(object_id="demo", redshift=0.1),
+       photometry=PhotometryData(
+           filter_names=["u_sdss", "g_sdss", "r_sdss", "i_sdss", "z_sdss"],
+           fluxes=[0.22, 0.48, 0.73, 0.86, 0.91],
+           errors=[0.03, 0.04, 0.05, 0.06, 0.07],
+       ),
+   )
 
    cfg.inference.method = "optax+nuts"
    fitter = JAXSEDFit(cfg)
