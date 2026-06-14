@@ -10,7 +10,7 @@ from numpyro.infer import MCMC, NUTS, Predictive, SVI, Trace_ELBO, init_to_value
 from numpyro.infer.autoguide import AutoDelta
 
 from .config import FitConfig, _coerce_prior_config, fit_config_from_mapping, serialize_config
-from .model import grahsp_photometric_model
+from .model import sed_numpyro_model
 from .preload import ModelContext, build_model_context
 
 
@@ -62,11 +62,11 @@ class JAXSEDFit:
 
     def _model(self):
         """Return the bound NumPyro model for the current context."""
-        return grahsp_photometric_model(self.context, include_components=False)
+        return sed_numpyro_model(self.context, include_components=False)
 
     def _continuum_init_model(self):
         """Return the MAP warm-start model with detailed AGN features disabled."""
-        return grahsp_photometric_model(
+        return sed_numpyro_model(
             self.context,
             include_components=False,
             include_sed_agn_features=False,
@@ -75,7 +75,7 @@ class JAXSEDFit:
 
     def _predictive_model(self):
         """Return the bound NumPyro model used for posterior predictive products."""
-        return grahsp_photometric_model(self.context, include_components=True)
+        return sed_numpyro_model(self.context, include_components=True)
 
     def _compute_predictive(self) -> dict[str, Any]:
         """Generate and cache predictive outputs from posterior samples."""

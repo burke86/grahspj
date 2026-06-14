@@ -1191,7 +1191,7 @@ def _host_capture_fraction(spatial_scale_arcsec, turnover_arcsec, slope):
     return jnp.where(valid, frac, 1.0)
 
 
-def photometric_loglike(pred_fluxes, obs_fluxes, obs_errors, upper_limits, data_mask, systematics_width, intrinsic_scatter, likelihood_family, student_t_df, agn_component, agn_bol_lum_w, agn_nev, variability_uncertainty, attenuation_model_uncertainty, transmitted_fraction, lyman_break_uncertainty, filter_wavelength, redshift):
+def photometric_log_likelihood(pred_fluxes, obs_fluxes, obs_errors, upper_limits, data_mask, systematics_width, intrinsic_scatter, likelihood_family, student_t_df, agn_component, agn_bol_lum_w, agn_nev, variability_uncertainty, attenuation_model_uncertainty, transmitted_fraction, lyman_break_uncertainty, filter_wavelength, redshift):
     """Evaluate the broadband photometric log-likelihood for one model state."""
     pred_fluxes = jnp.nan_to_num(pred_fluxes, nan=0.0, posinf=1.0e30, neginf=-1.0e30)
     agn_component = jnp.nan_to_num(agn_component, nan=0.0, posinf=1.0e30, neginf=-1.0e30)
@@ -1225,7 +1225,7 @@ def photometric_loglike(pred_fluxes, obs_fluxes, obs_errors, upper_limits, data_
     return logl_data + logl_lim + penalty
 
 
-def spectroscopic_loglike(pred_fluxes, obs_fluxes, obs_errors, mask, systematics_width, student_t_df):
+def spectroscopic_log_likelihood(pred_fluxes, obs_fluxes, obs_errors, mask, systematics_width, student_t_df):
     """Evaluate the observed-frame spectral log-likelihood."""
     pred_fluxes = jnp.nan_to_num(pred_fluxes, nan=0.0, posinf=1.0e30, neginf=-1.0e30)
     obs_fluxes = jnp.nan_to_num(obs_fluxes, nan=0.0, posinf=1.0e30, neginf=-1.0e30)
@@ -1291,7 +1291,7 @@ def _evaluate_jaxqsofit_backend(
     )
 
 
-def evaluate_photometric_state(
+def evaluate_sed_model(
     context: ModelContext,
     include_components: bool = False,
     include_sed_agn_features: bool = True,
@@ -1924,7 +1924,7 @@ def evaluate_photometric_state(
                 spec_model_fluxes = spectrum_scale * spec_model_fluxes
         else:
             log_spectrum_scale = jnp.asarray(0.0, dtype=jnp.float64)
-        spec_logl = spectroscopic_loglike(
+        spec_logl = spectroscopic_log_likelihood(
             spec_model_fluxes,
             spec_fluxes,
             spec_errors,
@@ -2021,7 +2021,7 @@ def evaluate_photometric_state(
         else:
             trans_fluxes = jnp.ones_like(pred_fluxes)
 
-    logl = photometric_loglike(
+    logl = photometric_log_likelihood(
         pred_fluxes=pred_fluxes,
         obs_fluxes=obs_fluxes,
         obs_errors=obs_errors,
@@ -2216,14 +2216,14 @@ def evaluate_photometric_state(
     return state
 
 
-def grahsp_photometric_model(
+def sed_numpyro_model(
     context: ModelContext,
     include_components: bool = False,
     include_sed_agn_features: bool = True,
     include_spectral_features: bool = True,
 ):
     """NumPyro model for one jaxsedfit photometric fit or predictive expansion."""
-    return evaluate_photometric_state(
+    return evaluate_sed_model(
         context,
         include_components=include_components,
         include_sed_agn_features=include_sed_agn_features,

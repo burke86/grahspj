@@ -49,6 +49,4 @@ The component SED plot can also be generated directly:
 
 .. code-block:: python
 
-   from jaxsedfit.plotting import plot_fit_sed
-
-   plot_fit_sed(fitter, output_path="sed_fit.png")
+   fitter.plot_sed(output_path="sed_fit.png")

@@ -15,7 +15,7 @@ from jaxsedfit.config import (
     PhotometryData,
 )
 from jaxsedfit.core import JAXSEDFit
-from jaxsedfit.model import _default_gal_lgmet_loc, _mass_metallicity_relation_logprior, _luminosity_distance_m_jax, grahsp_photometric_model
+from jaxsedfit.model import _default_gal_lgmet_loc, _mass_metallicity_relation_logprior, _luminosity_distance_m_jax, sed_numpyro_model
 from jaxsedfit.preload import build_model_context
 
 
@@ -52,7 +52,7 @@ def test_diffstar_host_model_exposes_log_stellar_mass(monkeypatch):
     cfg.galaxy.dsps_ssp_fn = "fake-diffstar.h5"
     cfg.galaxy.host_sfh_model = "diffstar"
     context = build_model_context(cfg)
-    tr = trace(seed(lambda: grahsp_photometric_model(context, include_components=True), 0)).get_trace()
+    tr = trace(seed(lambda: sed_numpyro_model(context, include_components=True), 0)).get_trace()
 
     assert "log_stellar_mass" in tr
     assert "log_host_amp" not in tr
@@ -81,7 +81,7 @@ def test_delayed_host_model_is_default(monkeypatch):
     cfg = _mock_config()
     cfg.galaxy.dsps_ssp_fn = "fake-delayed.h5"
     context = build_model_context(cfg)
-    tr = trace(seed(lambda: grahsp_photometric_model(context, include_components=True), 0)).get_trace()
+    tr = trace(seed(lambda: sed_numpyro_model(context, include_components=True), 0)).get_trace()
 
     assert cfg.galaxy.host_sfh_model == "delayed"
     assert "log_sfh_age_gyr" in tr
@@ -106,7 +106,7 @@ def test_agn_type_2_uses_sy2_narrow_lines_only(monkeypatch):
     cfg.galaxy.dsps_ssp_fn = "fake-diffstar.h5"
     cfg.agn.agn_type = 2
     context = build_model_context(cfg)
-    tr = trace(seed(lambda: grahsp_photometric_model(context, include_components=True), 0)).get_trace()
+    tr = trace(seed(lambda: sed_numpyro_model(context, include_components=True), 0)).get_trace()
 
     assert np.allclose(np.asarray(tr["line_bl_rest_sed"]["value"]), 0.0)
     assert np.any(np.asarray(tr["line_nl_rest_sed"]["value"]) > 0.0)
@@ -128,7 +128,7 @@ def test_agn_type_3_uses_liner_lines_only(monkeypatch):
     cfg.galaxy.dsps_ssp_fn = "fake-diffstar.h5"
     cfg.agn.agn_type = 3
     context = build_model_context(cfg)
-    tr = trace(seed(lambda: grahsp_photometric_model(context, include_components=True), 0)).get_trace()
+    tr = trace(seed(lambda: sed_numpyro_model(context, include_components=True), 0)).get_trace()
 
     assert np.allclose(np.asarray(tr["line_bl_rest_sed"]["value"]), 0.0)
     assert np.allclose(np.asarray(tr["line_nl_rest_sed"]["value"]), 0.0)
@@ -150,7 +150,7 @@ def test_energy_balance_can_be_disabled(monkeypatch):
     cfg.galaxy.dsps_ssp_fn = "fake-diffstar.h5"
     cfg.galaxy.use_energy_balance = False
     context = build_model_context(cfg)
-    tr = trace(seed(lambda: grahsp_photometric_model(context, include_components=True), 0)).get_trace()
+    tr = trace(seed(lambda: sed_numpyro_model(context, include_components=True), 0)).get_trace()
 
     dust_rest = np.asarray(tr["dust_rest_sed"]["value"])
     assert np.allclose(dust_rest, 0.0)
@@ -176,7 +176,7 @@ def test_optional_mass_metallicity_prior_is_exposed(monkeypatch):
         "scale": 0.2,
     }
     context = build_model_context(cfg)
-    tr = trace(seed(lambda: grahsp_photometric_model(context, include_components=True), 0)).get_trace()
+    tr = trace(seed(lambda: sed_numpyro_model(context, include_components=True), 0)).get_trace()
 
     assert "mass_metallicity_relation_prior" in tr
     assert np.all(np.isfinite(np.asarray(tr["mass_metallicity_relation_prior"]["value"], dtype=float)))
@@ -195,7 +195,7 @@ def test_mass_metallicity_prior_is_enabled_by_default(monkeypatch):
     cfg = _mock_config()
     cfg.galaxy.dsps_ssp_fn = "fake-diffstar.h5"
     context = build_model_context(cfg)
-    tr = trace(seed(lambda: grahsp_photometric_model(context, include_components=True), 0)).get_trace()
+    tr = trace(seed(lambda: sed_numpyro_model(context, include_components=True), 0)).get_trace()
 
     assert "mass_metallicity_relation_prior" in tr
     assert np.all(np.isfinite(np.asarray(tr["mass_metallicity_relation_prior"]["value"], dtype=float)))
@@ -238,7 +238,7 @@ def test_mass_metallicity_prior_can_be_disabled(monkeypatch):
     cfg.galaxy.dsps_ssp_fn = "fake-diffstar.h5"
     cfg.prior_config["mass_metallicity_relation"] = {"enabled": False}
     context = build_model_context(cfg)
-    tr = trace(seed(lambda: grahsp_photometric_model(context, include_components=True), 0)).get_trace()
+    tr = trace(seed(lambda: sed_numpyro_model(context, include_components=True), 0)).get_trace()
 
     assert "mass_metallicity_relation_prior" in tr
     assert np.allclose(np.asarray(tr["mass_metallicity_relation_prior"]["value"], dtype=float), 0.0)
@@ -258,7 +258,7 @@ def test_uniform_log_stellar_mass_prior_is_supported(monkeypatch):
     cfg.galaxy.dsps_ssp_fn = "fake-diffstar.h5"
     cfg.prior_config["log_stellar_mass"] = {"dist": "uniform", "low": 6.0, "high": 8.0}
     context = build_model_context(cfg)
-    tr = trace(seed(lambda: grahsp_photometric_model(context, include_components=True), 0)).get_trace()
+    tr = trace(seed(lambda: sed_numpyro_model(context, include_components=True), 0)).get_trace()
 
     log_stellar_mass = float(np.asarray(tr["log_stellar_mass"]["value"]))
     assert 6.0 <= log_stellar_mass <= 8.0
@@ -281,7 +281,7 @@ def test_tabulated_redshift_pdf_prior_is_supported(monkeypatch):
         "pdf": [0.0, 1.0, 3.0, 0.0],
     }
     context = build_model_context(cfg)
-    tr = trace(seed(lambda: grahsp_photometric_model(context), 0)).get_trace()
+    tr = trace(seed(lambda: sed_numpyro_model(context), 0)).get_trace()
 
     redshift = float(np.asarray(tr["redshift"]["value"]))
     assert 0.05 <= redshift <= 0.4

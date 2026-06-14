@@ -3,10 +3,13 @@ Model Package
 
 .. currentmodule:: jaxsedfit.model
 
-.. autofunction:: grahsp_photometric_model
+Model API
+---------
 
-.. autofunction:: evaluate_photometric_state
+.. autofunction:: sed_numpyro_model
 
-.. autofunction:: photometric_loglike
+.. autofunction:: evaluate_sed_model
 
-.. autofunction:: spectroscopic_loglike
+.. autofunction:: photometric_log_likelihood
+
+.. autofunction:: spectroscopic_log_likelihood

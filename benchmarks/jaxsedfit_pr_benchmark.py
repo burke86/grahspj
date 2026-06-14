@@ -51,8 +51,8 @@ from jaxsedfit.model import (
     _project_rest_luminosity_filters,
     _redshift_to_obs,
     _torus_component,
-    grahsp_photometric_model,
-    photometric_loglike,
+    photometric_log_likelihood,
+    sed_numpyro_model,
 )
 
 
@@ -344,8 +344,8 @@ def _build_component_functions(fitter: JAXSEDFit) -> dict[str, Callable[[], Any]
 
     pred_fluxes = _project_rest_luminosity_filters(ctx, total_rest)
 
-    def photometric_loglike_only():
-        return photometric_loglike(
+    def photometric_log_likelihood_only():
+        return photometric_log_likelihood(
             pred_fluxes,
             jnp.asarray(ctx.fluxes, dtype=jnp.float64),
             jnp.asarray(ctx.errors, dtype=jnp.float64),
@@ -379,7 +379,7 @@ def _build_component_functions(fitter: JAXSEDFit) -> dict[str, Callable[[], Any]
         "attenuation_plus_dale_dust": attenuation_plus_dale_dust,
         "fast_filter_projection": fast_filter_projection,
         "legacy_redshift_plus_projection": legacy_redshift_plus_projection,
-        "photometric_loglike_only": photometric_loglike_only,
+        "photometric_log_likelihood_only": photometric_log_likelihood_only,
     }
 
 
@@ -409,9 +409,9 @@ def run_benchmark(
     map_seconds = time.perf_counter() - fit_start
     params = fitter.map_result["median"]
 
-    model = partial(grahsp_photometric_model, fitter.context, include_components=False)
+    model = partial(sed_numpyro_model, fitter.context, include_components=False)
     model_no_features = partial(
-        grahsp_photometric_model,
+        sed_numpyro_model,
         fitter.context,
         include_components=False,
         include_sed_agn_features=False,

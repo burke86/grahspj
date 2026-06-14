@@ -53,8 +53,10 @@ from jaxsedfit.model import (
     _project_filters,
     _redshift_to_obs,
     _torus_component,
-    grahsp_photometric_model,
-    photometric_loglike,
+    evaluate_sed_model,
+    photometric_log_likelihood,
+    sed_numpyro_model,
+    spectroscopic_log_likelihood,
 )
 from jaxsedfit.preload import _build_fixed_igm_jax, _build_igm_cache_jax, build_model_context
 from jaxsedfit.filters import load_filter_curve
@@ -80,6 +82,15 @@ def test_likelihood_defaults_include_absolute_flux_scale_prior():
     cfg = LikelihoodConfig()
     assert cfg.use_absolute_flux_scale_prior is True
     assert cfg.absolute_flux_scale_prior_sigma_dex > 0.0
+
+
+def test_public_model_names_are_real_implementations():
+    import jaxsedfit.model as modelmod
+
+    assert modelmod.sed_numpyro_model is sed_numpyro_model
+    assert modelmod.evaluate_sed_model is evaluate_sed_model
+    assert modelmod.photometric_log_likelihood is photometric_log_likelihood
+    assert modelmod.spectroscopic_log_likelihood is spectroscopic_log_likelihood
 
 
 def test_prior_config_object_exposes_flat_mapping():
@@ -499,8 +510,8 @@ def test_lyman_break_uncertainty_threshold_uses_angstroms():
         redshift=0.0,
     )
 
-    logl_without_uncertainty = float(photometric_loglike(**kwargs, lyman_break_uncertainty=False))
-    logl_with_uncertainty = float(photometric_loglike(**kwargs, lyman_break_uncertainty=True))
+    logl_without_uncertainty = float(photometric_log_likelihood(**kwargs, lyman_break_uncertainty=False))
+    logl_with_uncertainty = float(photometric_log_likelihood(**kwargs, lyman_break_uncertainty=True))
 
     assert logl_without_uncertainty < -1.0e5
     assert logl_with_uncertainty > -100.0
@@ -967,7 +978,7 @@ def test_jaxqsofit_spectrum_resolution_host_basis_uses_host_kinematics(monkeypat
 
     tr = trace(
         substitute(
-            seed(grahsp_photometric_model, jax.random.PRNGKey(3)),
+            seed(sed_numpyro_model, jax.random.PRNGKey(3)),
             data={
                 "gal_v_kms": np.array(0.0),
                 "gal_sigma_kms": np.array(120.0),
@@ -1114,7 +1125,7 @@ def test_jaxsedfit_model_can_call_jaxqsofit_backend(monkeypatch):
         "feii_shift": np.array(0.0),
         "ebv_agn": np.array(0.0),
     }
-    tr = trace(substitute(seed(grahsp_photometric_model, jax.random.PRNGKey(1)), data=params)).get_trace(
+    tr = trace(substitute(seed(sed_numpyro_model, jax.random.PRNGKey(1)), data=params)).get_trace(
         context,
         include_components=False,
     )
@@ -1193,7 +1204,7 @@ def test_jaxsedfit_jaxqsofit_backend_uses_nested_tied_line_config(monkeypatch):
         "feii_shift": np.array(0.0),
         "ebv_agn": np.array(0.0),
     }
-    tr = trace(substitute(seed(grahsp_photometric_model, jax.random.PRNGKey(2)), data=params)).get_trace(
+    tr = trace(substitute(seed(sed_numpyro_model, jax.random.PRNGKey(2)), data=params)).get_trace(
         context,
         include_components=False,
     )

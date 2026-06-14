@@ -277,7 +277,8 @@ def test_jaxsedfit_corner_and_trace_methods_delegate(monkeypatch):
     import jaxsedfit.plotting as plotting
 
     model = types.ModuleType("jaxsedfit.model")
-    model.grahsp_photometric_model = lambda *args, **kwargs: None
+    model.sed_numpyro_model = lambda *args, **kwargs: None
+    model.sed_numpyro_model = lambda *args, **kwargs: None
     preload = types.ModuleType("jaxsedfit.preload")
     preload.ModelContext = object
     preload.build_model_context = lambda config: None
@@ -295,15 +296,23 @@ def test_jaxsedfit_corner_and_trace_methods_delegate(monkeypatch):
         calls["trace"] = (fitter, kwargs)
         return "trace"
 
+    def _plot_fit_sed(fitter, **kwargs):
+        calls["sed"] = (fitter, kwargs)
+        return "sed"
+
     try:
         from jaxsedfit.core import JAXSEDFit
 
         monkeypatch.setattr(plotting, "plot_corner", _plot_corner)
         monkeypatch.setattr(plotting, "plot_trace", _plot_trace)
+        monkeypatch.setattr(plotting, "plot_fit_sed", _plot_fit_sed)
         fitter = object.__new__(JAXSEDFit)
 
+        assert fitter.plot_sed(output_path="sed.pdf") == "sed"
         assert fitter.plot_corner(output_path="corner.pdf", params=["alpha"]) == "corner"
         assert fitter.plot_trace(output_path="trace.pdf", params=["beta"]) == "trace"
+        assert calls["sed"][0] is fitter
+        assert calls["sed"][1]["output_path"] == "sed.pdf"
         assert calls["corner"][0] is fitter
         assert calls["corner"][1]["output_path"] == "corner.pdf"
         assert calls["corner"][1]["params"] == ["alpha"]

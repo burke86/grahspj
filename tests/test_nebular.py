@@ -15,7 +15,7 @@ from jaxsedfit.config import (
     Observation,
     PhotometryData,
 )
-from jaxsedfit.model import _cigale_nebular_correction, grahsp_photometric_model
+from jaxsedfit.model import _cigale_nebular_correction, sed_numpyro_model
 from jaxsedfit.preload import _load_nebular_templates_jax, build_model_context
 
 
@@ -139,7 +139,7 @@ def test_nebular_disabled_outputs_are_zero(monkeypatch):
     cfg = _mock_config()
     cfg.nebular.enabled = False
     context = build_model_context(cfg)
-    tr = trace(seed(lambda: grahsp_photometric_model(context, include_components=True), 0)).get_trace()
+    tr = trace(seed(lambda: sed_numpyro_model(context, include_components=True), 0)).get_trace()
 
     assert np.allclose(np.asarray(tr["nebular_rest_sed"]["value"]), 0.0)
     assert np.allclose(np.asarray(tr["nebular_fluxes"]["value"]), 0.0)
@@ -151,7 +151,7 @@ def test_nebular_enabled_adds_finite_component(monkeypatch):
     cfg.nebular = NebularConfig(enabled=True, f_esc=0.0, f_dust=0.0, zgas=0.02)
     cfg.prior_config["nebular_logU"] = {"loc": -2.0, "scale": 0.01}
     context = build_model_context(cfg)
-    tr = trace(seed(lambda: grahsp_photometric_model(context, include_components=True), 1)).get_trace()
+    tr = trace(seed(lambda: sed_numpyro_model(context, include_components=True), 1)).get_trace()
 
     nebular_rest = np.asarray(tr["nebular_rest_sed"]["value"])
     assert np.all(np.isfinite(nebular_rest))
@@ -174,8 +174,8 @@ def test_fixed_nebular_line_profile_cache_matches_dynamic_path(monkeypatch):
     assert dynamic_context.fixed_nebular_line_profile_jax is None
 
     data = {"nebular_lines_width": np.array(300.0)}
-    fixed_tr = trace(seed(lambda: grahsp_photometric_model(fixed_context, include_components=True), 3)).get_trace()
-    dynamic_model = substitute(lambda: grahsp_photometric_model(dynamic_context, include_components=True), data=data)
+    fixed_tr = trace(seed(lambda: sed_numpyro_model(fixed_context, include_components=True), 3)).get_trace()
+    dynamic_model = substitute(lambda: sed_numpyro_model(dynamic_context, include_components=True), data=data)
     dynamic_tr = trace(seed(dynamic_model, 3)).get_trace()
 
     np.testing.assert_allclose(
@@ -197,7 +197,7 @@ def test_fixed_nebular_line_profile_skips_dynamic_gaussian(monkeypatch):
         raise AssertionError("Fixed nebular line profile should skip dynamic Gaussian construction.")
 
     monkeypatch.setattr("jaxsedfit.model._flux_conserving_line_gaussians", _raise_if_called)
-    tr = trace(seed(lambda: grahsp_photometric_model(context, include_components=True), 4)).get_trace()
+    tr = trace(seed(lambda: sed_numpyro_model(context, include_components=True), 4)).get_trace()
 
     assert np.any(np.asarray(tr["nebular_lines_rest_sed"]["value"]) > 0.0)
 
@@ -207,6 +207,6 @@ def test_nebular_escape_fraction_one_suppresses_emission(monkeypatch):
     cfg = _mock_config()
     cfg.nebular = NebularConfig(enabled=True, f_esc=1.0, f_dust=0.0, zgas=0.02)
     context = build_model_context(cfg)
-    tr = trace(seed(lambda: grahsp_photometric_model(context, include_components=True), 2)).get_trace()
+    tr = trace(seed(lambda: sed_numpyro_model(context, include_components=True), 2)).get_trace()
 
     assert np.allclose(np.asarray(tr["nebular_rest_sed"]["value"]), 0.0)

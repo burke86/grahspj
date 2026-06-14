@@ -15,7 +15,7 @@ from jaxsedfit.config import (
     Observation,
     PhotometryData,
 )
-from jaxsedfit.model import GRAHSP_PL_BEND_LOC_A, GRAHSP_PL_BEND_WIDTH, GRAHSP_PL_CUTOFF_A, _project_filters, _redshift_to_obs, evaluate_photometric_state, grahsp_photometric_model
+from jaxsedfit.model import GRAHSP_PL_BEND_LOC_A, GRAHSP_PL_BEND_WIDTH, GRAHSP_PL_CUTOFF_A, _project_filters, _redshift_to_obs, evaluate_sed_model, sed_numpyro_model
 from jaxsedfit.preload import build_model_context
 
 
@@ -85,13 +85,13 @@ def _cfg(
 
 def _deterministic_trace(context, data=None):
     data = {} if data is None else data
-    model = substitute(lambda: grahsp_photometric_model(context, include_components=True), data=data)
+    model = substitute(lambda: sed_numpyro_model(context, include_components=True), data=data)
     return trace(seed(model, 0)).get_trace()
 
 
 def _deterministic_likelihood_trace(context, data=None):
     data = {} if data is None else data
-    model = substitute(lambda: grahsp_photometric_model(context, include_components=False), data=data)
+    model = substitute(lambda: sed_numpyro_model(context, include_components=False), data=data)
     return trace(seed(model, 0)).get_trace()
 
 
@@ -216,11 +216,11 @@ def test_torus_component_is_not_foreground_attenuated(monkeypatch):
     assert np.sum(_site(tr_high, "disk_rest_sed")) < np.sum(_site(tr_low, "disk_rest_sed"))
 
 
-def test_evaluate_photometric_state_matches_deterministic_sites(monkeypatch):
+def test_evaluate_sed_model_matches_deterministic_sites(monkeypatch):
     _patch_ssp(monkeypatch)
     context = build_model_context(_cfg())
     data = {"ebv_gal": np.array(0.2), "ebv_agn": np.array(0.1), "dust_alpha": np.array(2.0)}
-    model = substitute(lambda: evaluate_photometric_state(context, include_components=True), data=data)
+    model = substitute(lambda: evaluate_sed_model(context, include_components=True), data=data)
     trace_handler = trace(seed(model, 0))
     state = trace_handler()
     tr = trace_handler.trace
@@ -229,12 +229,12 @@ def test_evaluate_photometric_state_matches_deterministic_sites(monkeypatch):
         np.testing.assert_allclose(np.asarray(state[key], dtype=float), _site(tr, key))
 
 
-def test_evaluate_photometric_state_can_return_component_fluxes_without_full_components(monkeypatch):
+def test_evaluate_sed_model_can_return_component_fluxes_without_full_components(monkeypatch):
     _patch_ssp(monkeypatch)
     context = build_model_context(_cfg())
     data = {"ebv_gal": np.array(0.2), "ebv_agn": np.array(0.1), "dust_alpha": np.array(2.0)}
     model = substitute(
-        lambda: evaluate_photometric_state(
+        lambda: evaluate_sed_model(
             context,
             include_components=False,
             force_component_fluxes=True,

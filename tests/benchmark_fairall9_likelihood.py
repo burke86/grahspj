@@ -12,7 +12,7 @@ from numpyro.infer.util import log_density
 
 from jaxsedfit.config import AGNConfig, FilterSet, FitConfig, GalaxyConfig, InferenceConfig, LikelihoodConfig, Observation, PhotometryData
 from jaxsedfit.core import JAXSEDFit
-from jaxsedfit.model import grahsp_photometric_model
+from jaxsedfit.model import sed_numpyro_model
 
 
 def _repo_root() -> Path:
@@ -93,7 +93,7 @@ def benchmark_log_density(num_calls: int = 200, map_steps: int = 80, progress_ba
     fitter = JAXSEDFit(cfg)
     fitter.fit_map(steps=cfg.inference.map_steps, learning_rate=cfg.inference.learning_rate, progress_bar=progress_bar)
     params = fitter.map_result["median"]
-    model = partial(grahsp_photometric_model, fitter.context, include_components=False)
+    model = partial(sed_numpyro_model, fitter.context, include_components=False)
 
     def compiled_log_density(p):
         return log_density(model, (), {}, p)[0]
