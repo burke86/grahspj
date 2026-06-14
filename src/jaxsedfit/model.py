@@ -520,7 +520,7 @@ def _can_use_fixed_filter_projection(context: ModelContext, cfg) -> bool:
     """Return whether cached fixed-z photometric projection matrices are valid."""
     return bool(
         cfg.likelihood.use_fast_photometry_projection
-        and not cfg.observation.fit_redshift
+        and not cfg.observation.fits_redshift
         and context.fixed_filter_projection_jax is not None
         and context.fixed_scalar_filter_projection_jax is not None
     )
@@ -552,7 +552,7 @@ def _can_use_redshift_filter_projection(context: ModelContext, cfg) -> bool:
     """Return whether cached variable-redshift photometric matrices are valid."""
     return bool(
         cfg.likelihood.use_redshift_projection_cache
-        and cfg.observation.fit_redshift
+        and cfg.observation.fits_redshift
         and context.redshift_projection_cache_jax is not None
     )
 
@@ -1299,7 +1299,7 @@ def evaluate_photometric_state(
 ):
     """Evaluate one jaxsedfit photometric model state inside a NumPyro trace."""
     cfg = context.fit_config
-    prior_config = cfg.prior_config
+    prior_config = cfg.prior_config.to_mapping()
     rest_wave = context.rest_wave_jax
     obs_wave = context.obs_wave_jax
     feii_template_on_rest = context.feii_template_on_rest_jax
@@ -1354,7 +1354,7 @@ def evaluate_photometric_state(
         and str(cfg.spectroscopy_config.backend).lower() == "jaxqsofit"
         and context.spec_host_basis_jax is not None
         and context.spec_rest_wave_jax.size == context.spec_wave_obs.size
-        and not cfg.observation.fit_redshift
+        and not cfg.observation.fits_redshift
     )
     host_state = (
         _build_host_state(context, prior_config, full_output=include_components or needs_spec_host_basis)
@@ -1583,7 +1583,7 @@ def evaluate_photometric_state(
         )
     else:
         systematics_width = jnp.asarray(float(cfg.likelihood.systematics_width), dtype=jnp.float64)
-    if cfg.observation.fit_redshift:
+    if cfg.observation.fits_redshift:
         redshift = _sample_redshift(context, prior_config, cfg)
         luminosity_distance_m = _luminosity_distance_m_jax(
             redshift,
@@ -1667,7 +1667,7 @@ def evaluate_photometric_state(
             local_line_lumin = l_narrowlines * line_liner
         else:
             local_line_lumin = jnp.zeros_like(line_wave)
-        if context.fixed_local_line_projection_cache_jax is not None and not cfg.observation.fit_redshift:
+        if context.fixed_local_line_projection_cache_jax is not None and not cfg.observation.fits_redshift:
             local_agn_line_fluxes = _project_fixed_cached_local_line_filters(
                 context,
                 local_line_lumin,
@@ -1780,7 +1780,7 @@ def evaluate_photometric_state(
             use_spec_resolution_continuum = bool(
                 context.spec_host_basis_jax is not None
                 and context.spec_rest_wave_jax.size == context.spec_wave_obs.size
-                and not cfg.observation.fit_redshift
+                and not cfg.observation.fits_redshift
             )
             if use_spec_resolution_continuum:
                 spec_rest_wave = context.spec_rest_wave_jax

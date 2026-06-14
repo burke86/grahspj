@@ -4,3 +4,7 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 benchmark_outputs*/
+docs/_build/
+docs/generated/
+docs/_templates/
+*_retrieval_*.csv

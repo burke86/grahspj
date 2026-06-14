@@ -54,7 +54,7 @@ def build_fairall9_fixedz_config() -> FitConfig:
         observation=Observation(
             object_id="Fairall 9 fixed-z benchmark",
             redshift=float(true_redshift),
-            fit_redshift=False,
+            redshift_mode="fixed",
             redshift_err=0.0,
         ),
         photometry=PhotometryData(

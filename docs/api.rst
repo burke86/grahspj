@@ -17,6 +17,10 @@ API Reference
    jaxsedfit.NebularConfig
    jaxsedfit.LikelihoodConfig
    jaxsedfit.InferenceConfig
+   jaxsedfit.PriorConfig
+   jaxsedfit.RedshiftPriorConfig
+   jaxsedfit.StellarMassPriorConfig
+   jaxsedfit.MassMetallicityPriorConfig
    jaxsedfit.plot_fit_sed
    jaxsedfit.plot_corner
    jaxsedfit.plot_trace

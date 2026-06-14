@@ -1012,7 +1012,7 @@ def _build_fixed_nebular_line_profile(
         return None
     if tie_width_to_jaxqsofit:
         return None
-    prior_config = cfg.prior_config
+    prior_config = cfg.prior_config.to_mapping()
     shape_keys = {"nebular_logU", "nebular_zgas", "nebular_ne", "nebular_lines_width"}
     if any(key in prior_config for key in shape_keys):
         return None
@@ -1060,7 +1060,7 @@ def _build_nebular_rest_templates_jax(
             continuum_lumin_per_a_per_photon=jnp.asarray(zeros, dtype=jnp.float64),
         )
 
-    prior_config = cfg.prior_config
+    prior_config = cfg.prior_config.to_mapping()
     tie_width_to_jaxqsofit = bool(
         cfg.spectroscopy_config.enabled
         and str(cfg.spectroscopy_config.backend).lower() == "jaxqsofit"
@@ -1114,7 +1114,7 @@ def _build_nebular_rest_templates_jax(
 def _redshift_projection_grid(cfg: FitConfig) -> np.ndarray:
     """Return the redshift grid used for cached photometric projection."""
     n_grid = max(int(cfg.likelihood.redshift_projection_n_grid), 2)
-    redshift_pdf = cfg.prior_config.get("redshift_pdf")
+    redshift_pdf = cfg.prior_config.to_mapping().get("redshift_pdf")
     if redshift_pdf is not None:
         z_grid = np.asarray(redshift_pdf["z_grid"], dtype=float)
         low = float(z_grid[0])
@@ -1135,7 +1135,7 @@ def _build_redshift_projection_cache_jax(
     cosmology: FlatLambdaCDM,
 ) -> RedshiftProjectionCacheJax | None:
     """Precompute filter projection matrices over redshift for photo-z fits."""
-    if not (cfg.observation.fit_redshift and cfg.likelihood.use_redshift_projection_cache):
+    if not (cfg.observation.fits_redshift and cfg.likelihood.use_redshift_projection_cache):
         return None
     z_grid = _redshift_projection_grid(cfg)
     cache_key = (
@@ -1407,7 +1407,7 @@ def build_model_context(cfg: FitConfig) -> ModelContext:
 
     spec_rest_wave = np.array([], dtype=float)
     spec_host_basis_jax = None
-    if cfg.galaxy.fit_host and spec_wave_obs.size > 0 and not cfg.observation.fit_redshift:
+    if cfg.galaxy.fit_host and spec_wave_obs.size > 0 and not cfg.observation.fits_redshift:
         spec_rest_wave = (spec_wave_obs / (1.0 + max(cfg.observation.redshift, 0.0))).astype(float)
         spec_host_basis = _build_host_basis(spec_rest_wave, ssp_data)
         spec_host_basis_jax = _build_host_basis_jax(ssp_data, spec_host_basis, gal_t_table)
@@ -1434,7 +1434,7 @@ def build_model_context(cfg: FitConfig) -> ModelContext:
         if fixed_nebular_line_profile is None
         else jnp.asarray(fixed_nebular_line_profile, dtype=jnp.float64)
     )
-    if cfg.observation.fit_redshift:
+    if cfg.observation.fits_redshift:
         fixed_redshift_jax = None
         fixed_luminosity_distance_m_jax = None
         fixed_igm_jax = None

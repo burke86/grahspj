@@ -39,7 +39,7 @@ def test_load_from_samples_roundtrip(monkeypatch, tmp_path):
     fitter.predictive = {"pred_fluxes": np.array([[0.9], [1.0], [1.1]])}
 
     saved_path = fitter.save(tmp_path)
-    loaded = JAXSEDFit.load_from_samples(saved_path)
+    loaded = JAXSEDFit.load(saved_path)
 
     assert loaded.config.observation.object_id == "roundtrip"
     assert loaded.config.observation.redshift == 0.2
@@ -55,7 +55,7 @@ def test_top_level_load_from_samples_accepts_unique_directory(monkeypatch, tmp_p
     fitter.predictive = {"pred_fluxes": np.array([[1.0]])}
     fitter.save(tmp_path)
 
-    loaded = jaxsedfit.load_from_samples(tmp_path)
+    loaded = jaxsedfit.load(tmp_path)
 
     assert isinstance(loaded, JAXSEDFit)
     np.testing.assert_allclose(loaded.samples["log_stellar_mass"], [9.9])
@@ -67,4 +67,4 @@ def test_load_from_samples_requires_unique_posterior_file(monkeypatch, tmp_path)
     (tmp_path / "b_posterior.pkl").write_bytes(b"")
 
     with pytest.raises(FileNotFoundError, match="Multiple"):
-        JAXSEDFit.load_from_samples(tmp_path)
+        JAXSEDFit.load(tmp_path)
