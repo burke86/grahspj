@@ -1140,6 +1140,71 @@ class JAXSEDFit:
             finite = finite[np.isfinite(finite)]
             return finite.size > 0 and float(np.nanmax(np.abs(finite))) > 0.0
 
+        def draw_scale(n_draws: int) -> np.ndarray:
+            """Return one spectrum-scale factor per posterior draw."""
+            raw = np.asarray(pred.get("spectrum_scale_fit", scale_factor), dtype=float)
+            if raw.ndim == 0:
+                return np.full(n_draws, float(raw), dtype=float)
+            if raw.shape[0] == n_draws:
+                if raw.ndim > 1 and raw.shape[-1] > 1:
+                    return np.asarray(raw[:, int(spectrum_index)], dtype=float)
+                return np.asarray(raw.reshape(n_draws, -1)[:, 0], dtype=float)
+            return np.full(n_draws, scale_factor, dtype=float)
+
+        def band_from_draws(draws: np.ndarray | None) -> tuple[np.ndarray, np.ndarray] | None:
+            """Return 16-84% bands for posterior draws on the plot wavelength grid."""
+            if draws is None:
+                return None
+            arr = np.asarray(draws, dtype=float)
+            if arr.ndim != 2 or arr.shape[1] != wave_rest.size or arr.size == 0:
+                return None
+            return tuple(np.nanpercentile(arr, [16.0, 84.0], axis=0))
+
+        def spectrum_draws(name: str, apply_scale: bool = True) -> np.ndarray | None:
+            """Return spectral-component posterior draws in qsofit rest-frame units."""
+            if name not in pred:
+                return None
+            arr = np.asarray(pred[name], dtype=float)
+            if arr.ndim == 1:
+                if arr.shape[0] == selected.shape[0]:
+                    draws = arr[None, selected]
+                elif arr.shape[0] == wave_rest.size:
+                    draws = arr[None, :]
+                else:
+                    return None
+            elif arr.ndim >= 2 and arr.shape[-1] == selected.shape[0]:
+                draws = arr.reshape((-1, arr.shape[-1]))[:, selected]
+            elif arr.ndim >= 2 and arr.shape[-1] == wave_rest.size:
+                draws = arr.reshape((-1, arr.shape[-1]))
+            else:
+                return None
+            if apply_scale:
+                draws = draw_scale(draws.shape[0])[:, None] * draws
+            return self._mjy_to_rest_flambda_1e17(wave_obs[None, :], draws, z)
+
+        def obs_sed_draws(name: str, multiplier: float = 1.0) -> np.ndarray | None:
+            """Return observed-SED posterior draws interpolated to the spectrum grid."""
+            if name not in pred or "obs_wave" not in pred:
+                return None
+            source_wave = np.asarray(self._posterior_median_array(pred["obs_wave"]), dtype=float)
+            source_flux = np.asarray(pred[name], dtype=float)
+            if source_wave.ndim != 1 or source_wave.size == 0:
+                return None
+            if source_flux.ndim == 1:
+                flux_draws = source_flux[None, :]
+            elif source_flux.ndim >= 2:
+                flux_draws = source_flux.reshape((-1, source_flux.shape[-1]))
+            else:
+                return None
+            if flux_draws.shape[-1] != source_wave.size:
+                return None
+            interp_draws = np.vstack([
+                np.interp(wave_obs, source_wave, draw, left=0.0, right=0.0)
+                for draw in flux_draws
+            ])
+            scaled = draw_scale(interp_draws.shape[0])[:, None] * float(multiplier) * interp_draws
+            return self._obs_flambda_to_rest_flambda_1e17(scaled, z)
+
         plotter = JAXQSOFit.__new__(JAXQSOFit)
         plotter.z = z
         plotter.wave = wave_rest
@@ -1184,8 +1249,58 @@ class JAXSEDFit:
             + plotter.f_bc_model
             + plotter.f_line_model
         )
+        pred_bands = {}
+        total_band = band_from_draws(spectrum_draws("pred_spectrum_fluxes", apply_scale=False))
+        if total_band is not None:
+            pred_bands["total_model"] = total_band
+        host_draw_values = (
+            spectrum_draws("spec_host_model_fluxes")
+            if keep_component(spec_host_component)
+            else obs_sed_draws("host_obs_sed", multiplier=host_capture)
+        )
+        host_band = band_from_draws(host_draw_values)
+        if host_band is not None:
+            pred_bands["host"] = host_band
+        if keep_component(disk_component):
+            disk_draw_values = spectrum_draws("spec_disk_model_fluxes") if keep_component(spec_disk_component) else obs_sed_draws("disk_obs_sed")
+        else:
+            disk_draw_values = spectrum_draws("jqf_continuum_model")
+        disk_band = band_from_draws(disk_draw_values)
+        if disk_band is not None:
+            pred_bands["PL"] = disk_band
+            pred_bands["PL_intrinsic"] = disk_band
+        for key, site in (
+            ("FeII", "jqf_feii_model"),
+            ("Balmer_cont", "jqf_balmer_model"),
+            ("lines", "jqf_line_model"),
+        ):
+            band = band_from_draws(spectrum_draws(site))
+            if band is not None:
+                pred_bands[key] = band
+        torus_draw_values = spectrum_draws("spec_torus_model_fluxes") if keep_component(spec_torus_component) else obs_sed_draws("torus_obs_sed")
+        custom_draws = {
+            "jaxsedfit_torus": torus_draw_values,
+            "jaxsedfit_host_dust": obs_sed_draws("dust_obs_sed"),
+            "jaxsedfit_sed_balmer": obs_sed_draws("balmer_obs_sed"),
+        }
+        sed_line_draws = [
+            arr for arr in (
+                obs_sed_draws("line_obs_sed"),
+                obs_sed_draws("feii_obs_sed"),
+                obs_sed_draws("nebular_lines_obs_sed"),
+            )
+            if arr is not None
+        ]
+        if sed_line_draws:
+            custom_draws["jaxsedfit_sed_lines"] = np.sum(sed_line_draws, axis=0)
+        for name, draws in custom_draws.items():
+            if name in plotter.custom_components:
+                band = band_from_draws(draws)
+                if band is not None:
+                    pred_bands[name] = band
         plotter.f_poly_model = np.ones_like(wave_rest)
         plotter.custom_line_components = {}
+        plotter.pred_bands = pred_bands
         plotter.use_psf_phot = False
         plotter.psf_model = np.array([])
         plotter.host_psf = np.array([])

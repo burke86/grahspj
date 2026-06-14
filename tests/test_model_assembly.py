@@ -99,10 +99,14 @@ def _site(tr, key):
     return np.asarray(tr[key]["value"], dtype=float)
 
 
+def _log_positive(value):
+    return np.array(np.log(max(float(value), 1.0e-12)))
+
+
 def _fixed_component_data():
     return {
-        "ebv_gal": np.array(0.2),
-        "ebv_agn": np.array(0.1),
+        "log_ebv_gal": _log_positive(0.2),
+        "log_ebv_agn": _log_positive(0.1),
         "dust_alpha": np.array(2.0),
         "log_agn_amp": np.array(np.log(1.0e34)),
         "uv_slope": np.array(0.0),
@@ -110,13 +114,13 @@ def _fixed_component_data():
         "pl_bend_loc": np.array(GRAHSP_PL_BEND_LOC_A),
         "pl_bend_width": np.array(GRAHSP_PL_BEND_WIDTH),
         "pl_cutoff": np.array(GRAHSP_PL_CUTOFF_A),
-        "fcov": np.array(0.2),
+        "log_fcov": _log_positive(0.2),
         "si": np.array(0.0),
         "cool_lam": np.array(17.0),
         "cool_width": np.array(0.45),
         "hot_lam": np.array(2.0),
         "hot_width": np.array(0.5),
-        "hot_fcov": np.array(0.1),
+        "log_hot_fcov": _log_positive(0.1),
         "lines_strength": np.array(1.0),
         "line_width_kms": np.array(3000.0),
         "feii_norm": np.array(1.0),
@@ -133,7 +137,7 @@ def test_systematics_width_can_be_sampled_with_exponential_prior(monkeypatch):
     cfg = _cfg()
     cfg.likelihood.fit_systematics_width = True
     cfg.likelihood.systematics_width = 0.05
-    cfg.likelihood.systematics_width_prior_scale = 0.01
+    cfg.likelihood.systematics_width_prior_scale = 0.05
     context = build_model_context(cfg)
 
     tr = _deterministic_likelihood_trace(
@@ -145,8 +149,52 @@ def test_systematics_width_can_be_sampled_with_exponential_prior(monkeypatch):
     )
 
     assert "systematics_width" in tr
+    assert tr["systematics_width"]["type"] == "sample"
+    assert np.isclose(np.asarray(tr["systematics_width"]["fn"].rate), 20.0)
     assert np.isclose(_site(tr, "systematics_width"), 0.02)
     assert "photometry_loglike" in tr
+
+
+def test_systematics_width_can_use_log_normal_override(monkeypatch):
+    _patch_ssp(monkeypatch)
+    cfg = _cfg()
+    cfg.likelihood.fit_systematics_width = True
+    cfg.prior_config["systematics_width"] = {"family": "lognormal", "loc": 0.02, "scale": 0.2}
+    context = build_model_context(cfg)
+
+    tr = _deterministic_likelihood_trace(
+        context,
+        {
+            **_fixed_component_data(),
+            "log_systematics_width": _log_positive(0.02),
+        },
+    )
+
+    assert "log_systematics_width" in tr
+    assert "systematics_width" in tr
+    assert tr["log_systematics_width"]["type"] == "sample"
+    assert tr["systematics_width"]["type"] == "deterministic"
+    assert np.isclose(_site(tr, "systematics_width"), 0.02)
+
+
+def test_positive_geometry_parameters_are_sampled_in_log_space(monkeypatch):
+    _patch_ssp(monkeypatch)
+    context = build_model_context(_cfg())
+
+    tr = _deterministic_trace(context, _fixed_component_data())
+
+    for log_key, value_key in (
+        ("log_ebv_gal", "ebv_gal"),
+        ("log_ebv_agn", "ebv_agn"),
+        ("log_fcov", "fcov"),
+        ("log_hot_fcov", "hot_fcov"),
+        ("log_gal_lgmet_scatter", "gal_lgmet_scatter"),
+    ):
+        assert log_key in tr
+        assert value_key in tr
+        assert tr[log_key]["type"] == "sample"
+        assert tr[value_key]["type"] == "deterministic"
+        np.testing.assert_allclose(_site(tr, value_key), np.exp(_site(tr, log_key)))
 
 
 def test_component_rest_and_observed_seds_sum_to_total(monkeypatch):
@@ -155,8 +203,8 @@ def test_component_rest_and_observed_seds_sum_to_total(monkeypatch):
     tr = _deterministic_trace(
         context,
         {
-            "ebv_gal": np.array(0.2),
-            "ebv_agn": np.array(0.1),
+            "log_ebv_gal": _log_positive(0.2),
+            "log_ebv_agn": _log_positive(0.1),
             "dust_alpha": np.array(2.0),
             "log_agn_amp": np.array(np.log(1.0e34)),
             "uv_slope": np.array(0.0),
@@ -164,13 +212,13 @@ def test_component_rest_and_observed_seds_sum_to_total(monkeypatch):
             "pl_bend_loc": np.array(GRAHSP_PL_BEND_LOC_A),
             "pl_bend_width": np.array(GRAHSP_PL_BEND_WIDTH),
             "pl_cutoff": np.array(GRAHSP_PL_CUTOFF_A),
-            "fcov": np.array(0.2),
+            "log_fcov": _log_positive(0.2),
             "si": np.array(0.0),
             "cool_lam": np.array(17.0),
             "cool_width": np.array(0.45),
             "hot_lam": np.array(2.0),
             "hot_width": np.array(0.5),
-            "hot_fcov": np.array(0.1),
+            "log_hot_fcov": _log_positive(0.1),
             "lines_strength": np.array(1.0),
             "line_width_kms": np.array(3000.0),
             "feii_norm": np.array(1.0),
@@ -204,10 +252,10 @@ def test_torus_component_is_not_foreground_attenuated(monkeypatch):
     context = build_model_context(_cfg())
     low_ebv = _fixed_component_data()
     high_ebv = _fixed_component_data()
-    low_ebv["ebv_gal"] = np.array(0.0)
-    low_ebv["ebv_agn"] = np.array(0.0)
-    high_ebv["ebv_gal"] = np.array(0.5)
-    high_ebv["ebv_agn"] = np.array(0.5)
+    low_ebv["log_ebv_gal"] = _log_positive(0.0)
+    low_ebv["log_ebv_agn"] = _log_positive(0.0)
+    high_ebv["log_ebv_gal"] = _log_positive(0.5)
+    high_ebv["log_ebv_agn"] = _log_positive(0.5)
 
     tr_low = _deterministic_trace(context, low_ebv)
     tr_high = _deterministic_trace(context, high_ebv)
@@ -219,7 +267,7 @@ def test_torus_component_is_not_foreground_attenuated(monkeypatch):
 def test_evaluate_photometric_state_matches_deterministic_sites(monkeypatch):
     _patch_ssp(monkeypatch)
     context = build_model_context(_cfg())
-    data = {"ebv_gal": np.array(0.2), "ebv_agn": np.array(0.1), "dust_alpha": np.array(2.0)}
+    data = {"log_ebv_gal": _log_positive(0.2), "log_ebv_agn": _log_positive(0.1), "dust_alpha": np.array(2.0)}
     model = substitute(lambda: evaluate_photometric_state(context, include_components=True), data=data)
     trace_handler = trace(seed(model, 0))
     state = trace_handler()
@@ -232,7 +280,7 @@ def test_evaluate_photometric_state_matches_deterministic_sites(monkeypatch):
 def test_evaluate_photometric_state_can_return_component_fluxes_without_full_components(monkeypatch):
     _patch_ssp(monkeypatch)
     context = build_model_context(_cfg())
-    data = {"ebv_gal": np.array(0.2), "ebv_agn": np.array(0.1), "dust_alpha": np.array(2.0)}
+    data = {"log_ebv_gal": _log_positive(0.2), "log_ebv_agn": _log_positive(0.1), "dust_alpha": np.array(2.0)}
     model = substitute(
         lambda: evaluate_photometric_state(
             context,
@@ -252,7 +300,7 @@ def test_evaluate_photometric_state_can_return_component_fluxes_without_full_com
 def test_energy_balance_dust_sed_integrates_to_absorbed_luminosity(monkeypatch):
     _patch_ssp(monkeypatch)
     context = build_model_context(_cfg(rest_wave_max=2.3e9, n_wave=4096))
-    tr = _deterministic_trace(context, {"ebv_gal": np.array(0.5), "ebv_agn": np.array(0.0), "dust_alpha": np.array(2.0)})
+    tr = _deterministic_trace(context, {"log_ebv_gal": _log_positive(0.5), "log_ebv_agn": _log_positive(0.0), "dust_alpha": np.array(2.0)})
 
     rest_wave = _site(tr, "rest_wave")
     dust_luminosity = 10.0 ** float(_site(tr, "log_dust_luminosity_fit"))
@@ -265,7 +313,7 @@ def test_energy_balance_dust_sed_integrates_to_absorbed_luminosity(monkeypatch):
 def test_agn_off_mode_has_zero_agn_components_and_no_total_leak(monkeypatch):
     _patch_ssp(monkeypatch)
     context = build_model_context(_cfg(fit_agn=False))
-    tr = _deterministic_trace(context, {"ebv_gal": np.array(0.2), "dust_alpha": np.array(2.0)})
+    tr = _deterministic_trace(context, {"log_ebv_gal": _log_positive(0.2), "dust_alpha": np.array(2.0)})
 
     for key in ("agn_rest_sed", "disk_rest_sed", "torus_rest_sed", "feii_rest_sed", "line_rest_sed", "balmer_rest_sed"):
         assert np.allclose(_site(tr, key), 0.0)
@@ -278,7 +326,7 @@ def test_agn_off_mode_has_zero_agn_components_and_no_total_leak(monkeypatch):
 def test_host_off_mode_has_zero_host_components_and_no_total_leak(monkeypatch):
     _patch_ssp(monkeypatch)
     context = build_model_context(_cfg(fit_host=False))
-    tr = _deterministic_trace(context, {"log_agn_amp": np.array(np.log(1.0e34)), "fcov": np.array(0.2), "si": np.array(0.0)})
+    tr = _deterministic_trace(context, {"log_agn_amp": np.array(np.log(1.0e34)), "log_fcov": _log_positive(0.2), "si": np.array(0.0)})
 
     for key in ("host_rest_sed", "host_total_rest_sed", "host_absorbed_rest_sed", "dust_rest_sed", "nebular_rest_sed"):
         assert np.allclose(_site(tr, key), 0.0)
@@ -291,7 +339,7 @@ def test_host_off_mode_has_zero_host_components_and_no_total_leak(monkeypatch):
 def test_agn_slope_ordering_uses_positive_delta_without_hard_factor(monkeypatch):
     _patch_ssp(monkeypatch)
     context = build_model_context(_cfg(fit_host=False))
-    tr = _deterministic_trace(context, {"log_agn_amp": np.array(np.log(1.0e34)), "fcov": np.array(0.2), "si": np.array(0.0)})
+    tr = _deterministic_trace(context, {"log_agn_amp": np.array(np.log(1.0e34)), "log_fcov": _log_positive(0.2), "si": np.array(0.0)})
 
     assert "uv_slope_gt_pl_slope" not in tr
     assert "uv_slope_delta" in tr
@@ -307,7 +355,7 @@ def test_host_kinematics_default_off_skips_broadening_call(monkeypatch):
 
     monkeypatch.setattr("jaxsedfit.model._shift_and_broaden_single_spectrum_lnlam", _raise_if_called)
     context = build_model_context(_cfg(fit_agn=False))
-    tr = _deterministic_trace(context, {"ebv_gal": np.array(0.2), "dust_alpha": np.array(2.0)})
+    tr = _deterministic_trace(context, {"log_ebv_gal": _log_positive(0.2), "dust_alpha": np.array(2.0)})
 
     assert "gal_v_kms" not in tr
     assert "gal_sigma_kms" not in tr
@@ -329,7 +377,7 @@ def test_host_kinematics_enabled_samples_and_broadens(monkeypatch):
         {
             "gal_v_kms": np.array(0.0),
             "gal_sigma_kms": np.array(150.0),
-            "ebv_gal": np.array(0.2),
+            "log_ebv_gal": _log_positive(0.2),
             "dust_alpha": np.array(2.0),
         },
     )
@@ -438,7 +486,7 @@ def test_feii_broadening_enabled_samples_and_calls_kernel(monkeypatch):
 def test_plotted_component_sites_are_attenuated_likelihood_components(monkeypatch):
     _patch_ssp(monkeypatch)
     context = build_model_context(_cfg())
-    tr = _deterministic_trace(context, {"ebv_gal": np.array(0.2), "ebv_agn": np.array(0.1), "dust_alpha": np.array(2.0)})
+    tr = _deterministic_trace(context, {"log_ebv_gal": _log_positive(0.2), "log_ebv_agn": _log_positive(0.1), "dust_alpha": np.array(2.0)})
 
     rest_wave = _site(tr, "rest_wave")
     obs_wave = _site(tr, "obs_wave")

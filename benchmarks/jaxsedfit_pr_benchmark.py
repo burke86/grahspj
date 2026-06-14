@@ -166,9 +166,11 @@ def build_fairall9_fixedz_config(dsps_ssp_fn: str | Path) -> FitConfig:
 
 
 def _bench_jitted(name: str, fn: Callable[[], Any], repeats: int, trials: int) -> dict[str, Any]:
+    compile_start = time.perf_counter()
     compiled = jax.jit(fn)
     out = compiled()
     jax.block_until_ready(out)
+    compile_seconds = time.perf_counter() - compile_start
     trial_elapsed = []
     trial_ms = []
     for _ in range(trials):
@@ -183,6 +185,7 @@ def _bench_jitted(name: str, fn: Callable[[], Any], repeats: int, trials: int) -
         "name": name,
         "repeats": int(repeats),
         "trials": int(trials),
+        "compile_seconds": float(compile_seconds),
         "elapsed_seconds": float(sum(trial_elapsed)),
         "trial_elapsed_seconds": trial_elapsed,
         "trial_ms_per_eval": trial_ms,
@@ -404,17 +407,25 @@ def run_benchmark(
     if trials < 1:
         raise ValueError("trials must be at least 1")
 
-    setup_start = time.perf_counter()
+    benchmark_start = time.perf_counter()
+    phase_timings: dict[str, float] = {}
+
+    config_start = time.perf_counter()
     cfg = build_fairall9_fixedz_config(dsps_ssp_fn)
     cfg.inference.map_steps = int(map_steps)
+    phase_timings["config_build_seconds"] = time.perf_counter() - config_start
+
+    fitter_start = time.perf_counter()
     fitter = JAXSEDFit(cfg)
-    setup_seconds = time.perf_counter() - setup_start
+    phase_timings["fitter_init_seconds"] = time.perf_counter() - fitter_start
+    phase_timings["setup_seconds"] = phase_timings["config_build_seconds"] + phase_timings["fitter_init_seconds"]
 
     fit_start = time.perf_counter()
     fitter.fit_map(steps=cfg.inference.map_steps, learning_rate=cfg.inference.learning_rate, progress_bar=False)
-    map_seconds = time.perf_counter() - fit_start
+    phase_timings["map_seconds"] = time.perf_counter() - fit_start
     params = fitter.map_result["median"]
 
+    model_setup_start = time.perf_counter()
     model = partial(grahsp_photometric_model, fitter.context, include_components=False)
     model_no_features = partial(
         grahsp_photometric_model,
@@ -423,15 +434,27 @@ def run_benchmark(
         include_sed_agn_features=False,
         include_spectral_features=False,
     )
+    phase_timings["model_callable_setup_seconds"] = time.perf_counter() - model_setup_start
 
+    whole_start = time.perf_counter()
     whole = _bench_jitted("whole_log_density", lambda: log_density(model, (), {}, params)[0], repeats, trials)
+    phase_timings["whole_log_density_benchmark_seconds"] = time.perf_counter() - whole_start
+    no_features_start = time.perf_counter()
     whole_no_features = _bench_jitted(
         "whole_log_density_no_sed_agn_features",
         lambda: log_density(model_no_features, (), {}, params)[0],
         repeats,
         trials,
     )
-    components = [_bench_jitted(name, fn, component_repeats, trials) for name, fn in _build_component_functions(fitter).items()]
+    phase_timings["whole_no_features_benchmark_seconds"] = time.perf_counter() - no_features_start
+
+    component_setup_start = time.perf_counter()
+    component_functions = _build_component_functions(fitter)
+    phase_timings["component_callable_setup_seconds"] = time.perf_counter() - component_setup_start
+    component_bench_start = time.perf_counter()
+    components = [_bench_jitted(name, fn, component_repeats, trials) for name, fn in component_functions.items()]
+    phase_timings["component_benchmark_seconds"] = time.perf_counter() - component_bench_start
+    phase_timings["total_seconds"] = time.perf_counter() - benchmark_start
 
     return {
         "label": label,
@@ -445,8 +468,9 @@ def run_benchmark(
         "repeats": int(repeats),
         "component_repeats": int(component_repeats),
         "trials": int(trials),
-        "setup_seconds": float(setup_seconds),
-        "map_seconds": float(map_seconds),
+        "phase_timings": {key: float(value) for key, value in phase_timings.items()},
+        "setup_seconds": float(phase_timings["setup_seconds"]),
+        "map_seconds": float(phase_timings["map_seconds"]),
         "whole_log_density": whole,
         "whole_log_density_no_sed_agn_features": whole_no_features,
         "components": components,
@@ -473,6 +497,13 @@ def _fmt_percent_delta(candidate: float, baseline: float, candidate_stderr: floa
     return f"{delta:+.2f}% +/- {stderr:.2f}%"
 
 
+def _phase_timings(result: dict[str, Any]) -> dict[str, float]:
+    phases = dict(result.get("phase_timings", {}))
+    phases.setdefault("setup_seconds", float(result.get("setup_seconds", 0.0)))
+    phases.setdefault("map_seconds", float(result.get("map_seconds", 0.0)))
+    return phases
+
+
 def _component_map(result: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return {row["name"]: row for row in result["components"]}
 
@@ -495,11 +526,26 @@ def render_markdown(result: dict[str, Any], *, workflow_url: str) -> str:
         f"| setup time | {result['setup_seconds']:.3f} s |",
         f"| MAP time | {result['map_seconds']:.3f} s |",
         f"| whole log-density | {_fmt_ms_row(result['whole_log_density'])} |",
+        f"| whole log-density compile | {result['whole_log_density'].get('compile_seconds', 0.0):.3f} s |",
         f"| whole log-density, no SED AGN features | {_fmt_ms_row(result['whole_log_density_no_sed_agn_features'])} |",
+        f"| whole log-density, no SED AGN features compile | {result['whole_log_density_no_sed_agn_features'].get('compile_seconds', 0.0):.3f} s |",
+        f"| total benchmark runtime | {_phase_timings(result).get('total_seconds', 0.0):.3f} s |",
+        "",
+        "| phase | seconds | share of total |",
+        "| --- | ---: | ---: |",
+    ]
+    phases = _phase_timings(result)
+    total_seconds = phases.get("total_seconds", 0.0)
+    for name, seconds in sorted(phases.items(), key=lambda item: item[1], reverse=True):
+        if name == "total_seconds":
+            continue
+        share = 100.0 * seconds / total_seconds if total_seconds else float("nan")
+        lines.append(f"| `{name}` | {seconds:.3f} | {share:.1f}% |")
+    lines.extend([
         "",
         "| component | ms/eval | share of whole |",
         "| --- | ---: | ---: |",
-    ]
+    ])
     for row in sorted(result["components"], key=lambda item: _metric_mean(item, "ms_per_eval"), reverse=True):
         row_ms = _metric_mean(row, "ms_per_eval")
         lines.append(f"| `{row['name']}` | {_fmt_ms_row(row)} | {100.0 * row_ms / whole_ms:.1f}% |")
@@ -516,6 +562,8 @@ def render_comparison_markdown(baseline: dict[str, Any], candidate: dict[str, An
     cand_no_features = _metric_mean(candidate["whole_log_density_no_sed_agn_features"], "ms_per_eval")
     base_no_features_se = _metric_stderr(baseline["whole_log_density_no_sed_agn_features"], "ms_per_eval")
     cand_no_features_se = _metric_stderr(candidate["whole_log_density_no_sed_agn_features"], "ms_per_eval")
+    base_phases = _phase_timings(baseline)
+    cand_phases = _phase_timings(candidate)
     lines = [
         "<!-- jaxsedfit benchmark -->",
         "### jaxsedfit PR benchmark",
@@ -531,11 +579,23 @@ def render_comparison_markdown(baseline: dict[str, Any], candidate: dict[str, An
         f"| timing trials | {baseline.get('trials', 1)} x {baseline['repeats']} evals | {candidate.get('trials', 1)} x {candidate['repeats']} evals | |",
         f"| MAP time | {baseline['map_seconds']:.3f} s | {candidate['map_seconds']:.3f} s | {_percent_delta(candidate['map_seconds'], baseline['map_seconds']):+.2f}% |",
         f"| whole log-density | {_fmt_ms_row(baseline['whole_log_density'])} | {_fmt_ms_row(candidate['whole_log_density'])} | {_fmt_percent_delta(cand_whole, base_whole, cand_whole_se, base_whole_se)} |",
+        f"| whole log-density compile | {baseline['whole_log_density'].get('compile_seconds', 0.0):.3f} s | {candidate['whole_log_density'].get('compile_seconds', 0.0):.3f} s | {_percent_delta(candidate['whole_log_density'].get('compile_seconds', 0.0), baseline['whole_log_density'].get('compile_seconds', 0.0)):+.2f}% |",
         f"| whole log-density, no SED AGN features | {_fmt_ms_row(baseline['whole_log_density_no_sed_agn_features'])} | {_fmt_ms_row(candidate['whole_log_density_no_sed_agn_features'])} | {_fmt_percent_delta(cand_no_features, base_no_features, cand_no_features_se, base_no_features_se)} |",
+        f"| whole log-density, no SED AGN features compile | {baseline['whole_log_density_no_sed_agn_features'].get('compile_seconds', 0.0):.3f} s | {candidate['whole_log_density_no_sed_agn_features'].get('compile_seconds', 0.0):.3f} s | {_percent_delta(candidate['whole_log_density_no_sed_agn_features'].get('compile_seconds', 0.0), baseline['whole_log_density_no_sed_agn_features'].get('compile_seconds', 0.0)):+.2f}% |",
+        f"| total benchmark runtime | {base_phases.get('total_seconds', 0.0):.3f} s | {cand_phases.get('total_seconds', 0.0):.3f} s | {_percent_delta(cand_phases.get('total_seconds', 0.0), base_phases.get('total_seconds', 0.0)):+.2f}% |",
+        "",
+        "| phase | base | PR | delta |",
+        "| --- | ---: | ---: | ---: |",
+    ]
+    for name in sorted(set(base_phases).intersection(cand_phases), key=lambda key: cand_phases[key], reverse=True):
+        if name == "total_seconds":
+            continue
+        lines.append(f"| `{name}` | {base_phases[name]:.3f} s | {cand_phases[name]:.3f} s | {_percent_delta(cand_phases[name], base_phases[name]):+.2f}% |")
+    lines.extend([
         "",
         "| component | base | PR | delta |",
         "| --- | ---: | ---: | ---: |",
-    ]
+    ])
     base_components = _component_map(baseline)
     cand_components = _component_map(candidate)
     for name in sorted(set(base_components).intersection(cand_components), key=lambda key: _metric_mean(cand_components[key], "ms_per_eval"), reverse=True):

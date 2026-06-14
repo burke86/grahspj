@@ -86,7 +86,10 @@ def test_delayed_host_model_is_default(monkeypatch):
 
     assert cfg.galaxy.host_sfh_model == "delayed"
     assert "log_sfh_age_gyr" in tr
+    assert "log_sfh_tau_over_age" in tr
     assert "log_sfh_tau_gyr" in tr
+    assert tr["log_sfh_tau_over_age"]["type"] == "sample"
+    assert tr["log_sfh_tau_gyr"]["type"] == "deterministic"
     assert "u_lgmcrit" not in tr
     assert np.isfinite(float(np.asarray(tr["sfh_age_gyr_fit"]["value"])))
     assert np.isfinite(float(np.asarray(tr["sfh_tau_gyr_fit"]["value"])))

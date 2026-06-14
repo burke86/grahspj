@@ -1012,7 +1012,7 @@ def test_jaxqsofit_spectrum_resolution_host_basis_uses_host_kinematics(monkeypat
             data={
                 "gal_v_kms": np.array(0.0),
                 "gal_sigma_kms": np.array(120.0),
-                "ebv_gal": np.array(0.0),
+                "log_ebv_gal": np.array(np.log(1.0e-12)),
                 "dust_alpha": np.array(2.0),
             },
         )
@@ -1141,19 +1141,19 @@ def test_jaxsedfit_model_can_call_jaxqsofit_backend(monkeypatch):
         "pl_bend_loc": np.array(GRAHSP_PL_BEND_LOC_A),
         "pl_bend_width": np.array(GRAHSP_PL_BEND_WIDTH),
         "pl_cutoff": np.array(GRAHSP_PL_CUTOFF_A),
-        "fcov": np.array(0.1),
+        "log_fcov": np.array(np.log(0.1)),
         "si": np.array(0.0),
         "cool_lam": np.array(17.0),
         "cool_width": np.array(0.45),
         "hot_lam": np.array(2.0),
         "hot_width": np.array(0.5),
-        "hot_fcov": np.array(0.1),
+        "log_hot_fcov": np.array(np.log(0.1)),
         "lines_strength": np.array(1.0),
         "line_width_kms": np.array(3000.0),
         "feii_norm": np.array(1.0),
         "feii_fwhm": np.array(3000.0),
         "feii_shift": np.array(0.0),
-        "ebv_agn": np.array(0.0),
+        "log_ebv_agn": np.array(np.log(1.0e-12)),
     }
     tr = trace(substitute(seed(grahsp_photometric_model, jax.random.PRNGKey(1)), data=params)).get_trace(
         context,
@@ -1220,19 +1220,19 @@ def test_jaxsedfit_jaxqsofit_backend_uses_nested_tied_line_config(monkeypatch):
         "pl_bend_loc": np.array(GRAHSP_PL_BEND_LOC_A),
         "pl_bend_width": np.array(GRAHSP_PL_BEND_WIDTH),
         "pl_cutoff": np.array(GRAHSP_PL_CUTOFF_A),
-        "fcov": np.array(0.1),
+        "log_fcov": np.array(np.log(0.1)),
         "si": np.array(0.0),
         "cool_lam": np.array(17.0),
         "cool_width": np.array(0.45),
         "hot_lam": np.array(2.0),
         "hot_width": np.array(0.5),
-        "hot_fcov": np.array(0.1),
+        "log_hot_fcov": np.array(np.log(0.1)),
         "lines_strength": np.array(1.0),
         "line_width_kms": np.array(3000.0),
         "feii_norm": np.array(1.0),
         "feii_fwhm": np.array(3000.0),
         "feii_shift": np.array(0.0),
-        "ebv_agn": np.array(0.0),
+        "log_ebv_agn": np.array(np.log(1.0e-12)),
     }
     tr = trace(substitute(seed(grahsp_photometric_model, jax.random.PRNGKey(2)), data=params)).get_trace(
         context,
@@ -1328,6 +1328,7 @@ def test_plot_jaxqsofit_spectrum_adapts_joint_predictive(monkeypatch):
         captured["host"] = np.asarray(self.host)
         captured["line"] = np.asarray(self.f_line_model)
         captured["custom_components"] = dict(self.custom_components)
+        captured["pred_bands"] = self.pred_bands
         captured["kwargs"] = kwargs
         self.fig = "fig"
 
@@ -1374,6 +1375,14 @@ def test_plot_jaxqsofit_spectrum_adapts_joint_predictive(monkeypatch):
     assert "jaxsedfit_torus" in captured["custom_components"]
     assert "jaxsedfit_host_dust" in captured["custom_components"]
     assert "jaxsedfit_sed_lines" in captured["custom_components"]
+    assert "total_model" in captured["pred_bands"]
+    assert "host" in captured["pred_bands"]
+    assert "PL" in captured["pred_bands"]
+    assert "jaxsedfit_torus" in captured["pred_bands"]
+    lo, hi = captured["pred_bands"]["total_model"]
+    assert lo.shape == captured["wave"].shape
+    assert hi.shape == captured["wave"].shape
+    assert np.all(hi >= lo)
     assert np.nanmax(captured["custom_components"]["jaxsedfit_sed_lines"]) > 0.0
     assert captured["kwargs"]["show_plot"] is False
     assert captured["kwargs"]["plot_residual"] is False
