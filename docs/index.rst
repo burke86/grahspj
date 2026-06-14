@@ -11,4 +11,4 @@ JAX and NumPyro.
    installation
    quickstart
    tutorials
-   api
+   api/index
