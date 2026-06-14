@@ -23,7 +23,7 @@ the config first, pass it to :class:`jaxsedfit.JAXSEDFit`, and then call
 
    cfg.inference.method = "optax+nuts"
    fitter = JAXSEDFit(cfg)
-   fitter.fit(
+   result = fitter.fit(
        optax_steps=600,
        optax_lr=1e-2,
        nuts_warmup=50,
@@ -34,13 +34,15 @@ the config first, pass it to :class:`jaxsedfit.JAXSEDFit`, and then call
        save_result=True,
        output_dir="fit_outputs",
    )
+   result.summary
+   result.plot_corner()
 
 Nested sampling is available through NumPyro's ``jaxns`` wrapper:
 
 .. code-block:: python
 
    cfg.inference.method = "ns"
-   fitter.fit(
+   result = fitter.fit(
        ns_live_points=200,
        ns_dlogz=0.1,
    )
@@ -49,4 +51,5 @@ The component SED plot can also be generated directly:
 
 .. code-block:: python
 
+   prediction = result.predict()
    fitter.plot_sed(output_path="sed_fit.png")

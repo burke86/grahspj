@@ -1310,8 +1310,11 @@ def test_jaxsedfit_jaxqsofit_tied_line_backend_runs_svi_jit(monkeypatch):
     fitter = JAXSEDFit(cfg)
     result = fitter.fit_map(steps=1, progress_bar=False)
 
-    assert np.asarray(result["losses"]).shape == (1,)
-    assert np.isfinite(float(np.asarray(result["losses"])[0]))
+    assert result.samples is fitter.samples
+    assert result.method == "map"
+    assert "log_agn_amp" in result.median
+    assert np.asarray(fitter.map_result["losses"]).shape == (1,)
+    assert np.isfinite(float(np.asarray(fitter.map_result["losses"])[0]))
 
 
 def test_plot_jaxqsofit_spectrum_adapts_joint_predictive(monkeypatch):

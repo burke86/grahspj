@@ -13,6 +13,7 @@ from jaxsedfit.config import (
     PhotometryData,
 )
 from jaxsedfit.core import JAXSEDFit
+from jaxsedfit.results import FitResult
 
 
 def _minimal_config() -> FitConfig:
@@ -59,6 +60,35 @@ def test_top_level_load_from_samples_accepts_unique_directory(monkeypatch, tmp_p
 
     assert isinstance(loaded, JAXSEDFit)
     np.testing.assert_allclose(loaded.samples["log_stellar_mass"], [9.9])
+
+
+def test_load_result_wraps_loaded_fitter(monkeypatch, tmp_path):
+    monkeypatch.setattr("jaxsedfit.core.build_model_context", lambda config: SimpleNamespace(mw_ebv=0.0))
+    fitter = JAXSEDFit(_minimal_config())
+    fitter.samples = {"log_stellar_mass": np.array([9.8, 10.0])}
+    fitter.predictive = {"pred_fluxes": np.array([[1.0], [1.2]])}
+    saved_path = fitter.save(tmp_path)
+
+    result = JAXSEDFit.load_result(saved_path)
+
+    assert isinstance(result, FitResult)
+    assert isinstance(result.fitter, JAXSEDFit)
+    assert result.path == saved_path
+    np.testing.assert_allclose(result.samples["log_stellar_mass"], [9.8, 10.0])
+    assert np.isclose(result.median["log_stellar_mass"], 9.9)
+
+
+def test_fit_result_save_delegates_to_fitter(monkeypatch, tmp_path):
+    monkeypatch.setattr("jaxsedfit.core.build_model_context", lambda config: SimpleNamespace(mw_ebv=0.0))
+    fitter = JAXSEDFit(_minimal_config())
+    fitter.samples = {"log_stellar_mass": np.array([9.8, 10.0])}
+    fitter.predictive = {"pred_fluxes": np.array([[1.0], [1.2]])}
+    result = fitter._make_result(method="map")
+
+    saved_path = result.save(tmp_path)
+
+    assert result.path == saved_path
+    assert saved_path.exists()
 
 
 def test_load_from_samples_requires_unique_posterior_file(monkeypatch, tmp_path):

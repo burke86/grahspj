@@ -12,6 +12,7 @@ from numpyro.infer.autoguide import AutoDelta
 from .config import FitConfig, _coerce_prior_config, fit_config_from_mapping, serialize_config
 from .model import grahsp_photometric_model
 from .preload import ModelContext, build_model_context
+from .results import FitResult, median_mapping
 
 
 def _get_nested_sampler_cls():
@@ -76,6 +77,36 @@ class JAXSEDFit:
     def _predictive_model(self):
         """Return the bound NumPyro model used for posterior predictive products."""
         return grahsp_photometric_model(self.context, include_components=True)
+
+    def _make_result(
+        self,
+        *,
+        method: str,
+        path: str | Path | None = None,
+        figure: Any = None,
+        summary: dict[str, Any] | None = None,
+    ) -> FitResult:
+        """Build a public result object from the current mirrored fit state."""
+        samples = getattr(self, "samples", None)
+        map_result = getattr(self, "map_result", None)
+        if method == "map" and map_result is not None and "median" in map_result:
+            median = dict(map_result["median"])
+        else:
+            median = median_mapping(samples)
+        if summary is None and samples is not None:
+            try:
+                summary = self.summary()
+            except AttributeError:
+                summary = None
+        return FitResult(
+            fitter=self,
+            samples=samples,
+            median=median,
+            method=method,
+            summary=summary,
+            path=None if path is None else Path(path),
+            figure=figure,
+        )
 
     def _compute_predictive(self) -> dict[str, Any]:
         """Generate and cache predictive outputs from posterior samples."""
@@ -389,18 +420,16 @@ class JAXSEDFit:
             if save_fig:
                 saved_fig_path = Path(fig_path) if fig_path is not None else None
 
-        samples = getattr(self, "samples", None)
         # Lightweight test doubles may call fit() on a partially constructed object
         # without config/context. Preserve the direct fit payload for that case only.
         if not hasattr(self, "config"):
             return fit_output
-        return {
-            "fit": fit_output,
-            "summary": self.summary() if samples is not None else None,
-            "figure": fig,
-            "figure_path": saved_fig_path,
-            "result_path": saved_result_path,
-        }
+        return self._make_result(
+            method=method,
+            path=saved_result_path,
+            figure=fig,
+            summary=self.summary() if getattr(self, "samples", None) is not None else None,
+        )
 
     def _run_map_svi(
         self,
@@ -474,7 +503,7 @@ class JAXSEDFit:
             }
         self.samples = {k: np.asarray(v)[None, ...] for k, v in median.items()}
         self.predictive = None
-        return self.map_result
+        return self._make_result(method="map")
 
     def fit_nuts(
         self,
@@ -503,7 +532,7 @@ class JAXSEDFit:
         self.nuts_result = {"mcmc": mcmc}
         self.samples = {k: np.asarray(v) for k, v in samples.items()}
         self.predictive = None
-        return self.nuts_result
+        return self._make_result(method="nuts")
 
     def fit_ns(
         self,
@@ -587,7 +616,7 @@ class JAXSEDFit:
         }
         self.samples = {k: np.asarray(v) for k, v in samples.items()}
         self.predictive = None
-        return self.ns_result
+        return self._make_result(method="ns")
 
     def predict(self, posterior: str = "latest") -> dict[str, Any]:
         """Return cached predictive outputs or generate them on demand."""
@@ -714,6 +743,16 @@ class JAXSEDFit:
         return fitter
 
     load_from_samples = load
+
+    @classmethod
+    def load_result(cls, path: str | Path | None = None) -> FitResult:
+        """Load a posterior bundle and wrap it in a :class:`FitResult`."""
+        fitter = cls.load(path)
+        return fitter._make_result(
+            method="loaded",
+            path=getattr(fitter, "_loaded_posterior_path", None),
+            summary=getattr(fitter, "_saved_summary", None),
+        )
 
     def plot_sed(
         self,
