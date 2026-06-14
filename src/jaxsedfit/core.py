@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import pickle
 from pathlib import Path
 from typing import Any
 
+import h5py
 import jax
 import numpy as np
 from numpyro.infer import MCMC, NUTS, Predictive, SVI, Trace_ELBO, init_to_value
@@ -24,6 +24,8 @@ def _get_nested_sampler_cls():
 
 class JAXSEDFit:
     """High-level single-object fitting interface for jaxsedfit."""
+    _POSTERIOR_BUNDLE_SUFFIX = ".h5"
+
     def __init__(self, config: FitConfig):
         """Initialize the fitter and build its static model context."""
         self.config = config
@@ -401,18 +403,7 @@ class JAXSEDFit:
             if result_path is None:
                 saved_result_path = self.save(output_dir)
             else:
-                result_path = Path(result_path)
-                result_path.parent.mkdir(parents=True, exist_ok=True)
-                payload = {
-                    "config": serialize_config(self.config),
-                    "summary": self.summary() if self.samples is not None else None,
-                    "samples": {k: np.asarray(v) for k, v in (self.samples or {}).items()},
-                    "predictive": {k: np.asarray(v) for k, v in self.predict().items()} if self.samples is not None else {},
-                    "mw_ebv": self.context.mw_ebv,
-                }
-                with open(result_path, "wb") as fh:
-                    pickle.dump(payload, fh, protocol=pickle.HIGHEST_PROTOCOL)
-                saved_result_path = result_path
+                saved_result_path = self.save(result_path)
         if plot_fig or save_fig:
             if fig_path is None and save_fig:
                 fig_path = output_dir / f"{self.config.observation.object_id}_sed.png"
@@ -672,35 +663,162 @@ class JAXSEDFit:
                 out["absolute_flux_scale_logprior"] = float(np.median(np.asarray(self.predictive["absolute_flux_scale_logprior"], dtype=float)))
         return out
 
-    def save(self, output_dir: str | Path) -> Path:
-        """Serialize config, posterior samples, and predictive outputs to disk."""
-        output_dir = Path(output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
-        payload = {
-            "config": serialize_config(self.config),
-            "summary": self.summary() if self.samples is not None else None,
-            "samples": {k: np.asarray(v) for k, v in (self.samples or {}).items()},
-            "predictive": {k: np.asarray(v) for k, v in self.predict().items()} if self.samples is not None else {},
-            "mw_ebv": self.context.mw_ebv,
-        }
-        out = output_dir / f"{self.config.observation.object_id}_posterior.pkl"
-        with open(out, "wb") as fh:
-            pickle.dump(payload, fh, protocol=pickle.HIGHEST_PROTOCOL)
+    @staticmethod
+    def _hdf5_scalar_string_dtype():
+        """Return the UTF-8 scalar string dtype used in HDF5 bundles."""
+        return h5py.string_dtype(encoding="utf-8")
+
+    @classmethod
+    def _write_hdf5_node(cls, parent, name, value):
+        """Write one recursively serialized Python value into an HDF5 group."""
+        if value is None:
+            grp = parent.create_group(name)
+            grp.attrs["node_type"] = "none"
+            return
+
+        if isinstance(value, dict):
+            grp = parent.create_group(name)
+            grp.attrs["node_type"] = "dict"
+            for idx, (key, item) in enumerate(value.items()):
+                item_grp = grp.create_group(f"item_{idx:08d}")
+                cls._write_hdf5_node(item_grp, "key", str(key))
+                cls._write_hdf5_node(item_grp, "value", item)
+            return
+
+        if isinstance(value, list):
+            grp = parent.create_group(name)
+            grp.attrs["node_type"] = "list"
+            for idx, item in enumerate(value):
+                cls._write_hdf5_node(grp, f"item_{idx:08d}", item)
+            return
+
+        if isinstance(value, tuple):
+            grp = parent.create_group(name)
+            grp.attrs["node_type"] = "tuple"
+            for idx, item in enumerate(value):
+                cls._write_hdf5_node(grp, f"item_{idx:08d}", item)
+            return
+
+        if isinstance(value, (np.ndarray, np.generic)):
+            arr = np.asarray(value)
+            ds_kwargs = {}
+            if arr.ndim > 0:
+                ds_kwargs["compression"] = "gzip"
+                ds_kwargs["shuffle"] = True
+            ds = parent.create_dataset(name, data=arr, **ds_kwargs)
+            ds.attrs["node_type"] = "ndarray"
+            return
+
+        if isinstance(value, bool):
+            ds = parent.create_dataset(name, data=np.bool_(value))
+            ds.attrs["node_type"] = "scalar_bool"
+            return
+
+        if isinstance(value, int):
+            ds = parent.create_dataset(name, data=np.int64(value))
+            ds.attrs["node_type"] = "scalar_int"
+            return
+
+        if isinstance(value, float):
+            ds = parent.create_dataset(name, data=np.float64(value))
+            ds.attrs["node_type"] = "scalar_float"
+            return
+
+        if isinstance(value, str):
+            ds = parent.create_dataset(name, data=np.array(value, dtype=cls._hdf5_scalar_string_dtype()))
+            ds.attrs["node_type"] = "scalar_str"
+            return
+
+        raise TypeError(f"Unsupported value type in posterior bundle: {type(value)!r}")
+
+    @classmethod
+    def _read_hdf5_node(cls, parent, name):
+        """Read one recursively serialized Python value from an HDF5 group."""
+        node = parent[name]
+        if isinstance(node, h5py.Dataset):
+            node_type = node.attrs.get("node_type", "ndarray")
+            if isinstance(node_type, bytes):
+                node_type = node_type.decode("utf-8")
+            if node_type == "scalar_str":
+                return node.asstr()[()]
+            value = node[()]
+            if node_type == "scalar_bool":
+                return bool(value)
+            if node_type == "scalar_int":
+                return int(value)
+            if node_type == "scalar_float":
+                return float(value)
+            return np.asarray(value)
+
+        node_type = node.attrs.get("node_type", "")
+        if isinstance(node_type, bytes):
+            node_type = node_type.decode("utf-8")
+        if node_type == "none":
+            return None
+        if node_type == "dict":
+            out = {}
+            for item_name in sorted(node.keys()):
+                item_grp = node[item_name]
+                key = cls._read_hdf5_node(item_grp, "key")
+                out[str(key)] = cls._read_hdf5_node(item_grp, "value")
+            return out
+        if node_type == "list":
+            return [cls._read_hdf5_node(node, item_name) for item_name in sorted(node.keys())]
+        if node_type == "tuple":
+            return tuple(cls._read_hdf5_node(node, item_name) for item_name in sorted(node.keys()))
+        raise TypeError(f"Unsupported HDF5 node type in posterior bundle: {node_type!r}")
+
+    @staticmethod
+    def _write_array_group(parent, values: dict[str, Any]) -> None:
+        """Write an array mapping as compressed HDF5 datasets."""
+        for name, value in values.items():
+            arr = np.asarray(value)
+            ds_kwargs = {}
+            if arr.ndim > 0:
+                ds_kwargs["compression"] = "gzip"
+                ds_kwargs["shuffle"] = True
+            parent.create_dataset(str(name), data=arr, **ds_kwargs)
+
+    @classmethod
+    def _posterior_bundle_path(cls, path: str | Path | None, object_id: str) -> Path:
+        """Resolve an output directory or explicit HDF5 path."""
+        resolved = Path("." if path is None else path)
+        if resolved.suffix == cls._POSTERIOR_BUNDLE_SUFFIX:
+            resolved.parent.mkdir(parents=True, exist_ok=True)
+            return resolved
+        resolved.mkdir(parents=True, exist_ok=True)
+        return resolved / f"{object_id}_samples{cls._POSTERIOR_BUNDLE_SUFFIX}"
+
+    def save(self, output_dir: str | Path | None = None) -> Path:
+        """Serialize config, posterior samples, and predictive outputs to HDF5."""
+        out = self._posterior_bundle_path(output_dir, self.config.observation.object_id)
+        samples = {k: np.asarray(v) for k, v in (self.samples or {}).items()}
+        predictive = {k: np.asarray(v) for k, v in self.predict().items()} if self.samples is not None else {}
+
+        with h5py.File(out, "w") as h5f:
+            h5f.attrs["posterior_bundle_format"] = "jaxsedfit_samples_meta_v1"
+            self._write_hdf5_node(h5f, "config", serialize_config(self.config))
+            self._write_hdf5_node(h5f, "summary", self.summary() if self.samples is not None else None)
+            self._write_hdf5_node(h5f, "mw_ebv", self.context.mw_ebv)
+            samples_grp = h5f.create_group("samples")
+            self._write_array_group(samples_grp, samples)
+            predictive_grp = h5f.create_group("predictive")
+            self._write_array_group(predictive_grp, predictive)
         return out
 
     @staticmethod
     def _resolve_posterior_path(path: str | Path | None = None) -> Path:
-        """Resolve a saved posterior pickle path or unique posterior in a directory."""
+        """Resolve a saved HDF5 posterior path or unique posterior in a directory."""
         if path is None:
             path = "."
         resolved = Path(path)
         if resolved.is_dir():
-            matches = sorted(resolved.glob("*_posterior.pkl"))
+            matches = sorted(resolved.glob("*_samples.h5"))
             if not matches:
-                raise FileNotFoundError(f"No *_posterior.pkl file found under: {resolved}")
+                raise FileNotFoundError(f"No *_samples.h5 file found under: {resolved}")
             if len(matches) > 1:
                 raise FileNotFoundError(
-                    f"Multiple *_posterior.pkl files found under: {resolved}. "
+                    f"Multiple *_samples.h5 files found under: {resolved}. "
                     "Pass an explicit posterior file path."
                 )
             resolved = matches[0]
@@ -715,7 +833,7 @@ class JAXSEDFit:
         Parameters
         ----------
         path
-            Path to a ``*_posterior.pkl`` file, or a directory containing exactly
+            Path to a ``*_samples.h5`` file, or a directory containing exactly
             one such file. Defaults to the current directory.
 
         Returns
@@ -725,8 +843,16 @@ class JAXSEDFit:
             outputs restored from disk.
         """
         posterior_path = cls._resolve_posterior_path(path)
-        with open(posterior_path, "rb") as fh:
-            payload = pickle.load(fh)
+        with h5py.File(posterior_path, "r") as h5f:
+            if "samples" not in h5f or "config" not in h5f:
+                raise ValueError(f"Unsupported posterior bundle schema: {posterior_path}")
+            payload = {
+                "config": cls._read_hdf5_node(h5f, "config"),
+                "summary": cls._read_hdf5_node(h5f, "summary") if "summary" in h5f else None,
+                "mw_ebv": cls._read_hdf5_node(h5f, "mw_ebv") if "mw_ebv" in h5f else None,
+                "samples": {k: np.asarray(h5f["samples"][k][()]) for k in h5f["samples"].keys()},
+                "predictive": {k: np.asarray(h5f["predictive"][k][()]) for k in h5f.get("predictive", {}).keys()},
+            }
         if not isinstance(payload, dict) or "config" not in payload:
             raise ValueError(f"Unsupported posterior bundle schema: {posterior_path}")
 
