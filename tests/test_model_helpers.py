@@ -53,8 +53,12 @@ from jaxsedfit.model import (
     _project_filters,
     _redshift_to_obs,
     _torus_component,
+    evaluate_sed_model,
     grahsp_photometric_model,
+    photometric_log_likelihood,
     photometric_loglike,
+    sed_numpyro_model,
+    spectroscopic_log_likelihood,
 )
 from jaxsedfit.preload import _build_fixed_igm_jax, _build_igm_cache_jax, build_model_context
 from jaxsedfit.filters import load_filter_curve
@@ -80,6 +84,43 @@ def test_likelihood_defaults_include_absolute_flux_scale_prior():
     cfg = LikelihoodConfig()
     assert cfg.use_absolute_flux_scale_prior is True
     assert cfg.absolute_flux_scale_prior_sigma_dex > 0.0
+
+
+def test_public_model_names_delegate_to_legacy_implementations(monkeypatch):
+    import jaxsedfit.model as modelmod
+
+    calls = {}
+
+    def _legacy_model(*args, **kwargs):
+        calls["model"] = (args, kwargs)
+        return "model"
+
+    def _legacy_eval(*args, **kwargs):
+        calls["eval"] = (args, kwargs)
+        return "state"
+
+    def _phot_like(*args, **kwargs):
+        calls["phot"] = (args, kwargs)
+        return "phot"
+
+    def _spec_like(*args, **kwargs):
+        calls["spec"] = (args, kwargs)
+        return "spec"
+
+    monkeypatch.setattr(modelmod, "grahsp_photometric_model", _legacy_model)
+    monkeypatch.setattr(modelmod, "evaluate_photometric_state", _legacy_eval)
+    monkeypatch.setattr(modelmod, "photometric_loglike", _phot_like)
+    monkeypatch.setattr(modelmod, "spectroscopic_loglike", _spec_like)
+
+    assert sed_numpyro_model("ctx", include_components=True) == "model"
+    assert evaluate_sed_model("ctx", return_state=False) == "state"
+    assert photometric_log_likelihood("pred", obs_fluxes="obs") == "phot"
+    assert spectroscopic_log_likelihood("pred", obs_fluxes="obs") == "spec"
+    assert calls["model"][0] == ("ctx",)
+    assert calls["model"][1]["include_components"] is True
+    assert calls["eval"][1]["return_state"] is False
+    assert calls["phot"][1]["obs_fluxes"] == "obs"
+    assert calls["spec"][1]["obs_fluxes"] == "obs"
 
 
 def test_prior_config_object_exposes_flat_mapping():
