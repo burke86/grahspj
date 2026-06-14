@@ -135,7 +135,7 @@ def build_fairall9_fixedz_config(dsps_ssp_fn: str | Path) -> FitConfig:
         observation=Observation(
             object_id="Fairall 9 fixed-z PR benchmark",
             redshift=float(true_redshift),
-            fit_redshift=False,
+            redshift_mode="fixed",
             redshift_err=0.0,
         ),
         photometry=PhotometryData(
