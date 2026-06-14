@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import pickle
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
+import h5py
 import jax
 import numpy as np
 from numpyro.infer import MCMC, NUTS, Predictive, SVI, Trace_ELBO, init_to_value
@@ -12,7 +12,7 @@ from numpyro.infer.autoguide import AutoDelta
 from .config import FitConfig, _coerce_prior_config, fit_config_from_mapping, serialize_config
 from .model import grahsp_photometric_model
 from .preload import ModelContext, build_model_context
-from .results import FitResult, median_mapping
+from .results import FitResult, _FitState, median_mapping
 
 
 def _get_nested_sampler_cls():
@@ -24,25 +24,106 @@ def _get_nested_sampler_cls():
 
 class JAXSEDFit:
     """High-level single-object fitting interface for jaxsedfit."""
+    _POSTERIOR_BUNDLE_SUFFIX = ".h5"
+
     def __init__(self, config: FitConfig):
         """Initialize the fitter and build its static model context."""
         self.config = config
         self.context: ModelContext = build_model_context(config)
-        self.map_result: dict[str, Any] | None = None
-        self.nuts_result: dict[str, Any] | None = None
-        self.ns_result: dict[str, Any] | None = None
-        self.samples: dict[str, Any] | None = None
-        self.predictive: dict[str, Any] | None = None
-        self._plot_cache: dict[str, Any] | None = None
+        self._fit_state = _FitState()
+
+    def _ensure_fit_state(self) -> _FitState:
+        """Return the internal fit state, creating it for legacy/test objects."""
+        state = self.__dict__.get("_fit_state")
+        if state is None:
+            state = _FitState()
+            self.__dict__["_fit_state"] = state
+        return state
+
+    @property
+    def map_result(self) -> dict[str, Any] | None:
+        """Latest MAP inference payload mirrored from the internal fit state."""
+        return self._ensure_fit_state().map_result
+
+    @map_result.setter
+    def map_result(self, value: dict[str, Any] | None) -> None:
+        state = self._ensure_fit_state()
+        state.map_result = value
+        if value is not None:
+            state.method = "map"
+
+    @property
+    def nuts_result(self) -> dict[str, Any] | None:
+        """Latest NUTS inference payload mirrored from the internal fit state."""
+        return self._ensure_fit_state().nuts_result
+
+    @nuts_result.setter
+    def nuts_result(self, value: dict[str, Any] | None) -> None:
+        state = self._ensure_fit_state()
+        state.nuts_result = value
+        if value is not None:
+            state.method = "nuts"
+
+    @property
+    def ns_result(self) -> dict[str, Any] | None:
+        """Latest nested-sampling payload mirrored from the internal fit state."""
+        return self._ensure_fit_state().ns_result
+
+    @ns_result.setter
+    def ns_result(self, value: dict[str, Any] | None) -> None:
+        state = self._ensure_fit_state()
+        state.ns_result = value
+        if value is not None:
+            state.method = "ns"
+
+    @property
+    def samples(self) -> dict[str, Any] | None:
+        """Posterior samples mirrored from the internal fit state."""
+        return self._ensure_fit_state().samples
+
+    @samples.setter
+    def samples(self, value: dict[str, Any] | None) -> None:
+        self._ensure_fit_state().samples = value
+
+    @property
+    def predictive(self) -> dict[str, Any] | None:
+        """Posterior predictive outputs mirrored from the internal fit state."""
+        return self._ensure_fit_state().predictive
+
+    @predictive.setter
+    def predictive(self, value: dict[str, Any] | None) -> None:
+        self._ensure_fit_state().predictive = value
+
+    @property
+    def _plot_cache(self) -> dict[str, Any] | None:
+        """Plot cache mirrored from the internal fit state."""
+        return self._ensure_fit_state().plot_cache
+
+    @_plot_cache.setter
+    def _plot_cache(self, value: dict[str, Any] | None) -> None:
+        self._ensure_fit_state().plot_cache = value
+
+    @property
+    def _saved_summary(self) -> Mapping[str, Any] | None:
+        """Summary restored from a saved posterior bundle."""
+        return self._ensure_fit_state().summary
+
+    @_saved_summary.setter
+    def _saved_summary(self, value: Mapping[str, Any] | None) -> None:
+        self._ensure_fit_state().summary = value
+
+    @property
+    def _loaded_posterior_path(self) -> Path | None:
+        """Path restored from a saved posterior bundle."""
+        return self._ensure_fit_state().path
+
+    @_loaded_posterior_path.setter
+    def _loaded_posterior_path(self, value: str | Path | None) -> None:
+        self._ensure_fit_state().path = None if value is None else Path(value)
 
     def _reset_fit_state(self) -> None:
         """Clear cached inference and predictive state."""
-        self.map_result = None
-        self.nuts_result = None
-        self.ns_result = None
-        self.samples = None
-        self.predictive = None
-        self._plot_cache = None
+        self._fit_state = _FitState()
 
     def _apply_runtime_overrides(
         self,
@@ -87,8 +168,14 @@ class JAXSEDFit:
         summary: dict[str, Any] | None = None,
     ) -> FitResult:
         """Build a public result object from the current mirrored fit state."""
-        samples = getattr(self, "samples", None)
-        map_result = getattr(self, "map_result", None)
+        state = self._ensure_fit_state()
+        state.method = method
+        if path is not None:
+            state.path = Path(path)
+        if figure is not None:
+            state.figure = figure
+        samples = state.samples
+        map_result = state.map_result
         if method == "map" and map_result is not None and "median" in map_result:
             median = dict(map_result["median"])
         else:
@@ -98,24 +185,28 @@ class JAXSEDFit:
                 summary = self.summary()
             except AttributeError:
                 summary = None
+        if summary is not None:
+            state.summary = summary
         return FitResult(
             fitter=self,
             samples=samples,
             median=median,
             method=method,
             summary=summary,
-            path=None if path is None else Path(path),
-            figure=figure,
+            path=state.path,
+            figure=state.figure,
+            _state=state,
         )
 
-    def _compute_predictive(self) -> dict[str, Any]:
+    def _compute_predictive(self, *, _state: _FitState | None = None) -> dict[str, Any]:
         """Generate and cache predictive outputs from posterior samples."""
-        if self.samples is None:
+        state = self._ensure_fit_state() if _state is None else _state
+        if state.samples is None:
             raise RuntimeError("No fitted posterior available. Run fit_map(), fit_nuts(), or fit_ns() first.")
         rng_key = jax.random.PRNGKey(self.config.inference.seed + 17)
         pred = Predictive(
             self._predictive_model,
-            posterior_samples=self.samples,
+            posterior_samples=state.samples,
             return_sites=[
                 "pred_fluxes",
                 "pred_spectrum_fluxes",
@@ -226,8 +317,8 @@ class JAXSEDFit:
                 "absolute_flux_scale_logprior",
             ],
         )(rng_key)
-        self.predictive = {k: np.asarray(v) for k, v in pred.items()}
-        return self.predictive
+        state.predictive = {k: np.asarray(v) for k, v in pred.items()}
+        return state.predictive
 
     def fit(
         self,
@@ -401,18 +492,7 @@ class JAXSEDFit:
             if result_path is None:
                 saved_result_path = self.save(output_dir)
             else:
-                result_path = Path(result_path)
-                result_path.parent.mkdir(parents=True, exist_ok=True)
-                payload = {
-                    "config": serialize_config(self.config),
-                    "summary": self.summary() if self.samples is not None else None,
-                    "samples": {k: np.asarray(v) for k, v in (self.samples or {}).items()},
-                    "predictive": {k: np.asarray(v) for k, v in self.predict().items()} if self.samples is not None else {},
-                    "mw_ebv": self.context.mw_ebv,
-                }
-                with open(result_path, "wb") as fh:
-                    pickle.dump(payload, fh, protocol=pickle.HIGHEST_PROTOCOL)
-                saved_result_path = result_path
+                saved_result_path = self.save(result_path)
         if plot_fig or save_fig:
             if fig_path is None and save_fig:
                 fig_path = output_dir / f"{self.config.observation.object_id}_sed.png"
@@ -465,6 +545,7 @@ class JAXSEDFit:
         staged_steps: int | None = None,
     ):
         """Run the Optax/NumPyro MAP optimization path."""
+        self._reset_fit_state()
         steps = int(self.config.inference.map_steps if steps is None else steps)
         learning_rate = float(self.config.inference.learning_rate if learning_rate is None else learning_rate)
         stage1_result = None
@@ -517,6 +598,8 @@ class JAXSEDFit:
         """Run NUTS sampling, optionally initializing from the MAP solution."""
         if use_map_init and self.map_result is None:
             self.fit_map(progress_bar=progress_bar)
+        map_result = self.map_result
+        self._fit_state = _FitState(map_result=map_result, method="nuts")
         num_warmup = int(self.config.inference.num_warmup if num_warmup is None else num_warmup)
         num_samples = int(self.config.inference.num_samples if num_samples is None else num_samples)
         num_chains = int(self.config.inference.num_chains if num_chains is None else num_chains)
@@ -556,6 +639,7 @@ class JAXSEDFit:
         progress_bar: bool = True,
     ):
         """Run full-model nested sampling and resample equal-weight posterior draws."""
+        self._reset_fit_state()
         NestedSampler = _get_nested_sampler_cls()
 
         if ns_difficult_model is not None:
@@ -618,89 +702,224 @@ class JAXSEDFit:
         self.predictive = None
         return self._make_result(method="ns")
 
-    def predict(self, posterior: str = "latest") -> dict[str, Any]:
+    def predict(self, posterior: str = "latest", *, _state: _FitState | None = None) -> dict[str, Any]:
         """Return cached predictive outputs or generate them on demand."""
-        if self.predictive is None:
-            return self._compute_predictive()
-        return self.predictive
+        state = self._ensure_fit_state() if _state is None else _state
+        if state.predictive is None:
+            if state is self._ensure_fit_state():
+                return self._compute_predictive()
+            return self._compute_predictive(_state=state)
+        return state.predictive
 
-    def recovered_log_stellar_mass(self) -> float:
+    def recovered_log_stellar_mass(self, *, _state: _FitState | None = None) -> float:
         """Return the median recovered stellar mass from the fitted posterior."""
-        if self.samples is not None and "log_stellar_mass" in self.samples:
-            return float(np.median(np.asarray(self.samples["log_stellar_mass"], dtype=float)))
-        if self.map_result is not None and "median" in self.map_result and "log_stellar_mass" in self.map_result["median"]:
-            return float(np.asarray(self.map_result["median"]["log_stellar_mass"], dtype=float))
+        state = self._ensure_fit_state() if _state is None else _state
+        if state.samples is not None and "log_stellar_mass" in state.samples:
+            return float(np.median(np.asarray(state.samples["log_stellar_mass"], dtype=float)))
+        if state.map_result is not None and "median" in state.map_result and "log_stellar_mass" in state.map_result["median"]:
+            return float(np.asarray(state.map_result["median"]["log_stellar_mass"], dtype=float))
         raise RuntimeError("No recovered stellar mass available. Run fit_map(), fit_nuts(), or fit_ns() first.")
 
-    def summary(self) -> dict[str, Any]:
+    def summary(self, *, _state: _FitState | None = None) -> dict[str, Any]:
         """Summarize posterior medians and selected derived quantities."""
-        if self.samples is None:
+        state = self._ensure_fit_state() if _state is None else _state
+        if state.samples is None:
             raise RuntimeError("No fitted posterior available.")
         out: dict[str, Any] = {}
-        for key, value in self.samples.items():
+        for key, value in state.samples.items():
             arr = np.asarray(value)
             out[f"{key}_median"] = np.median(arr, axis=0).tolist() if arr.ndim > 1 else float(np.median(arr))
-        if "host_age_weights" in self.samples:
+        if "host_age_weights" in state.samples:
             ages = np.power(10.0, np.asarray(self.context.ssp_data.ssp_lg_age_gyr, dtype=float))
-            age_weights = np.median(np.asarray(self.samples["host_age_weights"]), axis=0)
+            age_weights = np.median(np.asarray(state.samples["host_age_weights"]), axis=0)
             age_weight_sum = np.sum(age_weights)
             out["host_age_weighted_gyr"] = float(np.sum(age_weights * ages) / age_weight_sum) if age_weight_sum > 0 else -1.0
-        if "host_lgmet_weights" in self.samples:
+        if "host_lgmet_weights" in state.samples:
             mets = np.asarray(self.context.ssp_data.ssp_lgmet, dtype=float)
-            lgmet_weights = np.median(np.asarray(self.samples["host_lgmet_weights"]), axis=0)
+            lgmet_weights = np.median(np.asarray(state.samples["host_lgmet_weights"]), axis=0)
             lgmet_weight_sum = np.sum(lgmet_weights)
             out["host_lgmet_weighted"] = float(np.sum(lgmet_weights * mets) / lgmet_weight_sum) if lgmet_weight_sum > 0 else -99.0
-        if "gal_lgmet" in self.samples:
-            out["gal_lgmet_fit"] = float(np.median(np.asarray(self.samples["gal_lgmet"], dtype=float)))
-        if "gal_lgmet_scatter" in self.samples:
-            out["gal_lgmet_scatter_fit"] = float(np.median(np.asarray(self.samples["gal_lgmet_scatter"], dtype=float)))
-        if "log_stellar_mass" in self.samples:
-            out["log_stellar_mass_fit"] = self.recovered_log_stellar_mass()
-        if "dust_alpha" in self.samples:
-            out["dust_alpha_fit"] = float(np.median(np.asarray(self.samples["dust_alpha"], dtype=float)))
-        if self.predictive is not None:
-            out["pred_fluxes_median"] = np.median(np.asarray(self.predictive["pred_fluxes"]), axis=0).tolist()
-            if "log_dust_luminosity_fit" in self.predictive:
-                out["log_dust_luminosity_fit"] = float(np.median(np.asarray(self.predictive["log_dust_luminosity_fit"], dtype=float)))
-            if "log_agn_bol_luminosity_fit" in self.predictive:
-                out["log_agn_bol_luminosity_fit"] = float(np.median(np.asarray(self.predictive["log_agn_bol_luminosity_fit"], dtype=float)))
-            if "log_disk_luminosity_fit" in self.predictive:
-                out["log_disk_luminosity_fit"] = float(np.median(np.asarray(self.predictive["log_disk_luminosity_fit"], dtype=float)))
-            if "intrinsic_scatter_fit" in self.predictive:
-                out["intrinsic_scatter_fit"] = float(np.median(np.asarray(self.predictive["intrinsic_scatter_fit"], dtype=float)))
-            if "absolute_flux_scale_logprior" in self.predictive:
-                out["absolute_flux_scale_logprior"] = float(np.median(np.asarray(self.predictive["absolute_flux_scale_logprior"], dtype=float)))
+        if "gal_lgmet" in state.samples:
+            out["gal_lgmet_fit"] = float(np.median(np.asarray(state.samples["gal_lgmet"], dtype=float)))
+        if "gal_lgmet_scatter" in state.samples:
+            out["gal_lgmet_scatter_fit"] = float(np.median(np.asarray(state.samples["gal_lgmet_scatter"], dtype=float)))
+        if "log_stellar_mass" in state.samples:
+            out["log_stellar_mass_fit"] = self.recovered_log_stellar_mass(_state=state)
+        if "dust_alpha" in state.samples:
+            out["dust_alpha_fit"] = float(np.median(np.asarray(state.samples["dust_alpha"], dtype=float)))
+        if state.predictive is not None:
+            out["pred_fluxes_median"] = np.median(np.asarray(state.predictive["pred_fluxes"]), axis=0).tolist()
+            if "log_dust_luminosity_fit" in state.predictive:
+                out["log_dust_luminosity_fit"] = float(np.median(np.asarray(state.predictive["log_dust_luminosity_fit"], dtype=float)))
+            if "log_agn_bol_luminosity_fit" in state.predictive:
+                out["log_agn_bol_luminosity_fit"] = float(np.median(np.asarray(state.predictive["log_agn_bol_luminosity_fit"], dtype=float)))
+            if "log_disk_luminosity_fit" in state.predictive:
+                out["log_disk_luminosity_fit"] = float(np.median(np.asarray(state.predictive["log_disk_luminosity_fit"], dtype=float)))
+            if "intrinsic_scatter_fit" in state.predictive:
+                out["intrinsic_scatter_fit"] = float(np.median(np.asarray(state.predictive["intrinsic_scatter_fit"], dtype=float)))
+            if "absolute_flux_scale_logprior" in state.predictive:
+                out["absolute_flux_scale_logprior"] = float(np.median(np.asarray(state.predictive["absolute_flux_scale_logprior"], dtype=float)))
+        state.summary = out
         return out
 
-    def save(self, output_dir: str | Path) -> Path:
-        """Serialize config, posterior samples, and predictive outputs to disk."""
-        output_dir = Path(output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
-        payload = {
-            "config": serialize_config(self.config),
-            "summary": self.summary() if self.samples is not None else None,
-            "samples": {k: np.asarray(v) for k, v in (self.samples or {}).items()},
-            "predictive": {k: np.asarray(v) for k, v in self.predict().items()} if self.samples is not None else {},
-            "mw_ebv": self.context.mw_ebv,
-        }
-        out = output_dir / f"{self.config.observation.object_id}_posterior.pkl"
-        with open(out, "wb") as fh:
-            pickle.dump(payload, fh, protocol=pickle.HIGHEST_PROTOCOL)
+    @staticmethod
+    def _hdf5_scalar_string_dtype():
+        """Return the UTF-8 scalar string dtype used in HDF5 bundles."""
+        return h5py.string_dtype(encoding="utf-8")
+
+    @classmethod
+    def _write_hdf5_node(cls, parent, name, value):
+        """Write one recursively serialized Python value into an HDF5 group."""
+        if value is None:
+            grp = parent.create_group(name)
+            grp.attrs["node_type"] = "none"
+            return
+
+        if isinstance(value, dict):
+            grp = parent.create_group(name)
+            grp.attrs["node_type"] = "dict"
+            for idx, (key, item) in enumerate(value.items()):
+                item_grp = grp.create_group(f"item_{idx:08d}")
+                cls._write_hdf5_node(item_grp, "key", str(key))
+                cls._write_hdf5_node(item_grp, "value", item)
+            return
+
+        if isinstance(value, list):
+            grp = parent.create_group(name)
+            grp.attrs["node_type"] = "list"
+            for idx, item in enumerate(value):
+                cls._write_hdf5_node(grp, f"item_{idx:08d}", item)
+            return
+
+        if isinstance(value, tuple):
+            grp = parent.create_group(name)
+            grp.attrs["node_type"] = "tuple"
+            for idx, item in enumerate(value):
+                cls._write_hdf5_node(grp, f"item_{idx:08d}", item)
+            return
+
+        if isinstance(value, (np.ndarray, np.generic)):
+            arr = np.asarray(value)
+            ds_kwargs = {}
+            if arr.ndim > 0:
+                ds_kwargs["compression"] = "gzip"
+                ds_kwargs["shuffle"] = True
+            ds = parent.create_dataset(name, data=arr, **ds_kwargs)
+            ds.attrs["node_type"] = "ndarray"
+            return
+
+        if isinstance(value, bool):
+            ds = parent.create_dataset(name, data=np.bool_(value))
+            ds.attrs["node_type"] = "scalar_bool"
+            return
+
+        if isinstance(value, int):
+            ds = parent.create_dataset(name, data=np.int64(value))
+            ds.attrs["node_type"] = "scalar_int"
+            return
+
+        if isinstance(value, float):
+            ds = parent.create_dataset(name, data=np.float64(value))
+            ds.attrs["node_type"] = "scalar_float"
+            return
+
+        if isinstance(value, str):
+            ds = parent.create_dataset(name, data=np.array(value, dtype=cls._hdf5_scalar_string_dtype()))
+            ds.attrs["node_type"] = "scalar_str"
+            return
+
+        raise TypeError(f"Unsupported value type in posterior bundle: {type(value)!r}")
+
+    @classmethod
+    def _read_hdf5_node(cls, parent, name):
+        """Read one recursively serialized Python value from an HDF5 group."""
+        node = parent[name]
+        if isinstance(node, h5py.Dataset):
+            node_type = node.attrs.get("node_type", "ndarray")
+            if isinstance(node_type, bytes):
+                node_type = node_type.decode("utf-8")
+            if node_type == "scalar_str":
+                return node.asstr()[()]
+            value = node[()]
+            if node_type == "scalar_bool":
+                return bool(value)
+            if node_type == "scalar_int":
+                return int(value)
+            if node_type == "scalar_float":
+                return float(value)
+            return np.asarray(value)
+
+        node_type = node.attrs.get("node_type", "")
+        if isinstance(node_type, bytes):
+            node_type = node_type.decode("utf-8")
+        if node_type == "none":
+            return None
+        if node_type == "dict":
+            out = {}
+            for item_name in sorted(node.keys()):
+                item_grp = node[item_name]
+                key = cls._read_hdf5_node(item_grp, "key")
+                out[str(key)] = cls._read_hdf5_node(item_grp, "value")
+            return out
+        if node_type == "list":
+            return [cls._read_hdf5_node(node, item_name) for item_name in sorted(node.keys())]
+        if node_type == "tuple":
+            return tuple(cls._read_hdf5_node(node, item_name) for item_name in sorted(node.keys()))
+        raise TypeError(f"Unsupported HDF5 node type in posterior bundle: {node_type!r}")
+
+    @staticmethod
+    def _write_array_group(parent, values: dict[str, Any]) -> None:
+        """Write an array mapping as compressed HDF5 datasets."""
+        for name, value in values.items():
+            arr = np.asarray(value)
+            ds_kwargs = {}
+            if arr.ndim > 0:
+                ds_kwargs["compression"] = "gzip"
+                ds_kwargs["shuffle"] = True
+            parent.create_dataset(str(name), data=arr, **ds_kwargs)
+
+    @classmethod
+    def _posterior_bundle_path(cls, path: str | Path | None, object_id: str) -> Path:
+        """Resolve an output directory or explicit HDF5 path."""
+        resolved = Path("." if path is None else path)
+        if resolved.suffix == cls._POSTERIOR_BUNDLE_SUFFIX:
+            resolved.parent.mkdir(parents=True, exist_ok=True)
+            return resolved
+        resolved.mkdir(parents=True, exist_ok=True)
+        return resolved / f"{object_id}_samples{cls._POSTERIOR_BUNDLE_SUFFIX}"
+
+    def save(self, output_dir: str | Path | None = None, *, _state: _FitState | None = None) -> Path:
+        """Serialize config, posterior samples, and predictive outputs to HDF5."""
+        state = self._ensure_fit_state() if _state is None else _state
+        out = self._posterior_bundle_path(output_dir, self.config.observation.object_id)
+        samples = {k: np.asarray(v) for k, v in (state.samples or {}).items()}
+        predictive = {k: np.asarray(v) for k, v in self.predict(_state=state).items()} if state.samples is not None else {}
+
+        with h5py.File(out, "w") as h5f:
+            h5f.attrs["posterior_bundle_format"] = "jaxsedfit_samples_meta_v1"
+            self._write_hdf5_node(h5f, "config", serialize_config(self.config))
+            self._write_hdf5_node(h5f, "summary", self.summary(_state=state) if state.samples is not None else None)
+            self._write_hdf5_node(h5f, "mw_ebv", self.context.mw_ebv)
+            samples_grp = h5f.create_group("samples")
+            self._write_array_group(samples_grp, samples)
+            predictive_grp = h5f.create_group("predictive")
+            self._write_array_group(predictive_grp, predictive)
+        state.path = out
         return out
 
     @staticmethod
     def _resolve_posterior_path(path: str | Path | None = None) -> Path:
-        """Resolve a saved posterior pickle path or unique posterior in a directory."""
+        """Resolve a saved HDF5 posterior path or unique posterior in a directory."""
         if path is None:
             path = "."
         resolved = Path(path)
         if resolved.is_dir():
-            matches = sorted(resolved.glob("*_posterior.pkl"))
+            matches = sorted(resolved.glob("*_samples.h5"))
             if not matches:
-                raise FileNotFoundError(f"No *_posterior.pkl file found under: {resolved}")
+                raise FileNotFoundError(f"No *_samples.h5 file found under: {resolved}")
             if len(matches) > 1:
                 raise FileNotFoundError(
-                    f"Multiple *_posterior.pkl files found under: {resolved}. "
+                    f"Multiple *_samples.h5 files found under: {resolved}. "
                     "Pass an explicit posterior file path."
                 )
             resolved = matches[0]
@@ -715,7 +934,7 @@ class JAXSEDFit:
         Parameters
         ----------
         path
-            Path to a ``*_posterior.pkl`` file, or a directory containing exactly
+            Path to a ``*_samples.h5`` file, or a directory containing exactly
             one such file. Defaults to the current directory.
 
         Returns
@@ -725,8 +944,16 @@ class JAXSEDFit:
             outputs restored from disk.
         """
         posterior_path = cls._resolve_posterior_path(path)
-        with open(posterior_path, "rb") as fh:
-            payload = pickle.load(fh)
+        with h5py.File(posterior_path, "r") as h5f:
+            if "samples" not in h5f or "config" not in h5f:
+                raise ValueError(f"Unsupported posterior bundle schema: {posterior_path}")
+            payload = {
+                "config": cls._read_hdf5_node(h5f, "config"),
+                "summary": cls._read_hdf5_node(h5f, "summary") if "summary" in h5f else None,
+                "mw_ebv": cls._read_hdf5_node(h5f, "mw_ebv") if "mw_ebv" in h5f else None,
+                "samples": {k: np.asarray(h5f["samples"][k][()]) for k in h5f["samples"].keys()},
+                "predictive": {k: np.asarray(h5f["predictive"][k][()]) for k in h5f.get("predictive", {}).keys()},
+            }
         if not isinstance(payload, dict) or "config" not in payload:
             raise ValueError(f"Unsupported posterior bundle schema: {posterior_path}")
 

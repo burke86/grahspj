@@ -37,6 +37,11 @@ the config first, pass it to :class:`jaxsedfit.JAXSEDFit`, and then call
    result.summary
    result.plot_corner()
 
+When ``save_result=True`` or :meth:`jaxsedfit.FitResult.save` is used,
+``jaxsedfit`` writes an HDF5 posterior bundle named
+``<object_id>_samples.h5``. The bundle contains the fit config, posterior
+samples, cached predictive outputs, and summary metadata.
+
 Nested sampling is available through NumPyro's ``jaxns`` wrapper:
 
 .. code-block:: python

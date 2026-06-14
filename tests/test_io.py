@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+import h5py
 import numpy as np
 import pytest
 
@@ -40,6 +41,11 @@ def test_load_from_samples_roundtrip(monkeypatch, tmp_path):
     fitter.predictive = {"pred_fluxes": np.array([[0.9], [1.0], [1.1]])}
 
     saved_path = fitter.save(tmp_path)
+    assert saved_path.name == "roundtrip_samples.h5"
+    with h5py.File(saved_path, "r") as h5f:
+        assert h5f.attrs["posterior_bundle_format"] == "jaxsedfit_samples_meta_v1"
+        assert "log_stellar_mass" in h5f["samples"]
+        assert "pred_fluxes" in h5f["predictive"]
     loaded = JAXSEDFit.load(saved_path)
 
     assert loaded.config.observation.object_id == "roundtrip"
@@ -91,10 +97,28 @@ def test_fit_result_save_delegates_to_fitter(monkeypatch, tmp_path):
     assert saved_path.exists()
 
 
+def test_fit_result_save_uses_captured_state(monkeypatch, tmp_path):
+    monkeypatch.setattr("jaxsedfit.core.build_model_context", lambda config: SimpleNamespace(mw_ebv=0.0))
+    fitter = JAXSEDFit(_minimal_config())
+    fitter.samples = {"log_stellar_mass": np.array([9.8, 10.0])}
+    fitter.predictive = {"pred_fluxes": np.array([[1.0], [1.2]])}
+    result = fitter._make_result(method="map")
+
+    fitter._reset_fit_state()
+    fitter.samples = {"log_stellar_mass": np.array([11.0])}
+    fitter.predictive = {"pred_fluxes": np.array([[9.0]])}
+
+    saved_path = result.save(tmp_path)
+
+    with h5py.File(saved_path, "r") as h5f:
+        np.testing.assert_allclose(h5f["samples"]["log_stellar_mass"][()], [9.8, 10.0])
+        np.testing.assert_allclose(h5f["predictive"]["pred_fluxes"][()], [[1.0], [1.2]])
+
+
 def test_load_from_samples_requires_unique_posterior_file(monkeypatch, tmp_path):
     monkeypatch.setattr("jaxsedfit.core.build_model_context", lambda config: SimpleNamespace(mw_ebv=0.0))
-    (tmp_path / "a_posterior.pkl").write_bytes(b"")
-    (tmp_path / "b_posterior.pkl").write_bytes(b"")
+    (tmp_path / "a_samples.h5").write_bytes(b"")
+    (tmp_path / "b_samples.h5").write_bytes(b"")
 
     with pytest.raises(FileNotFoundError, match="Multiple"):
         JAXSEDFit.load(tmp_path)

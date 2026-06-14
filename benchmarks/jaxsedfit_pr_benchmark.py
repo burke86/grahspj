@@ -135,7 +135,7 @@ def build_fairall9_fixedz_config(dsps_ssp_fn: str | Path) -> FitConfig:
         observation=Observation(
             object_id="Fairall 9 fixed-z PR benchmark",
             redshift=float(true_redshift),
-            fit_redshift=False,
+            redshift_mode="fixed",
             redshift_err=0.0,
         ),
         photometry=PhotometryData(
@@ -295,7 +295,13 @@ def _build_component_functions(fitter: JAXSEDFit) -> dict[str, Callable[[], Any]
     def agn_balmer_only():
         return jnp.sum(_balmer_continuum_jax(rest_wave, 1.0e-6, 15000.0, 1.0, 3000.0))
 
-    host_state = {"host_rest": host_rest, "formed_mass": formed_mass, "host_ssp_weights": host_weights, "gal_lgmet": gal_lgmet}
+    host_state = {
+        "host_rest": host_rest,
+        "formed_mass": formed_mass,
+        "host_ssp_weights": host_weights,
+        "gal_lgmet": gal_lgmet,
+        "ssp_lgmet": ctx.host_basis_jax.ssp_lgmet,
+    }
     neb = _build_nebular_components(ctx, host_state, host_rest, {})
     host_with_neb = host_rest + neb["absorption_rest"] + neb["emission_rest"]
     disk = _powerlaw_jax(rest_wave, agn_amp / 5100.0, 0.0, -1.0, 5100.0, GRAHSP_PL_BEND_LOC_A, GRAHSP_PL_BEND_WIDTH, GRAHSP_PL_CUTOFF_A)

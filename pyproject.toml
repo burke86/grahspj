@@ -20,6 +20,7 @@ dependencies = [
   "extinction",
   "matplotlib",
   "corner",
+  "h5py",
   "jax==0.6.2",
   "jaxlib==0.6.2",
   "jax_cosmo",
