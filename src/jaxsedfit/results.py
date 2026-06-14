@@ -22,6 +22,22 @@ def median_mapping(values: Mapping[str, Any] | None) -> dict[str, Any]:
 
 
 @dataclass
+class _FitState:
+    """Internal mutable state produced by a jaxsedfit inference run."""
+
+    method: str | None = None
+    map_result: dict[str, Any] | None = None
+    nuts_result: dict[str, Any] | None = None
+    ns_result: dict[str, Any] | None = None
+    samples: Mapping[str, Any] | None = None
+    predictive: Mapping[str, Any] | None = None
+    summary: Mapping[str, Any] | None = None
+    path: Path | None = None
+    figure: Any = None
+    plot_cache: dict[str, Any] | None = None
+
+
+@dataclass
 class PredictionResult:
     """Dict-like posterior predictive result with lazy median summaries."""
 
@@ -60,15 +76,22 @@ class FitResult:
     summary: Mapping[str, Any] | None = None
     path: Path | None = None
     figure: Any = None
+    _state: _FitState | None = field(default=None, repr=False, compare=False)
 
     def predict(self, **kwargs) -> PredictionResult:
         """Run or return posterior predictive products for this fit."""
+        if self._state is not None:
+            kwargs.setdefault("_state", self._state)
         return PredictionResult(self.fitter.predict(**kwargs), fitter=self.fitter)
 
     def save(self, path: str | Path | None = None, **kwargs) -> Path:
         """Save the result with the fitter's native persistence format."""
         output_path = Path("." if path is None else path)
+        if self._state is not None:
+            kwargs.setdefault("_state", self._state)
         self.path = Path(self.fitter.save(output_path, **kwargs))
+        if self._state is not None:
+            self._state.path = self.path
         return self.path
 
     def plot_corner(self, **kwargs):
