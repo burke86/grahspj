@@ -2231,3 +2231,59 @@ def grahsp_photometric_model(
         add_likelihood=True,
         return_state=False,
     )
+
+
+def sed_numpyro_model(
+    context: ModelContext,
+    include_components: bool = False,
+    include_sed_agn_features: bool = True,
+    include_spectral_features: bool = True,
+):
+    """NumPyro SED model for one configured ``jaxsedfit`` target.
+
+    This is the preferred public name for the low-level NumPyro model. The
+    historical name :func:`grahsp_photometric_model` remains available as a
+    compatibility alias.
+    """
+    return grahsp_photometric_model(
+        context,
+        include_components=include_components,
+        include_sed_agn_features=include_sed_agn_features,
+        include_spectral_features=include_spectral_features,
+    )
+
+
+def evaluate_sed_model(
+    context: ModelContext,
+    include_components: bool = False,
+    include_sed_agn_features: bool = True,
+    include_spectral_features: bool = True,
+    add_likelihood: bool = True,
+    return_state: bool = True,
+    force_component_fluxes: bool = False,
+):
+    """Evaluate the SED model state for a configured target.
+
+    This is the preferred public name for deterministic model evaluation. It
+    delegates to :func:`evaluate_photometric_state`, which is kept for
+    compatibility with earlier releases.
+    """
+    return evaluate_photometric_state(
+        context,
+        include_components=include_components,
+        include_sed_agn_features=include_sed_agn_features,
+        include_spectral_features=include_spectral_features,
+        add_likelihood=add_likelihood,
+        return_state=return_state,
+        force_component_fluxes=force_component_fluxes,
+    )
+
+
+def photometric_log_likelihood(*args, **kwargs):
+    """Return the photometric log likelihood for one model/data comparison."""
+    return photometric_loglike(*args, **kwargs)
+
+
+def spectroscopic_log_likelihood(*args, **kwargs):
+    """Return the spectroscopic log likelihood for one model/data comparison."""
+    return spectroscopic_loglike(*args, **kwargs)
