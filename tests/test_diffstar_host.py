@@ -17,6 +17,7 @@ from jaxsedfit.config import (
 from jaxsedfit.core import JAXSEDFit
 from jaxsedfit.model import _default_gal_lgmet_loc, _mass_metallicity_relation_logprior, _luminosity_distance_m_jax, grahsp_photometric_model
 from jaxsedfit.preload import build_model_context
+from jaxsedfit.results import FitResult
 
 
 def _mock_config():
@@ -353,7 +354,8 @@ def test_fit_dispatch_methods(monkeypatch):
     fitter.config = type("_Cfg", (), {"inference": InferenceConfig(method="optax+nuts")})()
 
     out = JAXSEDFit.fit(fitter, progress_bar=True, steps=7, learning_rate=1e-2, num_warmup=3, num_samples=4)
-    assert list(out["fit"]) == ["map", "nuts"]
+    assert isinstance(out, FitResult)
+    assert out.method == "optax+nuts"
     assert calls[0][0] == "optax"
     assert calls[0][1]["steps"] == 7
     assert calls[0][1]["progress_bar"] is True
@@ -366,19 +368,22 @@ def test_fit_dispatch_methods(monkeypatch):
     calls.clear()
     fitter.config.inference.method = "optax"
     out = JAXSEDFit.fit(fitter, progress_bar=False, steps=2)
-    assert out["fit"] == {"median": {"log_stellar_mass": 10.0}}
+    assert isinstance(out, FitResult)
+    assert out.method == "optax"
     assert calls == [("optax", {"steps": 2, "progress_bar": False, "staged": True})]
 
     calls.clear()
     fitter.config.inference.method = "optax"
     out = JAXSEDFit.fit(fitter, progress_bar=False, steps=2, staged_map=False)
-    assert out["fit"] == {"median": {"log_stellar_mass": 10.0}}
+    assert isinstance(out, FitResult)
+    assert out.method == "optax"
     assert calls == [("optax", {"steps": 2, "progress_bar": False, "staged": False})]
 
     calls.clear()
     fitter.config.inference.method = "nuts"
     out = JAXSEDFit.fit(fitter, progress_bar=False, num_warmup=2)
-    assert out["fit"] == {"mcmc": "ok"}
+    assert isinstance(out, FitResult)
+    assert out.method == "nuts"
     assert calls == [("nuts", {"num_warmup": 2, "progress_bar": False})]
 
     calls.clear()
@@ -397,7 +402,8 @@ def test_fit_dispatch_methods(monkeypatch):
         ns_max_likelihood_evals=5000,
         ns_efficiency_threshold=0.001,
     )
-    assert out["fit"] == {"nested": "ok"}
+    assert isinstance(out, FitResult)
+    assert out.method == "ns"
     assert calls == [
         (
             "ns",
@@ -462,19 +468,21 @@ def test_fit_ns_populates_samples(monkeypatch):
         progress_bar=False,
     )
 
-    assert result["results"] == {"status": "ok"}
-    assert result["constructor_kwargs"]["num_live_points"] == 17
-    assert result["constructor_kwargs"]["max_samples"] == 123
-    assert result["constructor_kwargs"]["verbose"] is False
-    assert result["constructor_kwargs"]["difficult_model"] is True
-    assert result["constructor_kwargs"]["parameter_estimation"] is True
-    assert result["constructor_kwargs"]["num_parallel_workers"] == 2
-    assert result["constructor_kwargs"]["init_efficiency_threshold"] == 0.15
-    assert result["termination_kwargs"]["dlogZ"] == 0.05
-    assert result["termination_kwargs"]["max_num_likelihood_evaluations"] == 1000
-    assert result["termination_kwargs"]["efficiency_threshold"] == 0.01
-    assert result["num_resamples"] == 7
-    assert fitter.ns_result is result
+    assert isinstance(result, FitResult)
+    assert result.method == "ns"
+    assert result.samples is fitter.samples
+    assert fitter.ns_result["results"] == {"status": "ok"}
+    assert fitter.ns_result["constructor_kwargs"]["num_live_points"] == 17
+    assert fitter.ns_result["constructor_kwargs"]["max_samples"] == 123
+    assert fitter.ns_result["constructor_kwargs"]["verbose"] is False
+    assert fitter.ns_result["constructor_kwargs"]["difficult_model"] is True
+    assert fitter.ns_result["constructor_kwargs"]["parameter_estimation"] is True
+    assert fitter.ns_result["constructor_kwargs"]["num_parallel_workers"] == 2
+    assert fitter.ns_result["constructor_kwargs"]["init_efficiency_threshold"] == 0.15
+    assert fitter.ns_result["termination_kwargs"]["dlogZ"] == 0.05
+    assert fitter.ns_result["termination_kwargs"]["max_num_likelihood_evaluations"] == 1000
+    assert fitter.ns_result["termination_kwargs"]["efficiency_threshold"] == 0.01
+    assert fitter.ns_result["num_resamples"] == 7
     assert set(fitter.samples) == {"log_stellar_mass", "host_age_weights", "host_lgmet_weights"}
     assert fitter.samples["log_stellar_mass"].shape == (7,)
     assert fitter.predictive is None

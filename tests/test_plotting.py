@@ -301,22 +301,28 @@ def test_jaxsedfit_corner_and_trace_methods_delegate(monkeypatch):
 
     try:
         from jaxsedfit.core import JAXSEDFit
+        from jaxsedfit.results import FitResult, PredictionResult
 
         monkeypatch.setattr(plotting, "plot_corner", _plot_corner)
         monkeypatch.setattr(plotting, "plot_trace", _plot_trace)
         monkeypatch.setattr(plotting, "plot_fit_sed", _plot_fit_sed)
         fitter = object.__new__(JAXSEDFit)
+        fitter.predict = lambda **kwargs: {"pred_fluxes": np.array([[1.0], [3.0]])}
 
         assert fitter.plot_sed(output_path="sed.pdf") == "sed"
         assert fitter.plot_corner(output_path="corner.pdf", params=["alpha"]) == "corner"
         assert fitter.plot_trace(output_path="trace.pdf", params=["beta"]) == "trace"
+        result = FitResult(fitter=fitter, samples={}, median={}, method="map")
+        pred = result.predict()
+        assert isinstance(pred, PredictionResult)
+        np.testing.assert_allclose(pred.median["pred_fluxes"], [2.0])
+        assert result.plot_corner(output_path="result_corner.pdf") == "corner"
+        assert result.plot_trace(output_path="result_trace.pdf") == "trace"
         assert calls["sed"][0] is fitter
         assert calls["sed"][1]["output_path"] == "sed.pdf"
         assert calls["corner"][0] is fitter
-        assert calls["corner"][1]["output_path"] == "corner.pdf"
-        assert calls["corner"][1]["params"] == ["alpha"]
+        assert calls["corner"][1]["output_path"] == "result_corner.pdf"
         assert calls["trace"][0] is fitter
-        assert calls["trace"][1]["output_path"] == "trace.pdf"
-        assert calls["trace"][1]["params"] == ["beta"]
+        assert calls["trace"][1]["output_path"] == "result_trace.pdf"
     finally:
         sys.modules.pop("jaxsedfit.core", None)

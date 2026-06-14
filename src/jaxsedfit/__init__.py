@@ -29,6 +29,7 @@ __all__ = [
     "FilterCurve",
     "FilterSet",
     "FitConfig",
+    "FitResult",
     "GalaxyConfig",
     "HostBasisJax",
     "JAXSEDFit",
@@ -38,6 +39,7 @@ __all__ = [
     "NebularConfig",
     "Observation",
     "PhotometryData",
+    "PredictionResult",
     "PriorConfig",
     "RedshiftPriorConfig",
     "StellarMassPriorConfig",
@@ -67,6 +69,10 @@ def __getattr__(name):
         from .core import JAXSEDFit
 
         return JAXSEDFit
+    if name in {"FitResult", "PredictionResult"}:
+        from . import results as _results
+
+        return getattr(_results, name)
     if name in {"load_from_samples", "load"}:
         from .core import JAXSEDFit
 
