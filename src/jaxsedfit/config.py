@@ -24,6 +24,7 @@ class Observation:
         return str(self.redshift_mode).lower() == "fit"
 
     def validate(self) -> None:
+        """Normalize and validate the redshift fitting mode."""
         mode = str(self.redshift_mode).lower()
         if mode not in {"fixed", "fit"}:
             raise ValueError("observation.redshift_mode must be either 'fixed' or 'fit'.")
@@ -149,6 +150,7 @@ class NebularConfig:
     young_age_cut_myr: float = 10.0
 
     def validate(self) -> None:
+        """Validate nebular-emission parameters and physical fractions."""
         if self.zgas is not None and (not np.isfinite(float(self.zgas)) or float(self.zgas) <= 0.0):
             raise ValueError("nebular.zgas must be a positive finite metallicity when set.")
         if not np.isfinite(float(self.logU)):
@@ -265,9 +267,11 @@ class RedshiftPriorConfig:
 
     @property
     def enabled(self) -> bool:
+        """Return True when a tabulated redshift prior is configured."""
         return self.z_grid is not None or self.pdf is not None
 
     def validate(self) -> None:
+        """Validate the tabulated redshift PDF shape, ordering, and normalization."""
         if not self.enabled:
             return
         if self.z_grid is None or self.pdf is None:
@@ -287,6 +291,7 @@ class RedshiftPriorConfig:
             raise ValueError("redshift prior must integrate to a positive finite value.")
 
     def to_mapping(self) -> dict[str, Any]:
+        """Convert the redshift prior into the low-level model mapping."""
         if not self.enabled:
             return {}
         return {"redshift_pdf": {"z_grid": self.z_grid, "pdf": self.pdf}}
@@ -304,9 +309,11 @@ class StellarMassPriorConfig:
 
     @property
     def enabled(self) -> bool:
+        """Return True when any stellar-mass prior field is configured."""
         return any(getattr(self, name) is not None for name in ("dist", "loc", "scale", "df", "low", "high"))
 
     def to_mapping(self) -> dict[str, Any]:
+        """Convert the stellar-mass prior into the low-level model mapping."""
         if not self.enabled:
             return {}
         out = {
@@ -342,6 +349,7 @@ class MassMetallicityPriorConfig:
     max_lgmet: float | None = None
 
     def to_mapping(self) -> dict[str, Any]:
+        """Convert the mass-metallicity relation prior into model settings."""
         if not self.configured:
             return {}
         out: dict[str, Any] = {
@@ -378,9 +386,11 @@ class PriorConfig(MutableMapping[str, Any]):
     overrides: dict[str, Any] = field(default_factory=dict)
 
     def validate(self) -> None:
+        """Validate nested semantic prior objects."""
         self.redshift.validate()
 
     def to_mapping(self) -> dict[str, Any]:
+        """Return the flat prior mapping consumed by the NumPyro model."""
         out: dict[str, Any] = dict(self.overrides)
         out.update(self.redshift.to_mapping())
         out.update(self.stellar_mass.to_mapping())
@@ -388,30 +398,38 @@ class PriorConfig(MutableMapping[str, Any]):
         return out
 
     def __getitem__(self, key: str) -> Any:
+        """Return one prior entry from the flat mapping view."""
         return self.to_mapping()[key]
 
     def __setitem__(self, key: str, value: Any) -> None:
+        """Store a low-level prior override by model-site key."""
         self.overrides[str(key)] = value
 
     def __delitem__(self, key: str) -> None:
+        """Remove a low-level override entry."""
         if key in self.overrides:
             del self.overrides[key]
             return
         raise KeyError(key)
 
     def __iter__(self):
+        """Iterate over keys in the flat mapping view."""
         return iter(self.to_mapping())
 
     def __len__(self) -> int:
+        """Return the number of entries in the flat mapping view."""
         return len(self.to_mapping())
 
     def __contains__(self, key: object) -> bool:
+        """Return True when a key exists in the flat mapping view."""
         return key in self.to_mapping()
 
     def get(self, key: str, default: Any = None) -> Any:
+        """Return a prior entry or default from the flat mapping view."""
         return self.to_mapping().get(key, default)
 
     def setdefault(self, key: str, default: Any = None) -> Any:
+        """Set and return a low-level override when the key is absent."""
         if key not in self:
             self[key] = default
         return self[key]
@@ -433,6 +451,7 @@ class FitConfig:
     prior_config: PriorConfig = field(default_factory=PriorConfig)
 
     def __post_init__(self) -> None:
+        """Coerce mapping-style prior configs into :class:`PriorConfig`."""
         self.prior_config = _coerce_prior_config(self.prior_config)
 
     def validate(self) -> None:

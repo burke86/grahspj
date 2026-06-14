@@ -624,6 +624,7 @@ def _project_local_line_filters(
     curves = context.packed_filter_curves_jax
 
     def _one_filter(filt_wave, filt_trans, denom, eff_wave):
+        """Project the local AGN line grid through one packed filter curve."""
         trans = jnp.interp(obs_line_wave, filt_wave, filt_trans, left=0.0, right=0.0)
         numer = jnp.sum(jnp.trapezoid(trans * flux_lambda, obs_line_wave, axis=1))
         f_lambda = numer / jnp.maximum(denom, 1.0e-30)
@@ -660,6 +661,7 @@ def _project_local_nebular_line_filters(
     curves = context.packed_filter_curves_jax
 
     def _one_filter(filt_wave, filt_trans, denom, eff_wave):
+        """Project the local nebular line grid through one packed filter curve."""
         trans = jnp.interp(obs_line_wave, filt_wave, filt_trans, left=0.0, right=0.0)
         numer = jnp.sum(jnp.trapezoid(trans * flux_lambda, obs_line_wave, axis=1))
         f_lambda = numer / jnp.maximum(denom, 1.0e-30)
@@ -1159,6 +1161,7 @@ def _absolute_flux_scale_logprior(pred_fluxes, obs_fluxes, valid_mask, sigma_dex
     n_valid = jnp.sum(valid_mask.astype(jnp.int32))
 
     def _compute():
+        """Evaluate the Gaussian prior on log10 model/data flux scale."""
         obs_scale = _robust_flux_scale(obs_fluxes, valid_mask)
         pred_scale = _robust_flux_scale(pred_fluxes, valid_mask)
         log_ratio = jnp.log10(jnp.maximum(pred_scale, 1.0e-30) / jnp.maximum(obs_scale, 1.0e-30))

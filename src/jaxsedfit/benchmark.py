@@ -416,6 +416,8 @@ def _reduced_chi2_for_fit(fitter: Any) -> float:
     cfg = getattr(fitter.config, "likelihood", None)
     if cfg is None:
         class _FallbackLikelihood:
+            """Minimal likelihood configuration used when old fitter objects lack one."""
+
             systematics_width = 0.0
             variability_uncertainty = False
             attenuation_model_uncertainty = False
