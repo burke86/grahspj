@@ -1,4 +1,5 @@
 import numpy as np
+import numpyro.distributions as dist
 from numpyro.handlers import seed, substitute, trace
 from pathlib import Path
 
@@ -149,7 +150,7 @@ def test_nebular_enabled_adds_finite_component(monkeypatch):
     _patch_ssp(monkeypatch)
     cfg = _mock_config()
     cfg.nebular = NebularConfig(enabled=True, f_esc=0.0, f_dust=0.0, zgas=0.02)
-    cfg.prior_config["nebular_logU"] = {"loc": -2.0, "scale": 0.01}
+    cfg.prior_config.nebular.logU = dist.Normal(-2.0, 0.01)
     context = build_model_context(cfg)
     tr = trace(seed(lambda: grahsp_photometric_model(context, include_components=True), 1)).get_trace()
 
@@ -166,7 +167,7 @@ def test_fixed_nebular_line_profile_cache_matches_dynamic_path(monkeypatch):
     fixed_cfg.nebular = NebularConfig(enabled=True, f_esc=0.0, f_dust=0.0, zgas=0.02, logU=-2.0, ne=100.0, lines_width=300.0)
     dynamic_cfg = _mock_config()
     dynamic_cfg.nebular = NebularConfig(enabled=True, f_esc=0.0, f_dust=0.0, zgas=0.02, logU=-2.0, ne=100.0, lines_width=300.0)
-    dynamic_cfg.prior_config["nebular_lines_width"] = {"loc": 300.0, "scale": 1.0}
+    dynamic_cfg.prior_config.nebular.lines_width = dist.Normal(300.0, 1.0)
 
     fixed_context = build_model_context(fixed_cfg)
     dynamic_context = build_model_context(dynamic_cfg)

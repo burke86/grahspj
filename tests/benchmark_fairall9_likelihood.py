@@ -10,7 +10,7 @@ import jax
 import numpy as np
 from numpyro.infer.util import log_density
 
-from jaxsedfit.config import AGNConfig, FilterSet, FitConfig, GalaxyConfig, InferenceConfig, LikelihoodConfig, Observation, PhotometryData
+from jaxsedfit.config import AGNConfig, FilterSet, FitConfig, GalaxyConfig, InferenceConfig, LikelihoodConfig, Observation, PhotometryData, PriorConfig
 from jaxsedfit.core import JAXSEDFit
 from jaxsedfit.model import grahsp_photometric_model
 
@@ -77,12 +77,11 @@ def build_fairall9_fixedz_config() -> FitConfig:
             num_chains=1,
             seed=0,
         ),
-        prior_config={
-            "log_stellar_mass": {"loc": 10.5, "scale": 1.0},
-            "fracAGN_5100": {"loc": 0.8, "scale": 0.15},
-            "ebv_gal": {"scale": 0.15},
-            "ebv_agn": {"scale": 0.15},
-        },
+        prior_config=PriorConfig(
+            stellar_mass={"loc": 10.5, "scale": 1.0},
+            host={"ebv_gal": {"scale": 0.15}},
+            agn={"ebv_agn": {"scale": 0.15}},
+        ),
     )
     return cfg
 

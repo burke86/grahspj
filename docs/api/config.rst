@@ -57,6 +57,12 @@ Configuration
    :special-members: __init__
    :show-inheritance:
 
+.. autoclass:: OutputConfig
+   :members:
+   :undoc-members:
+   :special-members: __init__
+   :show-inheritance:
+
 .. autoclass:: PriorConfig
    :members:
    :undoc-members:
@@ -69,7 +75,25 @@ Configuration
    :special-members: __init__
    :show-inheritance:
 
-.. autoclass:: StellarMassPriorConfig
+.. autoclass:: HostPriorConfig
+   :members:
+   :undoc-members:
+   :special-members: __init__
+   :show-inheritance:
+
+.. autoclass:: AGNPriorConfig
+   :members:
+   :undoc-members:
+   :special-members: __init__
+   :show-inheritance:
+
+.. autoclass:: NebularPriorConfig
+   :members:
+   :undoc-members:
+   :special-members: __init__
+   :show-inheritance:
+
+.. autoclass:: LikelihoodPriorConfig
    :members:
    :undoc-members:
    :special-members: __init__

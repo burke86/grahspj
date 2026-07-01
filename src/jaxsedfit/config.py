@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import MutableMapping, Sequence as SequenceABC
+from collections.abc import Sequence as SequenceABC
 from dataclasses import asdict, dataclass, field, is_dataclass
 from typing import Any, Mapping, Sequence
 
@@ -252,11 +252,108 @@ class InferenceConfig:
     method: str = "optax+nuts"
     learning_rate: float = 5e-3
     map_steps: int = 1500
+    staged_map: bool = True
+    staged_steps: int | None = None
     num_warmup: int = 200
     num_samples: int = 200
     num_chains: int = 1
     target_accept_prob: float = 0.85
+    dense_mass: bool = False
+    max_tree_depth: int = 8
+    use_map_init: bool = True
+    ns_num_live_points: int | None = None
+    ns_max_samples: int | None = None
+    ns_dlogz: float | None = None
+    ns_resamples: int | None = None
+    ns_difficult_model: bool = False
+    ns_parameter_estimation: bool = False
+    ns_num_parallel_workers: int | None = None
+    ns_init_efficiency_threshold: float | None = None
+    ns_max_likelihood_evals: int | None = None
+    ns_efficiency_threshold: float | None = None
     seed: int = 0
+
+
+@dataclass
+class OutputConfig:
+    """Plotting and persistence defaults."""
+    output_dir: str = "."
+    fig_path: str | None = None
+    result_path: str | None = None
+    plot_fig: bool = False
+    save_fig: bool = False
+    save_result: bool = False
+    show_plot: bool = False
+
+
+def _scalar_or_list(value: Any) -> Any:
+    """Convert scalar array-like distribution parameters into plain Python values."""
+    arr = np.asarray(value)
+    if arr.shape == ():
+        return float(arr)
+    return arr.tolist()
+
+
+def _numpyro_distribution_to_mapping(value: Any) -> dict[str, Any] | None:
+    """Convert supported NumPyro distributions into the model prior schema."""
+    module = getattr(value.__class__, "__module__", "")
+    if not module.startswith("numpyro.distributions"):
+        return None
+
+    name = value.__class__.__name__
+    if name in {"Normal", "LogNormal"}:
+        return {
+            "dist": name,
+            "loc": _scalar_or_list(value.loc),
+            "scale": _scalar_or_list(value.scale),
+        }
+    if name == "TwoSidedTruncatedDistribution":
+        base = value.base_dist
+        if base.__class__.__name__ == "Normal":
+            return {
+                "dist": "TruncatedNormal",
+                "loc": _scalar_or_list(base.loc),
+                "scale": _scalar_or_list(base.scale),
+                "low": _scalar_or_list(value.low),
+                "high": _scalar_or_list(value.high),
+            }
+    if name == "TruncatedNormal":
+        return {
+            "dist": name,
+            "loc": _scalar_or_list(value.loc),
+            "scale": _scalar_or_list(value.scale),
+            "low": _scalar_or_list(value.low),
+            "high": _scalar_or_list(value.high),
+        }
+    if name == "HalfNormal":
+        return {"dist": name, "scale": _scalar_or_list(value.scale)}
+    if name == "StudentT":
+        return {
+            "dist": "student_t",
+            "df": _scalar_or_list(value.df),
+            "loc": _scalar_or_list(value.loc),
+            "scale": _scalar_or_list(value.scale),
+        }
+    if name == "Uniform":
+        return {
+            "dist": "uniform",
+            "low": _scalar_or_list(value.low),
+            "high": _scalar_or_list(value.high),
+        }
+    if name == "Exponential":
+        rate = _scalar_or_list(value.rate)
+        return {"dist": "exponential", "scale": 1.0 / rate if np.isscalar(rate) else (1.0 / np.asarray(rate)).tolist()}
+    raise TypeError(f"Unsupported NumPyro prior distribution: {name}")
+
+
+def _prior_to_mapping(value: Any) -> Any:
+    """Convert public prior specs to low-level mappings."""
+    if isinstance(value, Mapping):
+        return dict(value)
+    prior = _numpyro_distribution_to_mapping(value)
+    if prior is not None:
+        return prior
+    raise TypeError("Prior fields must be mappings or supported numpyro.distributions objects.")
 
 
 @dataclass
@@ -295,40 +392,6 @@ class RedshiftPriorConfig:
         if not self.enabled:
             return {}
         return {"redshift_pdf": {"z_grid": self.z_grid, "pdf": self.pdf}}
-
-
-@dataclass
-class StellarMassPriorConfig:
-    """Semantic stellar-mass prior configuration."""
-    dist: str | None = None
-    loc: float | None = None
-    scale: float | None = None
-    df: float | None = None
-    low: float | None = None
-    high: float | None = None
-
-    @property
-    def enabled(self) -> bool:
-        """Return True when any stellar-mass prior field is configured."""
-        return any(getattr(self, name) is not None for name in ("dist", "loc", "scale", "df", "low", "high"))
-
-    def to_mapping(self) -> dict[str, Any]:
-        """Convert the stellar-mass prior into the low-level model mapping."""
-        if not self.enabled:
-            return {}
-        out = {
-            key: value
-            for key, value in {
-                "dist": self.dist,
-                "loc": self.loc,
-                "scale": self.scale,
-                "df": self.df,
-                "low": self.low,
-                "high": self.high,
-            }.items()
-            if value is not None
-        }
-        return {"log_stellar_mass": out}
 
 
 @dataclass
@@ -373,17 +436,230 @@ class MassMetallicityPriorConfig:
 
 
 @dataclass
-class PriorConfig(MutableMapping[str, Any]):
-    """Object-oriented prior configuration with a dict-compatible transition API.
+class HostPriorConfig:
+    """Host-galaxy prior options."""
+    gal_lgmet: Any | None = None
+    gal_lgmet_scatter: Any | None = None
+    gal_v_kms: Any | None = None
+    gal_sigma_kms: Any | None = None
+    dust_alpha: Any | None = None
+    ebv_gal: Any | None = None
+    log_ebv_gal: Any | None = None
+    log_sfh_tau_gyr: Any | None = None
+    log_sfh_age_gyr: Any | None = None
+    log_sfh_tau_over_age: Any | None = None
+    u_lgmcrit: Any | None = None
+    u_lgy_at_mcrit: Any | None = None
+    u_indx_lo: Any | None = None
+    u_indx_hi: Any | None = None
+    u_tau_dep: Any | None = None
 
-    Semantic fields cover common science-level priors. ``overrides`` stores
-    low-level model-site settings and preserves the existing mapping interface
-    used by notebooks and model internals.
-    """
+    def to_mapping(self) -> dict[str, Any]:
+        """Convert host prior settings into model-site keys."""
+        return _section_to_mapping(
+            self,
+            {
+                "gal_lgmet": "gal_lgmet",
+                "gal_lgmet_scatter": "gal_lgmet_scatter",
+                "gal_v_kms": "gal_v_kms",
+                "gal_sigma_kms": "gal_sigma_kms",
+                "dust_alpha": "dust_alpha",
+                "ebv_gal": "ebv_gal",
+                "log_ebv_gal": "log_ebv_gal",
+                "log_sfh_tau_gyr": "log_sfh_tau_gyr",
+                "log_sfh_age_gyr": "log_sfh_age_gyr",
+                "log_sfh_tau_over_age": "log_sfh_tau_over_age",
+                "u_lgmcrit": "u_lgmcrit",
+                "u_lgy_at_mcrit": "u_lgy_at_mcrit",
+                "u_indx_lo": "u_indx_lo",
+                "u_indx_hi": "u_indx_hi",
+                "u_tau_dep": "u_tau_dep",
+            },
+        )
+
+
+@dataclass
+class AGNPriorConfig:
+    """AGN prior options."""
+    log_amp: Any | None = None
+    pl_slope: Any | None = None
+    uv_slope_delta: Any | None = None
+    log_uv_slope_delta: Any | None = None
+    pl_bend_loc: Any | None = None
+    log_pl_bend_loc: Any | None = None
+    pl_bend_width: Any | None = None
+    log_pl_bend_width: Any | None = None
+    pl_cutoff: Any | None = None
+    log_pl_cutoff: Any | None = None
+    fcov: Any | None = None
+    log_fcov: Any | None = None
+    si: Any | None = None
+    cool_lam: Any | None = None
+    log_cool_lam: Any | None = None
+    cool_width: Any | None = None
+    log_cool_width: Any | None = None
+    hot_lam: Any | None = None
+    log_hot_lam: Any | None = None
+    hot_width: Any | None = None
+    log_hot_width: Any | None = None
+    hot_fcov: Any | None = None
+    log_hot_fcov: Any | None = None
+    ebv_agn: Any | None = None
+    log_ebv_agn: Any | None = None
+    lines_strength: Any | None = None
+    log_lines_strength: Any | None = None
+    line_width_kms: Any | None = None
+    log_line_width_kms: Any | None = None
+    balmer_norm: Any | None = None
+    log_balmer_norm: Any | None = None
+    balmer_tau: Any | None = None
+    log_balmer_tau: Any | None = None
+    balmer_vel: Any | None = None
+    log_balmer_vel: Any | None = None
+    feii_norm: Any | None = None
+    log_feii_norm: Any | None = None
+    feii_fwhm: Any | None = None
+    log_feii_fwhm: Any | None = None
+    feii_shift: Any | None = None
+
+    def to_mapping(self) -> dict[str, Any]:
+        """Convert AGN prior settings into model-site keys."""
+        return _section_to_mapping(
+            self,
+            {
+                "log_amp": "log_agn_amp",
+                "pl_slope": "pl_slope",
+                "uv_slope_delta": "uv_slope_delta",
+                "log_uv_slope_delta": "log_uv_slope_delta",
+                "pl_bend_loc": "pl_bend_loc",
+                "log_pl_bend_loc": "log_pl_bend_loc",
+                "pl_bend_width": "pl_bend_width",
+                "log_pl_bend_width": "log_pl_bend_width",
+                "pl_cutoff": "pl_cutoff",
+                "log_pl_cutoff": "log_pl_cutoff",
+                "fcov": "fcov",
+                "log_fcov": "log_fcov",
+                "si": "si",
+                "cool_lam": "cool_lam",
+                "log_cool_lam": "log_cool_lam",
+                "cool_width": "cool_width",
+                "log_cool_width": "log_cool_width",
+                "hot_lam": "hot_lam",
+                "log_hot_lam": "log_hot_lam",
+                "hot_width": "hot_width",
+                "log_hot_width": "log_hot_width",
+                "hot_fcov": "hot_fcov",
+                "log_hot_fcov": "log_hot_fcov",
+                "ebv_agn": "ebv_agn",
+                "log_ebv_agn": "log_ebv_agn",
+                "lines_strength": "lines_strength",
+                "log_lines_strength": "log_lines_strength",
+                "line_width_kms": "line_width_kms",
+                "log_line_width_kms": "log_line_width_kms",
+                "balmer_norm": "balmer_norm",
+                "log_balmer_norm": "log_balmer_norm",
+                "balmer_tau": "balmer_tau",
+                "log_balmer_tau": "log_balmer_tau",
+                "balmer_vel": "balmer_vel",
+                "log_balmer_vel": "log_balmer_vel",
+                "feii_norm": "feii_norm",
+                "log_feii_norm": "log_feii_norm",
+                "feii_fwhm": "feii_fwhm",
+                "log_feii_fwhm": "log_feii_fwhm",
+                "feii_shift": "feii_shift",
+            },
+        )
+
+
+@dataclass
+class NebularPriorConfig:
+    """Nebular-emission prior options."""
+    logU: Any | None = None
+    zgas: Any | None = None
+    ne: Any | None = None
+    f_esc: Any | None = None
+    f_dust: Any | None = None
+    lines_width: Any | None = None
+    log_line_scale: Any | None = None
+
+    def to_mapping(self) -> dict[str, Any]:
+        """Convert nebular prior settings into model-site keys."""
+        return _section_to_mapping(
+            self,
+            {
+                "logU": "nebular_logU",
+                "zgas": "nebular_zgas",
+                "ne": "nebular_ne",
+                "f_esc": "nebular_f_esc",
+                "f_dust": "nebular_f_dust",
+                "lines_width": "nebular_lines_width",
+                "log_line_scale": "log_nebular_line_scale",
+            },
+        )
+
+
+@dataclass
+class LikelihoodPriorConfig:
+    """Likelihood and calibration prior options."""
+    systematics_width: Any | None = None
+    log_systematics_width: Any | None = None
+    intrinsic_scatter: Any | None = None
+    log_intrinsic_scatter: Any | None = None
+    host_capture_scale_arcsec: Any | None = None
+    log_host_capture_scale_arcsec: Any | None = None
+    host_capture_slope: Any | None = None
+    log_host_capture_slope: Any | None = None
+    spectrum_scale: Any | None = None
+    log_spectrum_scale: Any | None = None
+
+    def to_mapping(self) -> dict[str, Any]:
+        """Convert likelihood prior settings into model-site keys."""
+        return _section_to_mapping(
+            self,
+            {
+                "systematics_width": "systematics_width",
+                "log_systematics_width": "log_systematics_width",
+                "intrinsic_scatter": "intrinsic_scatter",
+                "log_intrinsic_scatter": "log_intrinsic_scatter",
+                "host_capture_scale_arcsec": "host_capture_scale_arcsec",
+                "log_host_capture_scale_arcsec": "log_host_capture_scale_arcsec",
+                "host_capture_slope": "host_capture_slope",
+                "log_host_capture_slope": "log_host_capture_slope",
+                "spectrum_scale": "spectrum_scale",
+                "log_spectrum_scale": "log_spectrum_scale",
+            },
+        )
+
+
+def _section_to_mapping(section: Any, fields_to_keys: Mapping[str, str]) -> dict[str, Any]:
+    """Convert non-None section fields into model prior mappings."""
+    out: dict[str, Any] = {}
+    for field_name, key in fields_to_keys.items():
+        value = getattr(section, field_name)
+        if value is not None:
+            out[key] = _prior_to_mapping(value)
+    return out
+
+
+@dataclass
+class PriorConfig:
+    """Object-oriented prior configuration."""
     redshift: RedshiftPriorConfig = field(default_factory=RedshiftPriorConfig)
-    stellar_mass: StellarMassPriorConfig = field(default_factory=StellarMassPriorConfig)
+    stellar_mass: Any | None = None
     mass_metallicity: MassMetallicityPriorConfig = field(default_factory=MassMetallicityPriorConfig)
-    overrides: dict[str, Any] = field(default_factory=dict)
+    host: HostPriorConfig = field(default_factory=HostPriorConfig)
+    agn: AGNPriorConfig = field(default_factory=AGNPriorConfig)
+    nebular: NebularPriorConfig = field(default_factory=NebularPriorConfig)
+    likelihood: LikelihoodPriorConfig = field(default_factory=LikelihoodPriorConfig)
+
+    def __post_init__(self) -> None:
+        """Normalize nested prior sections passed as mappings."""
+        self.redshift = _coerce_dataclass(RedshiftPriorConfig, self.redshift)
+        self.mass_metallicity = _coerce_dataclass(MassMetallicityPriorConfig, self.mass_metallicity)
+        self.host = _coerce_dataclass(HostPriorConfig, self.host)
+        self.agn = _coerce_dataclass(AGNPriorConfig, self.agn)
+        self.nebular = _coerce_dataclass(NebularPriorConfig, self.nebular)
+        self.likelihood = _coerce_dataclass(LikelihoodPriorConfig, self.likelihood)
 
     def validate(self) -> None:
         """Validate nested semantic prior objects."""
@@ -391,48 +667,16 @@ class PriorConfig(MutableMapping[str, Any]):
 
     def to_mapping(self) -> dict[str, Any]:
         """Return the flat prior mapping consumed by the NumPyro model."""
-        out: dict[str, Any] = dict(self.overrides)
+        out: dict[str, Any] = {}
+        if self.stellar_mass is not None:
+            out["log_stellar_mass"] = _prior_to_mapping(self.stellar_mass)
         out.update(self.redshift.to_mapping())
-        out.update(self.stellar_mass.to_mapping())
         out.update(self.mass_metallicity.to_mapping())
+        out.update(self.host.to_mapping())
+        out.update(self.agn.to_mapping())
+        out.update(self.nebular.to_mapping())
+        out.update(self.likelihood.to_mapping())
         return out
-
-    def __getitem__(self, key: str) -> Any:
-        """Return one prior entry from the flat mapping view."""
-        return self.to_mapping()[key]
-
-    def __setitem__(self, key: str, value: Any) -> None:
-        """Store a low-level prior override by model-site key."""
-        self.overrides[str(key)] = value
-
-    def __delitem__(self, key: str) -> None:
-        """Remove a low-level override entry."""
-        if key in self.overrides:
-            del self.overrides[key]
-            return
-        raise KeyError(key)
-
-    def __iter__(self):
-        """Iterate over keys in the flat mapping view."""
-        return iter(self.to_mapping())
-
-    def __len__(self) -> int:
-        """Return the number of entries in the flat mapping view."""
-        return len(self.to_mapping())
-
-    def __contains__(self, key: object) -> bool:
-        """Return True when a key exists in the flat mapping view."""
-        return key in self.to_mapping()
-
-    def get(self, key: str, default: Any = None) -> Any:
-        """Return a prior entry or default from the flat mapping view."""
-        return self.to_mapping().get(key, default)
-
-    def setdefault(self, key: str, default: Any = None) -> Any:
-        """Set and return a low-level override when the key is absent."""
-        if key not in self:
-            self[key] = default
-        return self[key]
 
 
 @dataclass
@@ -448,6 +692,7 @@ class FitConfig:
     spectroscopy: SpectroscopyData | Sequence[SpectroscopyData] | None = None
     spectroscopy_config: SpectroscopyConfig = field(default_factory=SpectroscopyConfig)
     inference: InferenceConfig = field(default_factory=InferenceConfig)
+    output: OutputConfig = field(default_factory=OutputConfig)
     prior_config: PriorConfig = field(default_factory=PriorConfig)
 
     def __post_init__(self) -> None:
@@ -467,7 +712,7 @@ class FitConfig:
 
     def to_dict(self) -> dict[str, Any]:
         """Convert the dataclass tree into a plain Python dictionary."""
-        return asdict(self)
+        return serialize_config(self)
 
     @property
     def spectroscopy_list(self) -> list[SpectroscopyData]:
@@ -549,7 +794,7 @@ def _coerce_spectroscopy_config(value: Any) -> SpectroscopyConfig:
 
 
 def _coerce_prior_config(value: Any) -> PriorConfig:
-    """Coerce old flat prior mappings and new nested prior config objects."""
+    """Coerce structured prior mappings into :class:`PriorConfig`."""
     if isinstance(value, PriorConfig):
         return value
     if value is None:
@@ -558,51 +803,18 @@ def _coerce_prior_config(value: Any) -> PriorConfig:
         return _coerce_dataclass(PriorConfig, value)
 
     data = dict(value)
-    nested_keys = {"redshift", "stellar_mass", "mass_metallicity", "overrides"}
-    has_nested_shape = any(key in data for key in nested_keys)
-    if has_nested_shape:
-        cfg = PriorConfig(
-            redshift=_coerce_dataclass(RedshiftPriorConfig, data.get("redshift", {})),
-            stellar_mass=_coerce_dataclass(StellarMassPriorConfig, data.get("stellar_mass", {})),
-            mass_metallicity=_coerce_dataclass(MassMetallicityPriorConfig, data.get("mass_metallicity", {})),
-            overrides=dict(data.get("overrides", {})),
-        )
-        for key, value in data.items():
-            if key not in nested_keys:
-                cfg.overrides[key] = value
-        return cfg
-
-    redshift_pdf = data.pop("redshift_pdf", None)
-    redshift = RedshiftPriorConfig()
-    if redshift_pdf is not None:
-        redshift = RedshiftPriorConfig(
-            z_grid=redshift_pdf.get("z_grid") if isinstance(redshift_pdf, Mapping) else None,
-            pdf=redshift_pdf.get("pdf") if isinstance(redshift_pdf, Mapping) else None,
-        )
-
-    stellar_mass_raw = data.pop("log_stellar_mass", None)
-    stellar_mass = StellarMassPriorConfig()
-    if isinstance(stellar_mass_raw, Mapping):
-        stellar_mass = _coerce_dataclass(StellarMassPriorConfig, stellar_mass_raw)
-    elif stellar_mass_raw is not None:
-        data["log_stellar_mass"] = stellar_mass_raw
-
-    mmr_raw = data.pop("mass_metallicity_relation", None)
-    mass_metallicity = MassMetallicityPriorConfig()
-    if isinstance(mmr_raw, Mapping):
-        mmr_data = dict(mmr_raw)
-        mmr_data.setdefault("configured", True)
-        mass_metallicity = _coerce_dataclass(MassMetallicityPriorConfig, mmr_data)
-    elif mmr_raw is not None:
-        data["mass_metallicity_relation"] = mmr_raw
-
-    cfg = PriorConfig(
-        redshift=redshift,
-        stellar_mass=stellar_mass,
-        mass_metallicity=mass_metallicity,
-        overrides=data,
+    nested_keys = {"redshift", "stellar_mass", "mass_metallicity", "host", "agn", "nebular", "likelihood"}
+    if data and not any(key in data for key in nested_keys):
+        raise ValueError("prior_config mappings must use structured PriorConfig sections.")
+    return PriorConfig(
+        redshift=_coerce_dataclass(RedshiftPriorConfig, data.get("redshift", {})),
+        stellar_mass=data.get("stellar_mass"),
+        mass_metallicity=_coerce_dataclass(MassMetallicityPriorConfig, data.get("mass_metallicity", {})),
+        host=_coerce_dataclass(HostPriorConfig, data.get("host", {})),
+        agn=_coerce_dataclass(AGNPriorConfig, data.get("agn", {})),
+        nebular=_coerce_dataclass(NebularPriorConfig, data.get("nebular", {})),
+        likelihood=_coerce_dataclass(LikelihoodPriorConfig, data.get("likelihood", {})),
     )
-    return cfg
 
 
 def fit_config_from_mapping(data: Mapping[str, Any]) -> FitConfig:
@@ -656,6 +868,7 @@ def fit_config_from_mapping(data: Mapping[str, Any]) -> FitConfig:
         spectroscopy=spectroscopy_obj,
         spectroscopy_config=_coerce_spectroscopy_config(data.get("spectroscopy_config", {})),
         inference=_coerce_dataclass(InferenceConfig, data.get("inference", {})),
+        output=_coerce_dataclass(OutputConfig, data.get("output", {})),
         prior_config=_coerce_prior_config(data.get("prior_config", {})),
     )
     cfg.validate()
@@ -664,6 +877,9 @@ def fit_config_from_mapping(data: Mapping[str, Any]) -> FitConfig:
 
 def serialize_config(value: Any) -> Any:
     """Convert config-like objects into JSON-serializable Python values."""
+    prior = _numpyro_distribution_to_mapping(value)
+    if prior is not None:
+        return serialize_config(prior)
     if is_dataclass(value):
         return {k: serialize_config(v) for k, v in asdict(value).items()}
     if isinstance(value, dict):

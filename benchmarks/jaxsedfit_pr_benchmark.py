@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import inspect
 import json
 import os
 import platform
@@ -25,7 +26,7 @@ from diffstar.defaults import FB as DIFFSTAR_FB
 from diffstar.defaults import LGT0 as DIFFSTAR_LGT0
 from dsps.sed.ssp_weights import calc_ssp_weights_sfh_table_lognormal_mdf
 
-from jaxsedfit.config import AGNConfig, FilterSet, FitConfig, GalaxyConfig, InferenceConfig, LikelihoodConfig, Observation, PhotometryData
+from jaxsedfit.config import AGNConfig, FilterSet, FitConfig, GalaxyConfig, InferenceConfig, LikelihoodConfig, Observation, PhotometryData, PriorConfig
 from jaxsedfit.core import JAXSEDFit
 from jaxsedfit.filters import load_filter_curves
 from jaxsedfit.model import (
@@ -124,6 +125,22 @@ def _load_fairall9_payload() -> tuple[float, list[dict[str, object]]]:
     raise RuntimeError(f"Could not extract Fairall 9 photometry from {notebook_path}")
 
 
+def _benchmark_prior_config():
+    """Return priors compatible with both base and head benchmark installs."""
+    flat_prior = {
+        "log_stellar_mass": {"loc": 10.5, "scale": 1.0},
+        "ebv_gal": {"scale": 0.15},
+        "ebv_agn": {"scale": 0.15},
+    }
+    if "host" not in inspect.signature(PriorConfig).parameters:
+        return flat_prior
+    return PriorConfig(
+        stellar_mass=flat_prior["log_stellar_mass"],
+        host={"ebv_gal": flat_prior["ebv_gal"]},
+        agn={"ebv_agn": flat_prior["ebv_agn"]},
+    )
+
+
 def build_fairall9_fixedz_config(dsps_ssp_fn: str | Path) -> FitConfig:
     """Build the representative fixed-z photometric benchmark config."""
     dsps_ssp_fn = Path(dsps_ssp_fn).expanduser()
@@ -157,11 +174,7 @@ def build_fairall9_fixedz_config(dsps_ssp_fn: str | Path) -> FitConfig:
             num_chains=1,
             seed=0,
         ),
-        prior_config={
-            "log_stellar_mass": {"loc": 10.5, "scale": 1.0},
-            "ebv_gal": {"scale": 0.15},
-            "ebv_agn": {"scale": 0.15},
-        },
+        prior_config=_benchmark_prior_config(),
     )
 
 

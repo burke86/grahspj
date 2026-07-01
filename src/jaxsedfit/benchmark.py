@@ -17,6 +17,7 @@ from typing import Any, Iterable
 import zlib
 
 import numpy as np
+import numpyro.distributions as dist
 from astropy.io import fits
 from tqdm.auto import tqdm
 
@@ -302,7 +303,7 @@ def build_chimera_fit_config(row: dict[str, Any], dsps_ssp_fn: str = "tempdata.h
             agn=base_config.agn,
             likelihood=base_config.likelihood,
             inference=base_config.inference,
-            prior_config=dict(base_config.prior_config),
+            prior_config=base_config.prior_config,
         )
         if cfg.agn.feii_template.wave is None or cfg.agn.emission_line_template.wave is None:
             cfg.agn = _build_chimera_agn_config()
@@ -319,17 +320,14 @@ def build_chimera_fit_config(row: dict[str, Any], dsps_ssp_fn: str = "tempdata.h
         target_accept_prob=cfg.inference.target_accept_prob,
         seed=DEFAULT_RANDOM_SEED,
     )
-    inferred_priors = _estimate_chimera_prior_config(row)
-    for key, value in inferred_priors.items():
-        cfg.prior_config.setdefault(key, value)
+    if cfg.prior_config.stellar_mass is None:
+        cfg.prior_config.stellar_mass = _estimate_chimera_stellar_mass_prior(row)
     return cfg
 
 
-def _estimate_chimera_prior_config(row: dict[str, Any]) -> dict[str, Any]:
-    """Seed a simple prior configuration from one Chimera photometric row."""
-    return {
-        "log_stellar_mass": {"dist": "student_t", "loc": 10.0, "scale": 2.0, "df": 5.0},
-    }
+def _estimate_chimera_stellar_mass_prior(row: dict[str, Any]):
+    """Seed a simple stellar-mass prior from one Chimera photometric row."""
+    return dist.StudentT(df=5.0, loc=10.0, scale=2.0)
 
 
 def _weighted_quantile(values: np.ndarray, weights: np.ndarray, q: float) -> float:

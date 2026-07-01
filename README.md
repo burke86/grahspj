@@ -22,7 +22,7 @@ curl -L -o tempdata.h5 https://portal.nersc.gov/project/hacc/aphearin/DSPS_data/
 ```
 `jaxsedfit` now also requires `jax_cosmo` and `setuptools` in the runtime environment so the redshift-dependent luminosity-distance path stays JAX-native during inference.
 
-You will also need a continuum-only DSPS SSP template file such as `ssp_data_continuum_fsps_v3.2_lgmet_age.h5`, downloaded above, and then referenced from your configuration via `cfg.galaxy.dsps_ssp_fn` or passed directly to `fit(...)` via `dsps_ssp_fn`. The continuum-only template is preferred because `jaxsedfit` models nebular emission lines separately.
+You will also need a continuum-only DSPS SSP template file such as `ssp_data_continuum_fsps_v3.2_lgmet_age.h5`, downloaded above, and then referenced from your configuration via `cfg.galaxy.dsps_ssp_fn`. The continuum-only template is preferred because `jaxsedfit` models nebular emission lines separately.
 
 This repo assumes `dustmaps` is already configured and SFD maps are available.
 
@@ -78,29 +78,35 @@ From Python:
 from jaxsedfit.core import JAXSEDFit
 
 cfg.inference.method = "optax+nuts"
+cfg.inference.map_steps = 600
+cfg.inference.learning_rate = 1e-2
+cfg.inference.num_warmup = 50
+cfg.inference.num_samples = 50
+cfg.inference.num_chains = 1
+cfg.inference.dense_mass = False
+cfg.inference.max_tree_depth = 8
+cfg.output.plot_fig = False
+cfg.output.save_fig = True
+cfg.output.save_result = True
+cfg.output.output_dir = "fit_outputs"
+
 fitter = JAXSEDFit(cfg)
-fitter.fit(
-    optax_steps=600,
-    optax_lr=1e-2,
-    nuts_warmup=50,
-    nuts_samples=50,
-    nuts_chains=1,
-    plot_fig=False,
-    save_fig=True,
-    save_result=True,
-    output_dir="fit_outputs",
-)
+fitter.fit()
 ```
 
 Nested sampling is also available through NumPyro's `jaxns` wrapper:
 
 ```python
 cfg.inference.method = "ns"
-fitter.fit(
-    ns_live_points=200,
-    ns_dlogz=0.1,
-)
+cfg.inference.ns_num_live_points = 200
+cfg.inference.ns_dlogz = 0.1
+
+fitter = JAXSEDFit(cfg)
+fitter.fit()
 ```
+
+The public API keeps run settings on `FitConfig`, especially under
+`cfg.inference` and `cfg.output`.
 
 or with the standalone helper:
 

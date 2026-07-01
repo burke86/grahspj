@@ -1,4 +1,5 @@
 import numpy as np
+import numpyro.distributions as dist
 from numpyro.handlers import seed, substitute, trace
 
 from jaxsedfit.config import (
@@ -14,6 +15,7 @@ from jaxsedfit.config import (
     NebularConfig,
     Observation,
     PhotometryData,
+    PriorConfig,
 )
 from jaxsedfit.model import GRAHSP_PL_BEND_LOC_A, GRAHSP_PL_BEND_WIDTH, GRAHSP_PL_CUTOFF_A, _project_filters, _redshift_to_obs, evaluate_photometric_state, grahsp_photometric_model
 from jaxsedfit.preload import build_model_context
@@ -79,7 +81,7 @@ def _cfg(
         ),
         nebular=NebularConfig(enabled=True, f_esc=0.0, f_dust=0.2, zgas=0.02, lines_width=300.0),
         inference=InferenceConfig(map_steps=2),
-        prior_config={"log_stellar_mass": {"dist": "uniform", "low": 8.0, "high": 8.0}},
+        prior_config=PriorConfig(stellar_mass={"dist": "uniform", "low": 8.0, "high": 8.0}),
     )
 
 
@@ -159,7 +161,7 @@ def test_systematics_width_can_use_log_normal_override(monkeypatch):
     _patch_ssp(monkeypatch)
     cfg = _cfg()
     cfg.likelihood.fit_systematics_width = True
-    cfg.prior_config["systematics_width"] = {"family": "lognormal", "loc": 0.02, "scale": 0.2}
+    cfg.prior_config.likelihood.systematics_width = {"family": "lognormal", "loc": 0.02, "scale": 0.2}
     context = build_model_context(cfg)
 
     tr = _deterministic_likelihood_trace(

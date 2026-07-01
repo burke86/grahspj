@@ -323,164 +323,84 @@ class JAXSEDFit:
     def fit(
         self,
         progress_bar: bool = True,
-        prior_config: dict[str, Any] | None = None,
-        dsps_ssp_fn: str | None = None,
-        optax_steps: int | None = None,
-        optax_lr: float | None = None,
-        nuts_warmup: int | None = None,
-        nuts_samples: int | None = None,
-        nuts_chains: int | None = None,
-        ns_live_points: int | None = None,
-        ns_max_samples: int | None = None,
-        ns_dlogz: float | None = None,
-        ns_resamples: int | None = None,
-        ns_difficult_model: bool = False,
-        ns_parameter_estimation: bool = False,
-        ns_num_parallel_workers: int | None = None,
-        ns_init_efficiency_threshold: float | None = None,
-        ns_max_likelihood_evals: int | None = None,
-        ns_efficiency_threshold: float | None = None,
-        plot_fig: bool = False,
-        save_fig: bool = False,
-        save_result: bool = False,
-        output_dir: str | Path = ".",
-        fig_path: str | Path | None = None,
-        result_path: str | Path | None = None,
-        use_map_init: bool = True,
-        target_accept_prob: float | None = None,
-        staged_map: bool = True,
-        staged_steps: int | None = None,
-        **kwargs,
     ):
         """Run the requested inference path and optional plotting/saving helpers."""
-        if "steps" in kwargs and optax_steps is None:
-            optax_steps = kwargs.pop("steps")
-        if "learning_rate" in kwargs and optax_lr is None:
-            optax_lr = kwargs.pop("learning_rate")
-        if "num_warmup" in kwargs and nuts_warmup is None:
-            nuts_warmup = kwargs.pop("num_warmup")
-        if "num_samples" in kwargs and nuts_samples is None:
-            nuts_samples = kwargs.pop("num_samples")
-        if "num_chains" in kwargs and nuts_chains is None:
-            nuts_chains = kwargs.pop("num_chains")
-        if "ns_live_points" in kwargs and ns_live_points is None:
-            ns_live_points = kwargs.pop("ns_live_points")
-        if "ns_max_samples" in kwargs and ns_max_samples is None:
-            ns_max_samples = kwargs.pop("ns_max_samples")
-        if "ns_dlogz" in kwargs and ns_dlogz is None:
-            ns_dlogz = kwargs.pop("ns_dlogz")
-        if "ns_resamples" in kwargs and ns_resamples is None:
-            ns_resamples = kwargs.pop("ns_resamples")
-        if "ns_difficult_model" in kwargs:
-            ns_difficult_model = kwargs.pop("ns_difficult_model")
-        if "ns_parameter_estimation" in kwargs:
-            ns_parameter_estimation = kwargs.pop("ns_parameter_estimation")
-        if "ns_num_parallel_workers" in kwargs and ns_num_parallel_workers is None:
-            ns_num_parallel_workers = kwargs.pop("ns_num_parallel_workers")
-        if "ns_init_efficiency_threshold" in kwargs and ns_init_efficiency_threshold is None:
-            ns_init_efficiency_threshold = kwargs.pop("ns_init_efficiency_threshold")
-        if "ns_max_likelihood_evals" in kwargs and ns_max_likelihood_evals is None:
-            ns_max_likelihood_evals = kwargs.pop("ns_max_likelihood_evals")
-        if "ns_efficiency_threshold" in kwargs and ns_efficiency_threshold is None:
-            ns_efficiency_threshold = kwargs.pop("ns_efficiency_threshold")
-        if "target_accept_prob" in kwargs and target_accept_prob is None:
-            target_accept_prob = kwargs.pop("target_accept_prob")
-        use_map_init_explicit = "use_map_init" in kwargs
-        if use_map_init_explicit:
-            use_map_init = kwargs.pop("use_map_init")
-        if hasattr(self, "_apply_runtime_overrides"):
-            self._apply_runtime_overrides(prior_config=prior_config, dsps_ssp_fn=dsps_ssp_fn)
         inference = self.config.inference
+        output = self.config.output
         method = str(inference.method).lower()
-        output_dir = Path(output_dir)
+        output_dir = Path(output.output_dir)
         if method == "optax":
-            if kwargs:
-                unknown = ", ".join(sorted(kwargs))
-                raise TypeError(f"Unknown fit() keyword arguments: {unknown}")
-            map_kwargs: dict[str, Any] = {"progress_bar": progress_bar}
-            if optax_steps is not None:
-                map_kwargs["steps"] = optax_steps
-            if optax_lr is not None:
-                map_kwargs["learning_rate"] = optax_lr
-            map_kwargs["staged"] = staged_map
-            if staged_steps is not None:
-                map_kwargs["staged_steps"] = staged_steps
+            map_kwargs: dict[str, Any] = {
+                "progress_bar": progress_bar,
+                "steps": inference.map_steps,
+                "learning_rate": inference.learning_rate,
+                "staged": inference.staged_map,
+            }
+            if inference.staged_steps is not None:
+                map_kwargs["staged_steps"] = inference.staged_steps
             fit_output: dict[str, Any] | Any = self.fit_map(
                 **map_kwargs,
             )
         elif method == "nuts":
-            if kwargs:
-                unknown = ", ".join(sorted(kwargs))
-                raise TypeError(f"Unknown fit() keyword arguments: {unknown}")
-            nuts_kwargs: dict[str, Any] = {"progress_bar": progress_bar}
-            if nuts_warmup is not None:
-                nuts_kwargs["num_warmup"] = nuts_warmup
-            if nuts_samples is not None:
-                nuts_kwargs["num_samples"] = nuts_samples
-            if nuts_chains is not None:
-                nuts_kwargs["num_chains"] = nuts_chains
-            if target_accept_prob is not None:
-                nuts_kwargs["target_accept_prob"] = target_accept_prob
-            if use_map_init_explicit or use_map_init is not True:
-                nuts_kwargs["use_map_init"] = use_map_init
+            nuts_kwargs: dict[str, Any] = {
+                "progress_bar": progress_bar,
+                "num_warmup": inference.num_warmup,
+                "num_samples": inference.num_samples,
+                "num_chains": inference.num_chains,
+                "target_accept_prob": inference.target_accept_prob,
+                "dense_mass": inference.dense_mass,
+                "max_tree_depth": inference.max_tree_depth,
+                "use_map_init": inference.use_map_init,
+            }
             fit_output = self.fit_nuts(
                 **nuts_kwargs,
             )
         elif method == "optax+nuts":
-            if kwargs:
-                unknown = ", ".join(sorted(kwargs))
-                raise TypeError(f"Unknown fit() keyword arguments: {unknown}")
-            map_kwargs = {"progress_bar": progress_bar}
-            if optax_steps is not None:
-                map_kwargs["steps"] = optax_steps
-            if optax_lr is not None:
-                map_kwargs["learning_rate"] = optax_lr
-            map_kwargs["staged"] = staged_map
-            if staged_steps is not None:
-                map_kwargs["staged_steps"] = staged_steps
+            map_kwargs = {
+                "progress_bar": progress_bar,
+                "steps": inference.map_steps,
+                "learning_rate": inference.learning_rate,
+                "staged": inference.staged_map,
+            }
+            if inference.staged_steps is not None:
+                map_kwargs["staged_steps"] = inference.staged_steps
             map_result = self.fit_map(
                 **map_kwargs,
             )
-            nuts_kwargs = {"progress_bar": progress_bar}
-            if nuts_warmup is not None:
-                nuts_kwargs["num_warmup"] = nuts_warmup
-            if nuts_samples is not None:
-                nuts_kwargs["num_samples"] = nuts_samples
-            if nuts_chains is not None:
-                nuts_kwargs["num_chains"] = nuts_chains
-            if target_accept_prob is not None:
-                nuts_kwargs["target_accept_prob"] = target_accept_prob
-            if use_map_init_explicit or use_map_init is not True:
-                nuts_kwargs["use_map_init"] = use_map_init
+            nuts_kwargs = {
+                "progress_bar": progress_bar,
+                "num_warmup": inference.num_warmup,
+                "num_samples": inference.num_samples,
+                "num_chains": inference.num_chains,
+                "target_accept_prob": inference.target_accept_prob,
+                "dense_mass": inference.dense_mass,
+                "max_tree_depth": inference.max_tree_depth,
+                "use_map_init": inference.use_map_init,
+            }
             nuts_result = self.fit_nuts(
                 **nuts_kwargs,
             )
             fit_output = {"map": map_result, "nuts": nuts_result}
         elif method == "ns":
-            if kwargs:
-                unknown = ", ".join(sorted(kwargs))
-                raise TypeError(f"Unknown fit() keyword arguments: {unknown}")
             ns_kwargs: dict[str, Any] = {"progress_bar": progress_bar}
-            if ns_live_points is not None:
-                ns_kwargs["num_live_points"] = ns_live_points
-            if ns_max_samples is not None:
-                ns_kwargs["max_samples"] = ns_max_samples
-            if ns_dlogz is not None:
-                ns_kwargs["dlogz"] = ns_dlogz
-            if ns_resamples is not None:
-                ns_kwargs["num_resamples"] = ns_resamples
-            if ns_difficult_model:
-                ns_kwargs["difficult_model"] = bool(ns_difficult_model)
-            if ns_parameter_estimation:
-                ns_kwargs["parameter_estimation"] = bool(ns_parameter_estimation)
-            if ns_num_parallel_workers is not None:
-                ns_kwargs["num_parallel_workers"] = ns_num_parallel_workers
-            if ns_init_efficiency_threshold is not None:
-                ns_kwargs["init_efficiency_threshold"] = ns_init_efficiency_threshold
-            if ns_max_likelihood_evals is not None:
-                ns_kwargs["max_likelihood_evals"] = ns_max_likelihood_evals
-            if ns_efficiency_threshold is not None:
-                ns_kwargs["efficiency_threshold"] = ns_efficiency_threshold
+            if inference.ns_num_live_points is not None:
+                ns_kwargs["num_live_points"] = inference.ns_num_live_points
+            if inference.ns_max_samples is not None:
+                ns_kwargs["max_samples"] = inference.ns_max_samples
+            if inference.ns_dlogz is not None:
+                ns_kwargs["dlogz"] = inference.ns_dlogz
+            if inference.ns_resamples is not None:
+                ns_kwargs["num_resamples"] = inference.ns_resamples
+            ns_kwargs["difficult_model"] = bool(inference.ns_difficult_model)
+            ns_kwargs["parameter_estimation"] = bool(inference.ns_parameter_estimation)
+            if inference.ns_num_parallel_workers is not None:
+                ns_kwargs["num_parallel_workers"] = inference.ns_num_parallel_workers
+            if inference.ns_init_efficiency_threshold is not None:
+                ns_kwargs["init_efficiency_threshold"] = inference.ns_init_efficiency_threshold
+            if inference.ns_max_likelihood_evals is not None:
+                ns_kwargs["max_likelihood_evals"] = inference.ns_max_likelihood_evals
+            if inference.ns_efficiency_threshold is not None:
+                ns_kwargs["efficiency_threshold"] = inference.ns_efficiency_threshold
             fit_output = self.fit_ns(**ns_kwargs)
         else:
             raise ValueError("method must be one of: 'optax+nuts', 'optax', 'nuts', 'ns'")
@@ -488,16 +408,17 @@ class JAXSEDFit:
         saved_result_path = None
         saved_fig_path = None
         fig = None
-        if save_result:
-            if result_path is None:
+        if output.save_result:
+            if output.result_path is None:
                 saved_result_path = self.save(output_dir)
             else:
-                saved_result_path = self.save(result_path)
-        if plot_fig or save_fig:
-            if fig_path is None and save_fig:
+                saved_result_path = self.save(output.result_path)
+        if output.plot_fig or output.save_fig:
+            fig_path = Path(output.fig_path) if output.fig_path is not None else None
+            if fig_path is None and output.save_fig:
                 fig_path = output_dir / f"{self.config.observation.object_id}_sed.png"
-            fig = self.plot_sed(output_path=fig_path if save_fig else None, show=plot_fig)
-            if save_fig:
+            fig = self.plot_sed(output_path=fig_path if output.save_fig else None, show=output.plot_fig or output.show_plot)
+            if output.save_fig:
                 saved_fig_path = Path(fig_path) if fig_path is not None else None
 
         # Lightweight test doubles may call fit() on a partially constructed object
@@ -541,13 +462,16 @@ class JAXSEDFit:
         steps: int | None = None,
         learning_rate: float | None = None,
         progress_bar: bool = True,
-        staged: bool = True,
+        staged: bool | None = None,
         staged_steps: int | None = None,
     ):
         """Run the Optax/NumPyro MAP optimization path."""
         self._reset_fit_state()
         steps = int(self.config.inference.map_steps if steps is None else steps)
         learning_rate = float(self.config.inference.learning_rate if learning_rate is None else learning_rate)
+        staged = bool(self.config.inference.staged_map if staged is None else staged)
+        if staged_steps is None:
+            staged_steps = self.config.inference.staged_steps
         stage1_result = None
         stage1_median = None
         init_values = None
@@ -592,6 +516,8 @@ class JAXSEDFit:
         num_samples: int | None = None,
         num_chains: int | None = None,
         target_accept_prob: float | None = None,
+        dense_mass: bool | None = None,
+        max_tree_depth: int | None = None,
         use_map_init: bool = True,
         progress_bar: bool = True,
     ):
@@ -604,10 +530,18 @@ class JAXSEDFit:
         num_samples = int(self.config.inference.num_samples if num_samples is None else num_samples)
         num_chains = int(self.config.inference.num_chains if num_chains is None else num_chains)
         target_accept_prob = float(self.config.inference.target_accept_prob if target_accept_prob is None else target_accept_prob)
+        dense_mass = bool(self.config.inference.dense_mass if dense_mass is None else dense_mass)
+        max_tree_depth = int(self.config.inference.max_tree_depth if max_tree_depth is None else max_tree_depth)
         init_values = None
         if self.map_result is not None:
             init_values = {k: np.asarray(v) for k, v in self.map_result["median"].items() if np.ndim(v) != 0 or np.isfinite(v)}
-        kernel = NUTS(self._model, init_strategy=init_to_value(values=init_values) if init_values else None, target_accept_prob=target_accept_prob, dense_mass=False, max_tree_depth=8)
+        kernel = NUTS(
+            self._model,
+            init_strategy=init_to_value(values=init_values) if init_values else None,
+            target_accept_prob=target_accept_prob,
+            dense_mass=dense_mass,
+            max_tree_depth=max_tree_depth,
+        )
         mcmc = MCMC(kernel, num_warmup=num_warmup, num_samples=num_samples, num_chains=num_chains, progress_bar=progress_bar, jit_model_args=False)
         rng_key = jax.random.PRNGKey(self.config.inference.seed + 1)
         mcmc.run(rng_key)
@@ -656,6 +590,27 @@ class JAXSEDFit:
             efficiency_threshold = ns_efficiency_threshold
         if ns_resamples is not None and num_resamples is None:
             num_resamples = ns_resamples
+        inference = self.config.inference
+        if num_live_points is None:
+            num_live_points = inference.ns_num_live_points
+        if max_samples is None:
+            max_samples = inference.ns_max_samples
+        if dlogz is None:
+            dlogz = inference.ns_dlogz
+        if num_resamples is None:
+            num_resamples = inference.ns_resamples
+        if difficult_model is None:
+            difficult_model = inference.ns_difficult_model
+        if parameter_estimation is None:
+            parameter_estimation = inference.ns_parameter_estimation
+        if num_parallel_workers is None:
+            num_parallel_workers = inference.ns_num_parallel_workers
+        if init_efficiency_threshold is None:
+            init_efficiency_threshold = inference.ns_init_efficiency_threshold
+        if max_likelihood_evals is None:
+            max_likelihood_evals = inference.ns_max_likelihood_evals
+        if efficiency_threshold is None:
+            efficiency_threshold = inference.ns_efficiency_threshold
 
         constructor_kwargs: dict[str, Any] = {"verbose": bool(progress_bar)}
         if num_live_points is not None:

@@ -15,8 +15,7 @@ modeled separately:
 
    curl -L -o tempdata.h5 https://portal.nersc.gov/project/hacc/aphearin/DSPS_data/ssp_data_continuum_fsps_v3.2_lgmet_age.h5
 
-Pass the template path through ``cfg.galaxy.dsps_ssp_fn`` or directly to
-``JAXSEDFit.fit(..., dsps_ssp_fn="tempdata.h5")``.
+Pass the template path through ``cfg.galaxy.dsps_ssp_fn``.
 
 Milky Way dereddening requires ``dustmaps`` to be configured with local SFD
 maps:

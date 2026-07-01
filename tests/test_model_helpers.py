@@ -1,6 +1,7 @@
 import numpy as np
 import pytest
 import jax
+import numpyro.distributions as dist
 from types import SimpleNamespace
 from numpyro.handlers import seed, substitute, trace
 
@@ -20,7 +21,6 @@ from jaxsedfit.config import (
     PhotometryData,
     PriorConfig,
     RedshiftPriorConfig,
-    StellarMassPriorConfig,
     MassMetallicityPriorConfig,
     SpectroscopyConfig,
     SpectroscopyData,
@@ -126,15 +126,16 @@ def test_public_model_names_delegate_to_legacy_implementations(monkeypatch):
 def test_prior_config_object_exposes_flat_mapping():
     prior = PriorConfig(
         redshift=RedshiftPriorConfig(z_grid=[0.1, 0.2, 0.3], pdf=[0.2, 0.6, 0.2]),
-        stellar_mass=StellarMassPriorConfig(dist="uniform", low=8.0, high=12.0),
+        stellar_mass=dist.Uniform(8.0, 12.0),
         mass_metallicity=MassMetallicityPriorConfig(configured=True, enabled=False),
     )
-    prior["log_agn_amp"] = {"loc": 44.0, "scale": 1.0}
+    prior.agn.log_amp = dist.Normal(44.0, 1.0)
+    mapping = prior.to_mapping()
 
-    assert "redshift_pdf" in prior
-    assert prior["log_stellar_mass"]["dist"] == "uniform"
-    assert prior["mass_metallicity_relation"]["enabled"] is False
-    assert prior.get("log_agn_amp") == {"loc": 44.0, "scale": 1.0}
+    assert "redshift_pdf" in mapping
+    assert mapping["log_stellar_mass"]["dist"] == "uniform"
+    assert mapping["mass_metallicity_relation"]["enabled"] is False
+    assert mapping["log_agn_amp"] == {"dist": "Normal", "loc": 44.0, "scale": 1.0}
 
 
 def test_agn_disk_is_normalized_at_5100_angstrom():
@@ -1002,7 +1003,7 @@ def test_jaxqsofit_spectrum_resolution_host_basis_uses_host_kinematics(monkeypat
             ),
         ),
         inference=InferenceConfig(map_steps=2),
-        prior_config={"log_stellar_mass": {"dist": "uniform", "low": 8.0, "high": 8.0}},
+        prior_config=PriorConfig(stellar_mass={"dist": "uniform", "low": 8.0, "high": 8.0}),
     )
     context = build_model_context(cfg)
 
@@ -1397,12 +1398,12 @@ def test_config_rejects_invalid_redshift_pdf():
         agn=AGNConfig(),
         likelihood=LikelihoodConfig(),
         inference=InferenceConfig(map_steps=2),
-        prior_config={
-            "redshift_pdf": {
-                "z_grid": [0.3, 0.2, 0.4],
-                "pdf": [0.2, 0.5, 0.3],
-            }
-        },
+        prior_config=PriorConfig(
+            redshift=RedshiftPriorConfig(
+                z_grid=[0.3, 0.2, 0.4],
+                pdf=[0.2, 0.5, 0.3],
+            )
+        ),
     )
     with pytest.raises(ValueError, match="strictly increasing"):
         cfg.validate()
