@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import inspect
 import json
 import os
 import platform
@@ -124,6 +125,22 @@ def _load_fairall9_payload() -> tuple[float, list[dict[str, object]]]:
     raise RuntimeError(f"Could not extract Fairall 9 photometry from {notebook_path}")
 
 
+def _benchmark_prior_config():
+    """Return priors compatible with both base and head benchmark installs."""
+    flat_prior = {
+        "log_stellar_mass": {"loc": 10.5, "scale": 1.0},
+        "ebv_gal": {"scale": 0.15},
+        "ebv_agn": {"scale": 0.15},
+    }
+    if "host" not in inspect.signature(PriorConfig).parameters:
+        return flat_prior
+    return PriorConfig(
+        stellar_mass=flat_prior["log_stellar_mass"],
+        host={"ebv_gal": flat_prior["ebv_gal"]},
+        agn={"ebv_agn": flat_prior["ebv_agn"]},
+    )
+
+
 def build_fairall9_fixedz_config(dsps_ssp_fn: str | Path) -> FitConfig:
     """Build the representative fixed-z photometric benchmark config."""
     dsps_ssp_fn = Path(dsps_ssp_fn).expanduser()
@@ -157,11 +174,7 @@ def build_fairall9_fixedz_config(dsps_ssp_fn: str | Path) -> FitConfig:
             num_chains=1,
             seed=0,
         ),
-        prior_config=PriorConfig(
-            stellar_mass={"loc": 10.5, "scale": 1.0},
-            host={"ebv_gal": {"scale": 0.15}},
-            agn={"ebv_agn": {"scale": 0.15}},
-        ),
+        prior_config=_benchmark_prior_config(),
     )
 
 
