@@ -1,4 +1,5 @@
 import numpy as np
+import numpyro.distributions as dist
 from numpyro.handlers import seed, trace
 
 from jaxsedfit.config import (
@@ -11,8 +12,11 @@ from jaxsedfit.config import (
     GalaxyConfig,
     InferenceConfig,
     LikelihoodConfig,
+    MassMetallicityPriorConfig,
     Observation,
+    OutputConfig,
     PhotometryData,
+    RedshiftPriorConfig,
 )
 from jaxsedfit.core import JAXSEDFit
 from jaxsedfit.model import _default_gal_lgmet_loc, _mass_metallicity_relation_logprior, _luminosity_distance_m_jax, grahsp_photometric_model
@@ -172,13 +176,14 @@ def test_optional_mass_metallicity_prior_is_exposed(monkeypatch):
     monkeypatch.setattr("jaxsedfit.preload._SSP_DATA_CACHE", {})
     cfg = _mock_config()
     cfg.galaxy.dsps_ssp_fn = "fake-diffstar.h5"
-    cfg.prior_config["mass_metallicity_relation"] = {
-        "enabled": True,
-        "pivot_mass": 10.0,
-        "pivot_logzsol": -0.2,
-        "slope": 0.3,
-        "scale": 0.2,
-    }
+    cfg.prior_config.mass_metallicity = MassMetallicityPriorConfig(
+        configured=True,
+        enabled=True,
+        pivot_mass=10.0,
+        pivot_logzsol=-0.2,
+        slope=0.3,
+        scale=0.2,
+    )
     context = build_model_context(cfg)
     tr = trace(seed(lambda: grahsp_photometric_model(context, include_components=True), 0)).get_trace()
 
@@ -240,7 +245,7 @@ def test_mass_metallicity_prior_can_be_disabled(monkeypatch):
     monkeypatch.setattr("jaxsedfit.preload._SSP_DATA_CACHE", {})
     cfg = _mock_config()
     cfg.galaxy.dsps_ssp_fn = "fake-diffstar.h5"
-    cfg.prior_config["mass_metallicity_relation"] = {"enabled": False}
+    cfg.prior_config.mass_metallicity = MassMetallicityPriorConfig(configured=True, enabled=False)
     context = build_model_context(cfg)
     tr = trace(seed(lambda: grahsp_photometric_model(context, include_components=True), 0)).get_trace()
 
@@ -260,7 +265,7 @@ def test_uniform_log_stellar_mass_prior_is_supported(monkeypatch):
     monkeypatch.setattr("jaxsedfit.preload._SSP_DATA_CACHE", {})
     cfg = _mock_config()
     cfg.galaxy.dsps_ssp_fn = "fake-diffstar.h5"
-    cfg.prior_config["log_stellar_mass"] = {"dist": "uniform", "low": 6.0, "high": 8.0}
+    cfg.prior_config.stellar_mass = dist.Uniform(6.0, 8.0)
     context = build_model_context(cfg)
     tr = trace(seed(lambda: grahsp_photometric_model(context, include_components=True), 0)).get_trace()
 
@@ -280,10 +285,10 @@ def test_tabulated_redshift_pdf_prior_is_supported(monkeypatch):
     cfg = _mock_config()
     cfg.galaxy.dsps_ssp_fn = "fake-diffstar.h5"
     cfg.observation.redshift_mode = "fit"
-    cfg.prior_config["redshift_pdf"] = {
-        "z_grid": [0.05, 0.1, 0.2, 0.4],
-        "pdf": [0.0, 1.0, 3.0, 0.0],
-    }
+    cfg.prior_config.redshift = RedshiftPriorConfig(
+        z_grid=[0.05, 0.1, 0.2, 0.4],
+        pdf=[0.0, 1.0, 3.0, 0.0],
+    )
     context = build_model_context(cfg)
     tr = trace(seed(lambda: grahsp_photometric_model(context), 0)).get_trace()
 
@@ -354,9 +359,15 @@ def test_fit_dispatch_methods(monkeypatch):
     monkeypatch.setattr(JAXSEDFit, "fit_map", _fit_map)
     monkeypatch.setattr(JAXSEDFit, "fit_nuts", _fit_nuts)
     monkeypatch.setattr(JAXSEDFit, "fit_ns", _fit_ns)
-    fitter.config = type("_Cfg", (), {"inference": InferenceConfig(method="optax+nuts")})()
+    fitter.config = type("_Cfg", (), {"inference": InferenceConfig(method="optax+nuts"), "output": OutputConfig()})()
+    fitter.config.inference.map_steps = 7
+    fitter.config.inference.learning_rate = 1e-2
+    fitter.config.inference.num_warmup = 3
+    fitter.config.inference.num_samples = 4
+    fitter.config.inference.dense_mass = True
+    fitter.config.inference.max_tree_depth = 10
 
-    out = JAXSEDFit.fit(fitter, progress_bar=True, steps=7, learning_rate=1e-2, num_warmup=3, num_samples=4)
+    out = JAXSEDFit.fit(fitter, progress_bar=True)
     assert isinstance(out, FitResult)
     assert out.method == "optax+nuts"
     assert calls[0][0] == "optax"
@@ -366,45 +377,62 @@ def test_fit_dispatch_methods(monkeypatch):
     assert calls[1][0] == "nuts"
     assert calls[1][1]["num_warmup"] == 3
     assert calls[1][1]["num_samples"] == 4
+    assert calls[1][1]["dense_mass"] is True
+    assert calls[1][1]["max_tree_depth"] == 10
+    assert calls[1][1]["use_map_init"] is True
     assert calls[1][1]["progress_bar"] is True
 
     calls.clear()
     fitter.config.inference.method = "optax"
-    out = JAXSEDFit.fit(fitter, progress_bar=False, steps=2)
+    fitter.config.inference.map_steps = 2
+    out = JAXSEDFit.fit(fitter, progress_bar=False)
     assert isinstance(out, FitResult)
     assert out.method == "optax"
-    assert calls == [("optax", {"steps": 2, "progress_bar": False, "staged": True})]
+    assert calls == [("optax", {"steps": 2, "learning_rate": 1e-2, "progress_bar": False, "staged": True})]
 
     calls.clear()
     fitter.config.inference.method = "optax"
-    out = JAXSEDFit.fit(fitter, progress_bar=False, steps=2, staged_map=False)
+    fitter.config.inference.staged_map = False
+    out = JAXSEDFit.fit(fitter, progress_bar=False)
     assert isinstance(out, FitResult)
     assert out.method == "optax"
-    assert calls == [("optax", {"steps": 2, "progress_bar": False, "staged": False})]
+    assert calls == [("optax", {"steps": 2, "learning_rate": 1e-2, "progress_bar": False, "staged": False})]
 
     calls.clear()
     fitter.config.inference.method = "nuts"
-    out = JAXSEDFit.fit(fitter, progress_bar=False, num_warmup=2)
+    fitter.config.inference.num_warmup = 2
+    out = JAXSEDFit.fit(fitter, progress_bar=False)
     assert isinstance(out, FitResult)
     assert out.method == "nuts"
-    assert calls == [("nuts", {"num_warmup": 2, "progress_bar": False})]
+    assert calls == [
+        (
+            "nuts",
+            {
+                "num_warmup": 2,
+                "num_samples": 4,
+                "num_chains": 1,
+                "target_accept_prob": 0.85,
+                "dense_mass": True,
+                "max_tree_depth": 10,
+                "use_map_init": True,
+                "progress_bar": False,
+            },
+        )
+    ]
 
     calls.clear()
     fitter.config.inference.method = "ns"
-    out = JAXSEDFit.fit(
-        fitter,
-        progress_bar=False,
-        ns_live_points=25,
-        ns_max_samples=200,
-        ns_dlogz=0.1,
-        ns_resamples=30,
-        ns_difficult_model=True,
-        ns_parameter_estimation=True,
-        ns_num_parallel_workers=3,
-        ns_init_efficiency_threshold=0.2,
-        ns_max_likelihood_evals=5000,
-        ns_efficiency_threshold=0.001,
-    )
+    fitter.config.inference.ns_num_live_points = 25
+    fitter.config.inference.ns_max_samples = 200
+    fitter.config.inference.ns_dlogz = 0.1
+    fitter.config.inference.ns_resamples = 30
+    fitter.config.inference.ns_difficult_model = True
+    fitter.config.inference.ns_parameter_estimation = True
+    fitter.config.inference.ns_num_parallel_workers = 3
+    fitter.config.inference.ns_init_efficiency_threshold = 0.2
+    fitter.config.inference.ns_max_likelihood_evals = 5000
+    fitter.config.inference.ns_efficiency_threshold = 0.001
+    out = JAXSEDFit.fit(fitter, progress_bar=False)
     assert isinstance(out, FitResult)
     assert out.method == "ns"
     assert calls == [
@@ -425,6 +453,53 @@ def test_fit_dispatch_methods(monkeypatch):
             },
         )
     ]
+
+
+def test_fit_nuts_reads_sampler_settings_from_config(monkeypatch):
+    captured = {}
+
+    def _fake_nuts(model, **kwargs):
+        captured["kernel_kwargs"] = kwargs
+        return "kernel"
+
+    class _FakeMCMC:
+        def __init__(self, kernel, **kwargs):
+            captured["mcmc_kernel"] = kernel
+            captured["mcmc_kwargs"] = kwargs
+
+        def run(self, rng_key):
+            captured["rng_key"] = rng_key
+
+        def get_samples(self):
+            return {"log_stellar_mass": np.array([10.0, 10.2])}
+
+    monkeypatch.setitem(JAXSEDFit.fit_nuts.__globals__, "NUTS", _fake_nuts)
+    monkeypatch.setitem(JAXSEDFit.fit_nuts.__globals__, "MCMC", _FakeMCMC)
+
+    fitter = JAXSEDFit.__new__(JAXSEDFit)
+    fitter.config = _mock_config()
+    fitter.config.inference.num_warmup = 11
+    fitter.config.inference.num_samples = 12
+    fitter.config.inference.num_chains = 2
+    fitter.config.inference.target_accept_prob = 0.9
+    fitter.config.inference.dense_mass = True
+    fitter.config.inference.max_tree_depth = 10
+    fitter.map_result = None
+    fitter.predictive = {"stale": True}
+    fitter._model = lambda: None
+
+    result = JAXSEDFit.fit_nuts(fitter, use_map_init=False, progress_bar=False)
+
+    assert isinstance(result, FitResult)
+    assert captured["kernel_kwargs"]["target_accept_prob"] == 0.9
+    assert captured["kernel_kwargs"]["dense_mass"] is True
+    assert captured["kernel_kwargs"]["max_tree_depth"] == 10
+    assert captured["mcmc_kernel"] == "kernel"
+    assert captured["mcmc_kwargs"]["num_warmup"] == 11
+    assert captured["mcmc_kwargs"]["num_samples"] == 12
+    assert captured["mcmc_kwargs"]["num_chains"] == 2
+    assert captured["mcmc_kwargs"]["progress_bar"] is False
+    assert fitter.predictive is None
 
 
 def test_fit_ns_populates_samples(monkeypatch):
@@ -488,6 +563,54 @@ def test_fit_ns_populates_samples(monkeypatch):
     assert fitter.ns_result["num_resamples"] == 7
     assert set(fitter.samples) == {"log_stellar_mass", "host_age_weights", "host_lgmet_weights"}
     assert fitter.samples["log_stellar_mass"].shape == (7,)
+    assert fitter.predictive is None
+
+
+def test_fit_ns_reads_sampler_settings_from_config(monkeypatch):
+    class _FakeNestedSampler:
+        def __init__(self, model, *, constructor_kwargs=None, termination_kwargs=None):
+            self.model = model
+            self.constructor_kwargs = constructor_kwargs or {}
+            self.termination_kwargs = termination_kwargs or {}
+            self._results = {"status": "ok"}
+
+        def run(self, rng_key, *args, **kwargs):
+            return None
+
+        def get_samples(self, rng_key, num_samples, *, group_by_chain=False):
+            assert num_samples == 9
+            return {"log_stellar_mass": np.linspace(10.0, 10.4, num_samples)}
+
+    monkeypatch.setitem(JAXSEDFit.fit_ns.__globals__, "_get_nested_sampler_cls", lambda: _FakeNestedSampler)
+
+    fitter = JAXSEDFit.__new__(JAXSEDFit)
+    fitter.config = _mock_config()
+    fitter.config.inference.ns_num_live_points = 21
+    fitter.config.inference.ns_max_samples = 321
+    fitter.config.inference.ns_dlogz = 0.07
+    fitter.config.inference.ns_resamples = 9
+    fitter.config.inference.ns_difficult_model = True
+    fitter.config.inference.ns_parameter_estimation = True
+    fitter.config.inference.ns_num_parallel_workers = 3
+    fitter.config.inference.ns_init_efficiency_threshold = 0.2
+    fitter.config.inference.ns_max_likelihood_evals = 2000
+    fitter.config.inference.ns_efficiency_threshold = 0.02
+    fitter.predictive = {"stale": True}
+    fitter._model = lambda: None
+
+    result = JAXSEDFit.fit_ns(fitter, progress_bar=False)
+
+    assert isinstance(result, FitResult)
+    assert fitter.ns_result["constructor_kwargs"]["num_live_points"] == 21
+    assert fitter.ns_result["constructor_kwargs"]["max_samples"] == 321
+    assert fitter.ns_result["constructor_kwargs"]["difficult_model"] is True
+    assert fitter.ns_result["constructor_kwargs"]["parameter_estimation"] is True
+    assert fitter.ns_result["constructor_kwargs"]["num_parallel_workers"] == 3
+    assert fitter.ns_result["constructor_kwargs"]["init_efficiency_threshold"] == 0.2
+    assert fitter.ns_result["termination_kwargs"]["dlogZ"] == 0.07
+    assert fitter.ns_result["termination_kwargs"]["max_num_likelihood_evaluations"] == 2000
+    assert fitter.ns_result["termination_kwargs"]["efficiency_threshold"] == 0.02
+    assert fitter.ns_result["num_resamples"] == 9
     assert fitter.predictive is None
 
 

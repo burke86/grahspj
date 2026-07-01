@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import numpy as np
+import numpyro.distributions as dist
 import pytest
 
 from jaxsedfit.benchmark import (
@@ -98,9 +99,10 @@ def test_build_chimera_fit_config(tmp_path):
     assert cfg.observation.object_id == row["id"]
     assert cfg.photometry.filter_names[0] == "u_sdss"
     assert cfg.galaxy.dsps_ssp_fn == str(ssp_path)
-    assert "log_stellar_mass" in cfg.prior_config
-    assert cfg.prior_config["log_stellar_mass"]["dist"] == "student_t"
-    assert cfg.prior_config["log_stellar_mass"]["loc"] == 10.0
+    prior = cfg.prior_config.to_mapping()
+    assert "log_stellar_mass" in prior
+    assert prior["log_stellar_mass"]["dist"] == "student_t"
+    assert prior["log_stellar_mass"]["loc"] == 10.0
 
 
 def test_build_chimera_fit_config_preserves_user_prior_overrides(tmp_path):
@@ -109,9 +111,9 @@ def test_build_chimera_fit_config_preserves_user_prior_overrides(tmp_path):
     ssp_path = tmp_path / "fake.h5"
     ssp_path.write_bytes(b"")
     base = build_chimera_fit_config(row, dsps_ssp_fn=str(ssp_path))
-    base.prior_config["log_stellar_mass"] = {"loc": 9.9, "scale": 0.1}
+    base.prior_config.stellar_mass = dist.Normal(9.9, 0.1)
     cfg = build_chimera_fit_config(row, dsps_ssp_fn=str(ssp_path), base_config=base)
-    assert cfg.prior_config["log_stellar_mass"] == {"loc": 9.9, "scale": 0.1}
+    assert cfg.prior_config.to_mapping()["log_stellar_mass"] == {"dist": "Normal", "loc": 9.9, "scale": 0.1}
 
 
 def test_chimera_mass_benchmark_with_surrogate_fitter(tmp_path):
