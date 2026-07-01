@@ -25,7 +25,7 @@ from diffstar.defaults import FB as DIFFSTAR_FB
 from diffstar.defaults import LGT0 as DIFFSTAR_LGT0
 from dsps.sed.ssp_weights import calc_ssp_weights_sfh_table_lognormal_mdf
 
-from jaxsedfit.config import AGNConfig, FilterSet, FitConfig, GalaxyConfig, InferenceConfig, LikelihoodConfig, Observation, PhotometryData
+from jaxsedfit.config import AGNConfig, FilterSet, FitConfig, GalaxyConfig, InferenceConfig, LikelihoodConfig, Observation, PhotometryData, PriorConfig
 from jaxsedfit.core import JAXSEDFit
 from jaxsedfit.filters import load_filter_curves
 from jaxsedfit.model import (
@@ -157,11 +157,11 @@ def build_fairall9_fixedz_config(dsps_ssp_fn: str | Path) -> FitConfig:
             num_chains=1,
             seed=0,
         ),
-        prior_config={
-            "log_stellar_mass": {"loc": 10.5, "scale": 1.0},
-            "ebv_gal": {"scale": 0.15},
-            "ebv_agn": {"scale": 0.15},
-        },
+        prior_config=PriorConfig(
+            stellar_mass={"loc": 10.5, "scale": 1.0},
+            host={"ebv_gal": {"scale": 0.15}},
+            agn={"ebv_agn": {"scale": 0.15}},
+        ),
     )
 
 
