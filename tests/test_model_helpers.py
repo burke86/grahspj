@@ -58,6 +58,7 @@ from jaxsedfit.model import (
     photometric_log_likelihood,
     photometric_loglike,
     sed_numpyro_model,
+    spectroscopic_likelihood_weight,
     spectroscopic_log_likelihood,
 )
 from jaxsedfit.preload import _build_fixed_igm_jax, _build_igm_cache_jax, build_model_context
@@ -130,12 +131,25 @@ def test_prior_config_object_exposes_flat_mapping():
         mass_metallicity=MassMetallicityPriorConfig(configured=True, enabled=False),
     )
     prior.agn.log_amp = dist.Normal(44.0, 1.0)
+    prior.agn.log_broad_line_width_kms = dist.TruncatedNormal(
+        np.log(3000.0),
+        0.4,
+        low=np.log(1000.0),
+        high=np.log(15000.0),
+    )
     mapping = prior.to_mapping()
 
     assert "redshift_pdf" in mapping
     assert mapping["log_stellar_mass"]["dist"] == "uniform"
     assert mapping["mass_metallicity_relation"]["enabled"] is False
     assert mapping["log_agn_amp"] == {"dist": "Normal", "loc": 44.0, "scale": 1.0}
+    assert mapping["log_broad_line_width_kms"] == {
+        "dist": "TruncatedNormal",
+        "loc": pytest.approx(np.log(3000.0)),
+        "scale": 0.4,
+        "low": pytest.approx(np.log(1000.0)),
+        "high": pytest.approx(np.log(15000.0)),
+    }
 
 
 def test_agn_disk_is_normalized_at_5100_angstrom():
@@ -548,6 +562,25 @@ def test_lyman_break_uncertainty_threshold_uses_angstroms():
     assert logl_with_uncertainty > -100.0
 
 
+def test_spectroscopic_likelihood_weight_uses_resolution_elements():
+    wave = np.arange(5000.0, 5010.0, 1.0)
+    mask = np.ones_like(wave, dtype=bool)
+    spectrum_index = np.zeros_like(wave, dtype=int)
+
+    weight = float(
+        spectroscopic_likelihood_weight(
+            wave,
+            mask,
+            spectrum_index,
+            likelihood_weight_mode="resolution_elements",
+            resolving_power=2000.0,
+        )
+    )
+
+    assert weight == pytest.approx(0.36, rel=1.0e-2)
+    assert float(spectroscopic_likelihood_weight(wave, mask, spectrum_index, "pixels", 2000.0)) == 1.0
+
+
 def test_filter_projection_flat_flambda_to_mjy_units():
     packed = PackedFiltersJax(
         interp_indices=np.asarray([[0, 1, 2]], dtype=np.int32),
@@ -871,6 +904,22 @@ def test_fit_config_mapping_coerces_balmer_continuum_gate():
     assert cfg.agn.balmer_continuum_default == 0.2
 
 
+def test_fit_config_mapping_preserves_agn_line_width_defaults():
+    cfg = fit_config_from_mapping(
+        {
+            "observation": {"object_id": "obj", "redshift": 0.1},
+            "photometry": {"filter_names": ["f1"], "fluxes": [1.0], "errors": [0.1]},
+            "agn": {
+                "broad_line_width_kms_default": 4000.0,
+                "narrow_line_width_kms_default": 400.0,
+            },
+        }
+    )
+
+    assert cfg.agn.broad_line_width_kms_default == 4000.0
+    assert cfg.agn.narrow_line_width_kms_default == 400.0
+
+
 def test_jaxqsofit_joint_backend_builds_flux_scaled_smart_priors(monkeypatch):
     pytest.importorskip("jaxqsofit.defaults")
 
@@ -907,6 +956,8 @@ def test_jaxqsofit_joint_backend_builds_flux_scaled_smart_priors(monkeypatch):
 
     prior = context.jaxqsofit_prior_config
     assert prior is not None
+    if hasattr(prior, "to_mapping"):
+        prior = prior.to_mapping()
     assert prior["log_cont_norm"]["loc"] == pytest.approx(np.log(3.0))
     line_table = prior["line"]["table"]
     assert line_table
@@ -1149,8 +1200,10 @@ def test_jaxsedfit_model_can_call_jaxqsofit_backend(monkeypatch):
         "hot_lam": np.array(2.0),
         "hot_width": np.array(0.5),
         "log_hot_fcov": np.array(np.log(0.1)),
-        "lines_strength": np.array(1.0),
-        "line_width_kms": np.array(3000.0),
+        "broad_lines_strength": np.array(1.0),
+        "narrow_lines_strength": np.array(1.0),
+        "log_broad_line_width_kms": np.array(np.log(3000.0)),
+        "log_narrow_line_width_kms": np.array(np.log(500.0)),
         "feii_norm": np.array(1.0),
         "feii_fwhm": np.array(3000.0),
         "feii_shift": np.array(0.0),
@@ -1228,8 +1281,10 @@ def test_jaxsedfit_jaxqsofit_backend_uses_nested_tied_line_config(monkeypatch):
         "hot_lam": np.array(2.0),
         "hot_width": np.array(0.5),
         "log_hot_fcov": np.array(np.log(0.1)),
-        "lines_strength": np.array(1.0),
-        "line_width_kms": np.array(3000.0),
+        "broad_lines_strength": np.array(1.0),
+        "narrow_lines_strength": np.array(1.0),
+        "log_broad_line_width_kms": np.array(np.log(3000.0)),
+        "log_narrow_line_width_kms": np.array(np.log(500.0)),
         "feii_norm": np.array(1.0),
         "feii_fwhm": np.array(3000.0),
         "feii_shift": np.array(0.0),
@@ -1244,6 +1299,12 @@ def test_jaxsedfit_jaxqsofit_backend_uses_nested_tied_line_config(monkeypatch):
     assert "jqf_line_sig_group" in tr
     assert "jqf_line_amp_group" in tr
     assert "jqf_line_model_broad" in tr
+    assert "jqf_broad_to_sed_broad_line_prior" in tr
+    assert "jqf_narrow_to_sed_narrow_line_prior" in tr
+    assert "jqf_broad_line_flux_proxy" in tr
+    assert "sed_broad_line_flux_proxy" in tr
+    assert "jqf_narrow_line_flux_proxy" in tr
+    assert "sed_narrow_line_flux_proxy" in tr
     assert np.asarray(tr["pred_spectrum_fluxes"]["value"]).shape == (3,)
 
 
@@ -1375,7 +1436,8 @@ def test_plot_jaxqsofit_spectrum_adapts_joint_predictive(monkeypatch):
     assert np.all(captured["line"] > 0.0)
     assert "jaxsedfit_torus" in captured["custom_components"]
     assert "jaxsedfit_host_dust" in captured["custom_components"]
-    assert "jaxsedfit_sed_lines" in captured["custom_components"]
+    assert "jaxsedfit_sed_lines" not in captured["custom_components"]
+    assert "jaxsedfit_nebular_lines" not in captured["custom_components"]
     assert "total_model" in captured["pred_bands"]
     assert "host" in captured["pred_bands"]
     assert "PL" in captured["pred_bands"]
@@ -1384,9 +1446,15 @@ def test_plot_jaxqsofit_spectrum_adapts_joint_predictive(monkeypatch):
     assert lo.shape == captured["wave"].shape
     assert hi.shape == captured["wave"].shape
     assert np.all(hi >= lo)
-    assert np.nanmax(captured["custom_components"]["jaxsedfit_sed_lines"]) > 0.0
     assert captured["kwargs"]["show_plot"] is False
     assert captured["kwargs"]["plot_residual"] is False
+
+    fig = fitter.plot_jaxqsofit_spectrum(show_plot=False, plot_residual=False, show_nebular_lines=True)
+    assert fig == "fig"
+    assert "jaxsedfit_nebular_lines" in captured["custom_components"]
+    assert "jaxsedfit_sed_lines" not in captured["custom_components"]
+    assert np.nanmax(captured["custom_components"]["jaxsedfit_nebular_lines"]) > 0.0
+    assert "jaxsedfit_nebular_lines" in captured["pred_bands"]
 
 
 def test_config_rejects_invalid_redshift_pdf():

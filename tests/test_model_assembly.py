@@ -11,11 +11,14 @@ from jaxsedfit.config import (
     FitConfig,
     GalaxyConfig,
     InferenceConfig,
+    JaxQSOFitConfig,
     LikelihoodConfig,
     NebularConfig,
     Observation,
     PhotometryData,
     PriorConfig,
+    SpectroscopyConfig,
+    SpectroscopyData,
 )
 from jaxsedfit.model import GRAHSP_PL_BEND_LOC_A, GRAHSP_PL_BEND_WIDTH, GRAHSP_PL_CUTOFF_A, _project_filters, _redshift_to_obs, evaluate_photometric_state, grahsp_photometric_model
 from jaxsedfit.preload import build_model_context
@@ -42,10 +45,17 @@ def _cfg(
     fit_balmer_continuum=False,
     rest_wave_max=3.0e6,
     n_wave=512,
+    spectroscopy_enabled=False,
+    aperture_diameter_arcsec=None,
 ):
     return FitConfig(
         observation=Observation(object_id="assembly", redshift=0.05),
-        photometry=PhotometryData(filter_names=["f1"], fluxes=[1.0], errors=[0.1]),
+        photometry=PhotometryData(
+            filter_names=["f1"],
+            fluxes=[1.0],
+            errors=[0.1],
+            aperture_diameter_arcsec=aperture_diameter_arcsec,
+        ),
         filters=FilterSet(
             curves=[FilterCurve(name="f1", wave=[1500.0, 2000.0, 2500.0], transmission=[0.0, 1.0, 0.0])],
         ),
@@ -79,6 +89,16 @@ def _cfg(
             use_absolute_flux_scale_prior=False,
             use_host_capture_model=False,
         ),
+        spectroscopy=(
+            SpectroscopyData(
+                wave_obs=[1200.0, 1500.0, 1800.0],
+                fluxes=[1.0, 1.0, 1.0],
+                errors=[0.1, 0.1, 0.1],
+            )
+            if spectroscopy_enabled
+            else None
+        ),
+        spectroscopy_config=SpectroscopyConfig(enabled=spectroscopy_enabled),
         nebular=NebularConfig(enabled=True, f_esc=0.0, f_dust=0.2, zgas=0.02, lines_width=300.0),
         inference=InferenceConfig(map_steps=2),
         prior_config=PriorConfig(stellar_mass={"dist": "uniform", "low": 8.0, "high": 8.0}),
@@ -105,6 +125,13 @@ def _log_positive(value):
     return np.array(np.log(max(float(value), 1.0e-12)))
 
 
+def _weighted_std(x, weight):
+    weight = np.clip(np.asarray(weight, dtype=float), 0.0, None)
+    mean = np.sum(x * weight) / np.maximum(np.sum(weight), 1.0e-300)
+    var = np.sum(weight * (x - mean) ** 2) / np.maximum(np.sum(weight), 1.0e-300)
+    return np.sqrt(var)
+
+
 def _fixed_component_data():
     return {
         "log_ebv_gal": _log_positive(0.2),
@@ -123,8 +150,10 @@ def _fixed_component_data():
         "hot_lam": np.array(2.0),
         "hot_width": np.array(0.5),
         "log_hot_fcov": _log_positive(0.1),
-        "lines_strength": np.array(1.0),
-        "line_width_kms": np.array(3000.0),
+        "broad_lines_strength": np.array(1.0),
+        "narrow_lines_strength": np.array(1.0),
+        "log_broad_line_width_kms": np.array(np.log(3000.0)),
+        "log_narrow_line_width_kms": np.array(np.log(500.0)),
         "feii_norm": np.array(1.0),
         "feii_fwhm": np.array(3000.0),
         "feii_shift": np.array(0.0),
@@ -132,6 +161,28 @@ def _fixed_component_data():
         "balmer_tau": np.array(1.0),
         "balmer_vel": np.array(3000.0),
     }
+
+
+def test_native_agn_lines_use_distinct_broad_and_narrow_widths(monkeypatch):
+    _patch_ssp(monkeypatch)
+    cfg = _cfg(fit_host=False, n_wave=4096, rest_wave_max=1000.0)
+    cfg.nebular.enabled = False
+    cfg.agn.fit_balmer_continuum = False
+    cfg.agn.feii_strength_default = 0.0
+    context = build_model_context(cfg)
+
+    data = _fixed_component_data()
+    data["log_broad_line_width_kms"] = np.array(np.log(3000.0))
+    data["log_narrow_line_width_kms"] = np.array(np.log(300.0))
+    data["feii_norm"] = np.array(0.0)
+    tr = _deterministic_trace(context, data)
+
+    wave = _site(tr, "rest_wave")
+    near_hbeta = (wave > 470.0) & (wave < 505.0)
+    broad_std = _weighted_std(wave[near_hbeta], _site(tr, "line_bl_rest_sed")[near_hbeta])
+    narrow_std = _weighted_std(wave[near_hbeta], _site(tr, "line_nl_rest_sed")[near_hbeta])
+
+    assert broad_std > 5.0 * narrow_std
 
 
 def test_systematics_width_can_be_sampled_with_exponential_prior(monkeypatch):
@@ -161,7 +212,7 @@ def test_systematics_width_can_use_log_normal_override(monkeypatch):
     _patch_ssp(monkeypatch)
     cfg = _cfg()
     cfg.likelihood.fit_systematics_width = True
-    cfg.prior_config.likelihood.systematics_width = {"family": "lognormal", "loc": 0.02, "scale": 0.2}
+    cfg.prior_config.likelihood.log_systematics_width = dist.Normal(np.log(0.02), 0.2)
     context = build_model_context(cfg)
 
     tr = _deterministic_likelihood_trace(
@@ -176,6 +227,27 @@ def test_systematics_width_can_use_log_normal_override(monkeypatch):
     assert "systematics_width" in tr
     assert tr["log_systematics_width"]["type"] == "sample"
     assert tr["systematics_width"]["type"] == "deterministic"
+    assert np.isclose(_site(tr, "systematics_width"), 0.02)
+
+
+def test_systematics_width_can_use_physical_lognormal_prior(monkeypatch):
+    _patch_ssp(monkeypatch)
+    cfg = _cfg()
+    cfg.likelihood.fit_systematics_width = True
+    cfg.prior_config.likelihood.systematics_width = dist.LogNormal(np.log(0.02), 0.2)
+    context = build_model_context(cfg)
+
+    tr = _deterministic_likelihood_trace(
+        context,
+        {
+            **_fixed_component_data(),
+            "systematics_width": np.array(0.02),
+        },
+    )
+
+    assert "systematics_width" in tr
+    assert tr["systematics_width"]["type"] == "sample"
+    assert tr["systematics_width"]["fn"].__class__.__name__ == "LogNormal"
     assert np.isclose(_site(tr, "systematics_width"), 0.02)
 
 
@@ -221,8 +293,10 @@ def test_component_rest_and_observed_seds_sum_to_total(monkeypatch):
             "hot_lam": np.array(2.0),
             "hot_width": np.array(0.5),
             "log_hot_fcov": _log_positive(0.1),
-            "lines_strength": np.array(1.0),
-            "line_width_kms": np.array(3000.0),
+            "broad_lines_strength": np.array(1.0),
+            "narrow_lines_strength": np.array(1.0),
+            "log_broad_line_width_kms": np.array(np.log(3000.0)),
+            "log_narrow_line_width_kms": np.array(np.log(500.0)),
             "feii_norm": np.array(1.0),
             "feii_fwhm": np.array(3000.0),
             "feii_shift": np.array(0.0),
@@ -312,6 +386,36 @@ def test_energy_balance_dust_sed_integrates_to_absorbed_luminosity(monkeypatch):
     np.testing.assert_allclose(emitted_dust_luminosity, dust_luminosity, rtol=2.0e-2, atol=0.0)
 
 
+def test_host_capture_scales_energy_balance_dust(monkeypatch):
+    _patch_ssp(monkeypatch)
+    cfg = _cfg(
+        fit_agn=False,
+        rest_wave_max=2.3e9,
+        n_wave=4096,
+        aperture_diameter_arcsec=[0.5],
+    )
+    cfg.likelihood.use_host_capture_model = True
+    context = build_model_context(cfg)
+    tr = _deterministic_trace(
+        context,
+        {
+            "log_ebv_gal": _log_positive(0.5),
+            "dust_alpha": np.array(2.0),
+            "log_host_capture_scale_arcsec": np.log(3.0),
+            "log_host_capture_slope": np.log(2.0),
+        },
+    )
+
+    capture = _site(tr, "host_capture_fraction_fluxes")
+    assert np.all(capture < 1.0)
+    uncaptured_host_source = _site(tr, "host_total_fluxes") + _site(tr, "dust_fluxes")
+    captured_host_source = _site(tr, "host_capture_source_fluxes") * capture
+
+    np.testing.assert_allclose(_site(tr, "host_capture_source_fluxes"), uncaptured_host_source)
+    np.testing.assert_allclose(_site(tr, "pred_fluxes"), captured_host_source)
+    assert np.all(_site(tr, "pred_fluxes") < uncaptured_host_source)
+
+
 def test_agn_off_mode_has_zero_agn_components_and_no_total_leak(monkeypatch):
     _patch_ssp(monkeypatch)
     context = build_model_context(_cfg(fit_agn=False))
@@ -364,7 +468,22 @@ def test_host_kinematics_default_off_skips_broadening_call(monkeypatch):
     assert np.all(np.isfinite(_site(tr, "pred_fluxes")))
 
 
-def test_host_kinematics_enabled_samples_and_broadens(monkeypatch):
+def test_host_kinematics_flag_ignored_for_photometry_only(monkeypatch):
+    _patch_ssp(monkeypatch)
+
+    def _raise_if_called(*args, **kwargs):
+        raise AssertionError("host broadening should be skipped for photometry-only SED fits")
+
+    monkeypatch.setattr("jaxsedfit.model._shift_and_broaden_single_spectrum_lnlam", _raise_if_called)
+    context = build_model_context(_cfg(fit_agn=False, fit_host_kinematics=True))
+    tr = _deterministic_trace(context, {"log_ebv_gal": _log_positive(0.2), "dust_alpha": np.array(2.0)})
+
+    assert "gal_v_kms" not in tr
+    assert "gal_sigma_kms" not in tr
+    assert np.all(np.isfinite(_site(tr, "pred_fluxes")))
+
+
+def test_host_kinematics_enabled_with_spectroscopy_samples_and_broadens(monkeypatch):
     _patch_ssp(monkeypatch)
     calls = {"n": 0}
 
@@ -373,7 +492,7 @@ def test_host_kinematics_enabled_samples_and_broadens(monkeypatch):
         return spectrum
 
     monkeypatch.setattr("jaxsedfit.model._shift_and_broaden_single_spectrum_lnlam", _identity_broaden)
-    context = build_model_context(_cfg(fit_agn=False, fit_host_kinematics=True))
+    context = build_model_context(_cfg(fit_agn=False, fit_host_kinematics=True, spectroscopy_enabled=True))
     tr = _deterministic_trace(
         context,
         {
@@ -485,6 +604,59 @@ def test_feii_broadening_enabled_samples_and_calls_kernel(monkeypatch):
     assert "feii_shift" in tr
 
 
+def test_jaxqsofit_backend_owns_feii_and_balmer_components(monkeypatch):
+    _patch_ssp(monkeypatch)
+
+    def _raise_native_feii(*args, **kwargs):
+        raise AssertionError("Native jaxsedfit FeII should be skipped when jaxqsofit owns spectral FeII")
+
+    def _raise_native_balmer(*args, **kwargs):
+        raise AssertionError("Native jaxsedfit Balmer continuum should be skipped when jaxqsofit owns spectral Balmer")
+
+    def _stub_jaxqsofit_backend(wave_obs, redshift, continuum_mjy, cfg, *args, **kwargs):
+        assert cfg.spectroscopy_config.jaxqsofit.use_spectral_feii is True
+        assert cfg.spectroscopy_config.jaxqsofit.use_spectral_balmer_continuum is True
+        return {
+            "total": continuum_mjy,
+            "line_broad": np.zeros_like(np.asarray(wave_obs, dtype=float)),
+            "line_narrow": np.zeros_like(np.asarray(wave_obs, dtype=float)),
+        }
+
+    monkeypatch.setattr("jaxsedfit.model._feii_component", _raise_native_feii)
+    monkeypatch.setattr("jaxsedfit.model._balmer_continuum_jax", _raise_native_balmer)
+    monkeypatch.setattr("jaxsedfit.model._evaluate_jaxqsofit_backend", _stub_jaxqsofit_backend)
+
+    cfg = _cfg(
+        spectroscopy_enabled=True,
+        fit_feii_broadening=True,
+        fit_balmer_continuum=True,
+    )
+    cfg.spectroscopy_config = SpectroscopyConfig(
+        enabled=True,
+        backend="jaxqsofit",
+        fit_scale=False,
+        jaxqsofit=JaxQSOFitConfig(
+            use_spectral_lines=False,
+            use_spectral_feii=True,
+            use_spectral_balmer_continuum=True,
+            use_line_strength_priors=False,
+        ),
+    )
+    context = build_model_context(cfg)
+    tr = _deterministic_trace(context, _fixed_component_data())
+
+    assert "feii_norm" not in tr
+    assert "feii_fwhm" not in tr
+    assert "feii_shift" not in tr
+    assert "balmer_norm" not in tr
+    assert "balmer_tau" not in tr
+    assert "balmer_vel" not in tr
+    assert np.allclose(_site(tr, "feii_rest_sed"), 0.0)
+    assert np.allclose(_site(tr, "feii_obs_sed"), 0.0)
+    assert np.allclose(_site(tr, "balmer_rest_sed"), 0.0)
+    assert np.allclose(_site(tr, "balmer_obs_sed"), 0.0)
+
+
 def test_plotted_component_sites_are_attenuated_likelihood_components(monkeypatch):
     _patch_ssp(monkeypatch)
     context = build_model_context(_cfg())
@@ -557,7 +729,8 @@ def test_local_line_photometry_improves_coarse_grid_line_projection(monkeypatch)
         return cfg
 
     data = _fixed_component_data()
-    data["line_width_kms"] = np.array(1200.0)
+    data["log_broad_line_width_kms"] = np.array(np.log(1200.0))
+    data["log_narrow_line_width_kms"] = np.array(np.log(1200.0))
     data["feii_norm"] = np.array(0.0)
 
     coarse_legacy = _site(
@@ -603,7 +776,8 @@ def test_component_prediction_uses_local_agn_line_photometry(monkeypatch):
     context = build_model_context(cfg)
 
     data = _fixed_component_data()
-    data["line_width_kms"] = np.array(1200.0)
+    data["log_broad_line_width_kms"] = np.array(np.log(1200.0))
+    data["log_narrow_line_width_kms"] = np.array(np.log(1200.0))
     data["feii_norm"] = np.array(0.0)
     predictive = _deterministic_trace(context, data)
     likelihood = _deterministic_likelihood_trace(context, data)
@@ -637,7 +811,8 @@ def test_fixed_local_line_cache_matches_exact_local_line_projection(monkeypatch)
         return cfg
 
     data = _fixed_component_data()
-    data["line_width_kms"] = np.array(1200.0)
+    data["log_broad_line_width_kms"] = np.array(np.log(1200.0))
+    data["log_narrow_line_width_kms"] = np.array(np.log(1200.0))
     data["feii_norm"] = np.array(0.0)
 
     cached = _site(
@@ -679,7 +854,8 @@ def test_local_line_photometry_improves_redshift_fit_line_projection(monkeypatch
 
     data = _fixed_component_data()
     data["redshift"] = np.array(0.05)
-    data["line_width_kms"] = np.array(1200.0)
+    data["log_broad_line_width_kms"] = np.array(np.log(1200.0))
+    data["log_narrow_line_width_kms"] = np.array(np.log(1200.0))
     data["feii_norm"] = np.array(0.0)
 
     coarse_legacy = _site(
