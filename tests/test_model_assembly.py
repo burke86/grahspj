@@ -639,6 +639,7 @@ def test_jaxqsofit_backend_owns_feii_and_balmer_components(monkeypatch):
             use_spectral_lines=False,
             use_spectral_feii=True,
             use_spectral_balmer_continuum=True,
+            use_spectral_smart_priors=False,
             use_line_strength_priors=False,
         ),
     )
