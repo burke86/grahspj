@@ -1023,6 +1023,7 @@ class JAXSEDFit:
         self,
         spectrum_index: int = 0,
         posterior: str = "latest",
+        show_nebular_lines: bool = False,
         show_plot: bool = True,
         plot_residual: bool = True,
         plot_legend: bool = True,
@@ -1186,14 +1187,11 @@ class JAXSEDFit:
         spec_torus_component = component("spec_torus_model_fluxes")
         custom_components = {
             "jaxsedfit_torus": spec_torus_component if keep_component(spec_torus_component) else obs_sed_component("torus_obs_sed"),
-            "jaxsedfit_host_dust": obs_sed_component("dust_obs_sed"),
+            "jaxsedfit_host_dust": obs_sed_component("dust_obs_sed", multiplier=host_capture),
             "jaxsedfit_sed_balmer": obs_sed_component("balmer_obs_sed"),
-            "jaxsedfit_sed_lines": (
-                obs_sed_component("line_obs_sed")
-                + obs_sed_component("feii_obs_sed")
-                + obs_sed_component("nebular_lines_obs_sed")
-            ),
         }
+        if show_nebular_lines:
+            custom_components["jaxsedfit_nebular_lines"] = obs_sed_component("nebular_lines_obs_sed")
         plotter.custom_components = {
             name: model for name, model in custom_components.items() if keep_component(model)
         }
@@ -1235,19 +1233,11 @@ class JAXSEDFit:
         torus_draw_values = spectrum_draws("spec_torus_model_fluxes") if keep_component(spec_torus_component) else obs_sed_draws("torus_obs_sed")
         custom_draws = {
             "jaxsedfit_torus": torus_draw_values,
-            "jaxsedfit_host_dust": obs_sed_draws("dust_obs_sed"),
+            "jaxsedfit_host_dust": obs_sed_draws("dust_obs_sed", multiplier=host_capture),
             "jaxsedfit_sed_balmer": obs_sed_draws("balmer_obs_sed"),
         }
-        sed_line_draws = [
-            arr for arr in (
-                obs_sed_draws("line_obs_sed"),
-                obs_sed_draws("feii_obs_sed"),
-                obs_sed_draws("nebular_lines_obs_sed"),
-            )
-            if arr is not None
-        ]
-        if sed_line_draws:
-            custom_draws["jaxsedfit_sed_lines"] = np.sum(sed_line_draws, axis=0)
+        if show_nebular_lines:
+            custom_draws["jaxsedfit_nebular_lines"] = obs_sed_draws("nebular_lines_obs_sed")
         for name, draws in custom_draws.items():
             if name in plotter.custom_components:
                 band = band_from_draws(draws)

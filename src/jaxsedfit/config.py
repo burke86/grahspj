@@ -177,8 +177,10 @@ class AGNConfig:
     feii_template: FeIITemplate = field(default_factory=FeIITemplate)
     emission_line_template: EmissionLineTemplate = field(default_factory=EmissionLineTemplate)
     agn_type: int = 1
-    line_width_kms_default: float = 3000.0
-    lines_strength_default: float = 1.0
+    broad_line_width_kms_default: float = 3000.0
+    narrow_line_width_kms_default: float = 500.0
+    broad_lines_strength_default: float = 1.0
+    narrow_lines_strength_default: float = 1.0
     feii_strength_default: float = 5.0
     fit_feii_broadening: bool = False
     fit_balmer_continuum: bool = False
@@ -215,19 +217,27 @@ class LikelihoodConfig:
 
 @dataclass
 class JaxQSOFitConfig:
-    """Spectroscopy-only jaxqsofit component configuration.
+    """Joint jaxqsofit spectral-feature configuration.
 
-    These flags affect only the spectroscopic likelihood. Broadband
-    photometry continues to use jaxsedfit's native SED-scale AGN lines,
-    Fe II, and Balmer continuum components.
+    The spectral flags control Fe II, Balmer-continuum, and line components
+    evaluated by jaxqsofit on the spectroscopic grid. Broadband photometry
+    keeps the jaxsedfit continuum/torus/dust engine; when enabled, the native
+    SED-scale AGN line template supplies only a simple global-strength
+    correction for lines outside the spectroscopic coverage.
     """
     use_spectral_lines: bool = True
     use_spectral_feii: bool = False
     use_spectral_balmer_continuum: bool = False
+    use_photometric_lines: bool = True
     use_tied_lines: bool = True
     use_spectral_smart_priors: bool = True
     use_multiplicative_tilt: bool = False
     line_flux_scale_mjy: float = 1.0
+    line_coverage_margin_kms: float = 3000.0
+    use_line_strength_priors: bool = True
+    line_strength_prior_sigma_dex: float = 0.7
+    use_nebular_line_prior: bool = True
+    nebular_line_prior_sigma_dex: float = 1.0
     include_elg_narrow_lines: bool = False
     include_high_ionization_lines: bool = False
     line_table: Sequence[Mapping[str, Any]] | None = None
@@ -241,6 +251,8 @@ class SpectroscopyConfig:
     backend: str = "jaxsedfit"
     student_t_df: float = 5.0
     systematics_width: float = 0.05
+    likelihood_weight_mode: str = "pixels"
+    resolving_power: float | None = None
     fit_scale: bool = True
     scale_prior_sigma_dex: float = 0.5
     jaxqsofit: JaxQSOFitConfig = field(default_factory=JaxQSOFitConfig)
@@ -506,10 +518,14 @@ class AGNPriorConfig:
     log_hot_fcov: Any | None = None
     ebv_agn: Any | None = None
     log_ebv_agn: Any | None = None
-    lines_strength: Any | None = None
-    log_lines_strength: Any | None = None
-    line_width_kms: Any | None = None
-    log_line_width_kms: Any | None = None
+    broad_lines_strength: Any | None = None
+    log_broad_lines_strength: Any | None = None
+    narrow_lines_strength: Any | None = None
+    log_narrow_lines_strength: Any | None = None
+    broad_line_width_kms: Any | None = None
+    log_broad_line_width_kms: Any | None = None
+    narrow_line_width_kms: Any | None = None
+    log_narrow_line_width_kms: Any | None = None
     balmer_norm: Any | None = None
     log_balmer_norm: Any | None = None
     balmer_tau: Any | None = None
@@ -552,10 +568,14 @@ class AGNPriorConfig:
                 "log_hot_fcov": "log_hot_fcov",
                 "ebv_agn": "ebv_agn",
                 "log_ebv_agn": "log_ebv_agn",
-                "lines_strength": "lines_strength",
-                "log_lines_strength": "log_lines_strength",
-                "line_width_kms": "line_width_kms",
-                "log_line_width_kms": "log_line_width_kms",
+                "broad_lines_strength": "broad_lines_strength",
+                "log_broad_lines_strength": "log_broad_lines_strength",
+                "narrow_lines_strength": "narrow_lines_strength",
+                "log_narrow_lines_strength": "log_narrow_lines_strength",
+                "broad_line_width_kms": "broad_line_width_kms",
+                "log_broad_line_width_kms": "log_broad_line_width_kms",
+                "narrow_line_width_kms": "narrow_line_width_kms",
+                "log_narrow_line_width_kms": "log_narrow_line_width_kms",
                 "balmer_norm": "balmer_norm",
                 "log_balmer_norm": "log_balmer_norm",
                 "balmer_tau": "balmer_tau",
@@ -836,8 +856,10 @@ def fit_config_from_mapping(data: Mapping[str, Any]) -> FitConfig:
             feii_template=_coerce_dataclass(FeIITemplate, agn_raw.get("feii_template", {})),
             emission_line_template=_coerce_dataclass(EmissionLineTemplate, agn_raw.get("emission_line_template", {})),
             agn_type=int(agn_raw.get("agn_type", 1)),
-            line_width_kms_default=float(agn_raw.get("line_width_kms_default", 3000.0)),
-            lines_strength_default=float(agn_raw.get("lines_strength_default", 1.0)),
+            broad_line_width_kms_default=float(agn_raw.get("broad_line_width_kms_default", 3000.0)),
+            narrow_line_width_kms_default=float(agn_raw.get("narrow_line_width_kms_default", 500.0)),
+            broad_lines_strength_default=float(agn_raw.get("broad_lines_strength_default", 1.0)),
+            narrow_lines_strength_default=float(agn_raw.get("narrow_lines_strength_default", 1.0)),
             feii_strength_default=float(agn_raw.get("feii_strength_default", 5.0)),
             fit_feii_broadening=bool(agn_raw.get("fit_feii_broadening", False)),
             fit_balmer_continuum=bool(agn_raw.get("fit_balmer_continuum", False)),

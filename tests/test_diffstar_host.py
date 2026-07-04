@@ -29,7 +29,7 @@ def _mock_config():
         observation=Observation(object_id="obj", redshift=0.1),
         photometry=PhotometryData(filter_names=["f1"], fluxes=[1.0], errors=[0.1]),
         filters=FilterSet(curves=[FilterCurve(name="f1", wave=[1000.0, 2000.0, 3000.0], transmission=[0.0, 1.0, 0.0])]),
-        galaxy=GalaxyConfig(dsps_ssp_fn="fake.h5", n_wave=64, sfh_n_steps=16),
+        galaxy=GalaxyConfig(dsps_ssp_fn="fake.h5", rest_wave_max=10000.0, n_wave=2048, sfh_n_steps=16),
         agn=AGNConfig(
             feii_template=FeIITemplate(name="fe", wave=[1000.0, 2000.0], lumin=[1.0, 0.5]),
             emission_line_template=EmissionLineTemplate(

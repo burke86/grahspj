@@ -35,6 +35,10 @@ ERG_PER_WATT = 1.0e7
 AGN_BOLOMETRIC_CORRECTION_5100 = 9.26
 DSPS_SOLAR_METALLICITY = 0.019
 MPC_TO_M = 3.085677581491367e22
+DEFAULT_BROAD_LINE_WIDTH_KMS_MIN = 1000.0
+DEFAULT_BROAD_LINE_WIDTH_KMS_MAX = 15000.0
+DEFAULT_NARROW_LINE_WIDTH_KMS_MIN = 100.0
+DEFAULT_NARROW_LINE_WIDTH_KMS_MAX = 1500.0
 GRAHSP_BIATTENUATION_BREAK_A = 11000.0
 GRAHSP_PL_BEND_LOC_A = 1000.0
 GRAHSP_PL_BEND_WIDTH = 10.0
@@ -110,98 +114,96 @@ def _luminosity_distance_m_jax(redshift, h0: float, om0: float):
     return jnp.reshape(d_l_m, ()) if scalar_input else d_l_m
 
 
-def _cfg_norm(prior_config: dict[str, Any], key: str, default_loc: float, default_scale: float):
-    """Read a Normal-like prior `(loc, scale)` pair from prior_config."""
+def _prior_distribution(prior_config: dict[str, Any], key: str, default_distribution):
+    """Read a NumPyro distribution-like prior from the flat prior mapping."""
     cfg = prior_config.get(key, None)
-    if isinstance(cfg, dict) and "loc" in cfg and "scale" in cfg:
-        return jnp.asarray(cfg["loc"]), jnp.asarray(cfg["scale"])
+    if cfg is None:
+        return default_distribution
     if isinstance(cfg, (tuple, list)) and len(cfg) >= 2:
-        return jnp.asarray(cfg[0]), jnp.asarray(cfg[1])
-    return jnp.asarray(default_loc), jnp.asarray(default_scale)
+        return dist.Normal(jnp.asarray(cfg[0], dtype=jnp.float64), jnp.maximum(jnp.asarray(cfg[1], dtype=jnp.float64), 1.0e-6))
+    if not isinstance(cfg, dict):
+        return default_distribution
+
+    default_name = default_distribution.__class__.__name__
+    family = str(cfg.get("dist", cfg.get("family", default_name))).lower()
+    if family in {"normal", "gaussian"}:
+        loc = jnp.asarray(cfg.get("loc", 0.0), dtype=jnp.float64)
+        scale = jnp.maximum(jnp.asarray(cfg.get("scale", 1.0), dtype=jnp.float64), 1.0e-6)
+        return dist.Normal(loc, scale)
+    if family in {"truncatednormal", "truncated_normal", "truncnormal", "truncnorm"}:
+        loc = jnp.asarray(cfg.get("loc", 0.0), dtype=jnp.float64)
+        scale = jnp.maximum(jnp.asarray(cfg.get("scale", 1.0), dtype=jnp.float64), 1.0e-6)
+        low = jnp.asarray(cfg.get("low", -jnp.inf), dtype=jnp.float64)
+        high = jnp.asarray(cfg.get("high", jnp.inf), dtype=jnp.float64)
+        return dist.TruncatedNormal(loc, scale, low=low, high=high)
+    if family in {"lognormal", "log-normal", "log_normal"}:
+        loc = jnp.asarray(cfg.get("loc", 0.0), dtype=jnp.float64)
+        scale = jnp.maximum(jnp.asarray(cfg.get("scale", 1.0), dtype=jnp.float64), 1.0e-6)
+        return dist.LogNormal(loc, scale)
+    if family in {"halfnormal", "half_normal"}:
+        scale = jnp.maximum(jnp.asarray(cfg.get("scale", 1.0), dtype=jnp.float64), 1.0e-6)
+        return dist.HalfNormal(scale)
+    if family in {"student_t", "studentt", "t"}:
+        df = jnp.maximum(jnp.asarray(cfg.get("df", 5.0), dtype=jnp.float64), 1.0e-6)
+        loc = jnp.asarray(cfg.get("loc", 0.0), dtype=jnp.float64)
+        scale = jnp.maximum(jnp.asarray(cfg.get("scale", 1.0), dtype=jnp.float64), 1.0e-6)
+        return dist.StudentT(df=df, loc=loc, scale=scale)
+    if family in {"uniform", "flat"}:
+        low = jnp.asarray(cfg.get("low", 0.0), dtype=jnp.float64)
+        high = jnp.asarray(cfg.get("high", 1.0), dtype=jnp.float64)
+        lo = jnp.minimum(low, high)
+        hi = jnp.maximum(jnp.maximum(low, high), lo + 1.0e-6)
+        return dist.Uniform(lo, hi)
+    if family in {"exponential", "exp"}:
+        scale = jnp.maximum(jnp.asarray(cfg.get("scale", 1.0), dtype=jnp.float64), 1.0e-30)
+        return dist.Exponential(1.0 / scale)
+    return default_distribution
 
 
-def _cfg_truncnorm(prior_config: dict[str, Any], key: str, default_loc: float, default_scale: float, default_low: float, default_high: float):
-    """Read a truncated Normal-like prior `(loc, scale, low, high)` from prior_config."""
-    loc, scale = _cfg_norm(prior_config, key, default_loc, default_scale)
-    cfg = prior_config.get(key, None)
-    if isinstance(cfg, dict):
-        low = cfg.get("low", default_low)
-        high = cfg.get("high", default_high)
-    else:
-        low = default_low
-        high = default_high
-    return loc, scale, jnp.asarray(low, dtype=jnp.float64), jnp.asarray(high, dtype=jnp.float64)
+def _sample_prior(prior_config: dict[str, Any], key: str, default_distribution):
+    """Sample a scalar site from a configured distribution or a default."""
+    return numpyro.sample(key, _prior_distribution(prior_config, key, default_distribution))
 
 
-def _cfg_halfnorm(prior_config: dict[str, Any], key: str, default_scale: float):
-    """Read a HalfNormal-like scale value from prior_config."""
-    cfg = prior_config.get(key, None)
-    if isinstance(cfg, dict) and "scale" in cfg:
-        return jnp.asarray(cfg["scale"])
-    if isinstance(cfg, (int, float)):
-        return jnp.asarray(cfg)
-    return jnp.asarray(default_scale)
-
-
-def _cfg_exponential(prior_config: dict[str, Any], key: str, default_scale: float):
-    """Read an Exponential scale value from prior_config."""
-    cfg = prior_config.get(key, None)
-    if isinstance(cfg, dict) and "scale" in cfg:
-        return jnp.asarray(cfg["scale"])
-    if isinstance(cfg, (int, float)):
-        return jnp.asarray(cfg)
-    return jnp.asarray(default_scale)
-
-
-def _log_positive_prior(
+def _sample_log_positive_from_distribution(
     prior_config: dict[str, Any],
     *,
     value_key: str,
     log_key: str,
-    default_value: float,
-    default_log_scale: float,
+    default_distribution,
 ):
-    """Return Normal prior settings for a positive value sampled in log-space."""
-    if log_key in prior_config:
-        return _cfg_norm(prior_config, log_key, np.log(max(default_value, 1.0e-30)), default_log_scale)
-    cfg = prior_config.get(value_key, None)
-    if isinstance(cfg, dict):
-        if "loc" in cfg and "scale" in cfg:
-            loc = float(np.asarray(cfg["loc"]))
-            scale = float(np.asarray(cfg["scale"]))
-            if loc > 0.0:
-                return jnp.asarray(np.log(loc)), jnp.asarray(scale)
-        if "scale" in cfg:
-            return jnp.asarray(np.log(max(0.5 * float(cfg["scale"]), 1.0e-30))), jnp.asarray(default_log_scale)
-    if isinstance(cfg, (int, float)) and float(cfg) > 0.0:
-        return jnp.asarray(np.log(float(cfg))), jnp.asarray(default_log_scale)
-    return jnp.asarray(np.log(max(default_value, 1.0e-30))), jnp.asarray(default_log_scale)
-
-
-def _sample_log_positive(
-    prior_config: dict[str, Any],
-    *,
-    value_key: str,
-    log_key: str,
-    default_value: float,
-    default_log_scale: float,
-):
-    """Sample a positive physical parameter through an unconstrained log site."""
-    log_value = numpyro.sample(
-        log_key,
-        dist.Normal(
-            *_log_positive_prior(
-                prior_config,
-                value_key=value_key,
-                log_key=log_key,
-                default_value=default_value,
-                default_log_scale=default_log_scale,
-            )
-        ),
-    )
+    """Sample a log-parameter from a distribution and expose its physical value."""
+    log_value = numpyro.sample(log_key, _prior_distribution(prior_config, log_key, default_distribution))
     value = jnp.exp(log_value)
     numpyro.deterministic(value_key, value)
     return value
+
+
+def _sample_positive_distribution(
+    prior_config: dict[str, Any],
+    *,
+    value_key: str,
+    log_key: str,
+    default_value_distribution,
+    default_log_distribution,
+    default_to_log: bool = False,
+):
+    """Sample a positive parameter, honoring either physical or log prior keys."""
+    if log_key in prior_config:
+        return _sample_log_positive_from_distribution(
+            prior_config,
+            value_key=value_key,
+            log_key=log_key,
+            default_distribution=default_log_distribution,
+        )
+    if value_key not in prior_config and default_to_log:
+        return _sample_log_positive_from_distribution(
+            prior_config,
+            value_key=value_key,
+            log_key=log_key,
+            default_distribution=default_log_distribution,
+        )
+    return _sample_prior(prior_config, value_key, default_value_distribution)
 
 
 def _sample_positive(
@@ -227,47 +229,37 @@ def _sample_positive(
         family = "lognormal"
 
     if family in {"exponential", "exp"}:
-        scale = _cfg_exponential(prior_config, value_key, default_value)
-        rate = 1.0 / jnp.maximum(scale, 1.0e-30)
-        return numpyro.sample(value_key, dist.Exponential(rate))
+        return _sample_prior(prior_config, value_key, dist.Exponential(1.0 / max(default_value, 1.0e-30)))
     if family in {"lognormal", "log-normal", "log_normal", "normal_log"}:
-        return _sample_log_positive(
+        if isinstance(cfg, dict):
+            return _sample_prior(
+                prior_config,
+                value_key,
+                dist.LogNormal(np.log(max(default_value, 1.0e-30)), default_log_scale),
+            )
+        return _sample_log_positive_from_distribution(
             prior_config,
             value_key=value_key,
             log_key=log_key,
-            default_value=default_value,
-            default_log_scale=default_log_scale,
+            default_distribution=dist.Normal(np.log(max(default_value, 1.0e-30)), default_log_scale),
         )
     raise ValueError(
         f"prior_config[{value_key!r}] family must be one of: "
         "'exponential', 'lognormal'."
     )
 
-
-def _cfg_mean_scale(prior_config: dict[str, Any], key: str, default_loc: float, default_scale: float):
-    """Alias for reading mean/scale prior settings from prior_config."""
-    return _cfg_norm(prior_config, key, default_loc, default_scale)
-
-
 def _sample_optional_normal(prior_config: dict[str, Any], key: str, default: float, scale: float):
     """Return a fixed default unless a Normal-like prior is explicitly configured."""
     if key not in prior_config:
         return jnp.asarray(default, dtype=jnp.float64)
-    return numpyro.sample(key, dist.Normal(*_cfg_norm(prior_config, key, default, scale)))
+    return _sample_prior(prior_config, key, dist.Normal(default, scale))
 
 
 def _sample_optional_truncnorm(prior_config: dict[str, Any], key: str, default: float, scale: float, low: float, high: float):
     """Return a fixed default unless a truncated Normal-like prior is explicitly configured."""
     if key not in prior_config:
         return jnp.asarray(default, dtype=jnp.float64)
-    return numpyro.sample(
-        key,
-        dist.TruncatedNormal(
-            *_cfg_norm(prior_config, key, default, scale),
-            low=jnp.asarray(low, dtype=jnp.float64),
-            high=jnp.asarray(high, dtype=jnp.float64),
-        ),
-    )
+    return _sample_prior(prior_config, key, dist.TruncatedNormal(default, scale, low=low, high=high))
 
 
 def _safe_log10(x):
@@ -282,26 +274,7 @@ def _sample_log_stellar_mass(prior_config: dict[str, Any]):
     original Normal(10.5, 2.5) benchmark default. Existing Normal-like
     overrides with only ``loc`` and ``scale`` are still supported.
     """
-    cfg = prior_config.get("log_stellar_mass", None)
-    if isinstance(cfg, dict):
-        loc = jnp.asarray(cfg.get("loc", 10.0))
-        scale = jnp.asarray(cfg.get("scale", 2.0))
-        dist_name = str(cfg.get("dist", "student_t")).lower()
-        if dist_name in {"uniform", "flat"}:
-            low = jnp.asarray(cfg.get("low", 6.0))
-            high = jnp.asarray(cfg.get("high", 12.0))
-            lo = jnp.minimum(low, high)
-            hi = jnp.maximum(low, high)
-            hi = jnp.maximum(hi, lo + 1.0e-6)
-            return numpyro.sample("log_stellar_mass", dist.Uniform(lo, hi))
-        if dist_name in {"student_t", "studentt", "t"}:
-            df = jnp.asarray(cfg.get("df", 5.0))
-            return numpyro.sample("log_stellar_mass", dist.StudentT(df=df, loc=loc, scale=scale))
-        if dist_name in {"normal", "gaussian"}:
-            return numpyro.sample("log_stellar_mass", dist.Normal(loc, scale))
-    if isinstance(cfg, (tuple, list)) and len(cfg) >= 2:
-        return numpyro.sample("log_stellar_mass", dist.Normal(jnp.asarray(cfg[0]), jnp.asarray(cfg[1])))
-    return numpyro.sample("log_stellar_mass", dist.StudentT(df=5.0, loc=10.0, scale=2.0))
+    return _sample_prior(prior_config, "log_stellar_mass", dist.StudentT(df=5.0, loc=10.0, scale=2.0))
 
 
 def _ssp_lgmet_solar_offset(ssp_lgmet):
@@ -845,7 +818,7 @@ def _build_diffstar_host(context: ModelContext, prior_config: dict[str, Any], *,
     u_params = {}
     for key in DEFAULT_DIFFSTAR_U_PARAMS._fields:
         default_loc = float(np.asarray(getattr(DEFAULT_DIFFSTAR_U_PARAMS, key)))
-        u_params[key] = numpyro.sample(key, dist.Normal(*_cfg_mean_scale(prior_config, key, default_loc, 1.0)))
+        u_params[key] = _sample_prior(prior_config, key, dist.Normal(default_loc, 1.0))
     bounded = get_bounded_diffstar_params(DiffstarUParams(**u_params))
     base_history = calc_sfh_singlegal(
         bounded,
@@ -856,13 +829,14 @@ def _build_diffstar_host(context: ModelContext, prior_config: dict[str, Any], *,
         return_smh=True,
     )
 
-    gal_lgmet = numpyro.sample("gal_lgmet", dist.Normal(*_cfg_mean_scale(prior_config, "gal_lgmet", _default_gal_lgmet_loc(ssp_lgmet), 0.5)))
-    gal_lgmet_scatter = _sample_log_positive(
+    gal_lgmet = _sample_prior(prior_config, "gal_lgmet", dist.Normal(_default_gal_lgmet_loc(ssp_lgmet), 0.5))
+    gal_lgmet_scatter = _sample_positive_distribution(
         prior_config,
         value_key="gal_lgmet_scatter",
         log_key="log_gal_lgmet_scatter",
-        default_value=0.15,
-        default_log_scale=0.8,
+        default_value_distribution=dist.LogNormal(np.log(0.15), 0.8),
+        default_log_distribution=dist.Normal(np.log(0.15), 0.8),
+        default_to_log=True,
     )
     mmr_logprior = _mass_metallicity_relation_logprior(
         log_stellar_mass,
@@ -938,29 +912,20 @@ def _build_delayed_host(context: ModelContext, prior_config: dict[str, Any], *, 
     log_stellar_mass = _sample_log_stellar_mass(prior_config)
     min_age = jnp.asarray(max(float(cfg.sfh_t_min_gyr), 1.0e-3), dtype=jnp.float64)
     max_age = jnp.maximum(t_obs_gyr, min_age * 1.01)
-    log_age_gyr = numpyro.sample(
+    log_age_gyr = _sample_prior(
+        prior_config,
         "log_sfh_age_gyr",
         dist.TruncatedNormal(
-            *_cfg_norm(
-                prior_config,
-                "log_sfh_age_gyr",
-                np.log(min(3.0, max(float(context.t_obs_gyr), 1.0e-3))),
-                1.0,
-            ),
+            np.log(min(3.0, max(float(context.t_obs_gyr), 1.0e-3))),
+            1.0,
             low=jnp.log(min_age),
             high=jnp.log(max_age),
         ),
     )
-    log_tau_over_age = numpyro.sample(
+    log_tau_over_age = _sample_prior(
+        prior_config,
         "log_sfh_tau_over_age",
-        dist.Normal(
-            *_cfg_norm(
-                prior_config,
-                "log_sfh_tau_over_age",
-                0.0,
-                float(cfg.tau_host_prior_scale),
-            )
-        ),
+        dist.Normal(0.0, float(cfg.tau_host_prior_scale)),
     )
     age_gyr = jnp.exp(log_age_gyr)
     tau_gyr = jnp.clip(age_gyr * jnp.exp(log_tau_over_age), 0.03, 30.0)
@@ -970,13 +935,14 @@ def _build_delayed_host(context: ModelContext, prior_config: dict[str, Any], *, 
     base_sfh = jnp.where((sfh_age_gyr > 0.0) & (sfh_age_gyr <= age_gyr), sfh_age_gyr * jnp.exp(-sfh_age_gyr / tau_gyr), 0.0)
     base_smh = _cumulative_trapezoid(base_sfh, gal_t_table) * 1.0e9
 
-    gal_lgmet = numpyro.sample("gal_lgmet", dist.Normal(*_cfg_mean_scale(prior_config, "gal_lgmet", _default_gal_lgmet_loc(ssp_lgmet), 0.5)))
-    gal_lgmet_scatter = _sample_log_positive(
+    gal_lgmet = _sample_prior(prior_config, "gal_lgmet", dist.Normal(_default_gal_lgmet_loc(ssp_lgmet), 0.5))
+    gal_lgmet_scatter = _sample_positive_distribution(
         prior_config,
         value_key="gal_lgmet_scatter",
         log_key="log_gal_lgmet_scatter",
-        default_value=0.15,
-        default_log_scale=0.8,
+        default_value_distribution=dist.LogNormal(np.log(0.15), 0.8),
+        default_log_distribution=dist.Normal(np.log(0.15), 0.8),
+        default_to_log=True,
     )
     mmr_logprior = _mass_metallicity_relation_logprior(
         log_stellar_mass,
@@ -1138,10 +1104,11 @@ def _build_nebular_components(context: ModelContext, host_state: dict[str, Any],
     else:
         lines_width = jnp.clip(_sample_optional_normal(prior_config, "nebular_lines_width", float(cfg.lines_width), 100.0), 0.0, 1.0e5)
     if tie_width_to_jaxqsofit or "log_nebular_line_scale" in prior_config:
-        line_scale_loc, line_scale_width = _cfg_norm(prior_config, "log_nebular_line_scale", 0.0, 0.5)
-        line_scale = numpyro.sample(
-            "nebular_line_scale",
-            dist.LogNormal(line_scale_loc, line_scale_width),
+        line_scale = _sample_log_positive_from_distribution(
+            prior_config,
+            value_key="nebular_line_scale",
+            log_key="log_nebular_line_scale",
+            default_distribution=dist.Normal(0.0, 0.5),
         )
     else:
         line_scale = jnp.asarray(1.0, dtype=jnp.float64)
@@ -1345,9 +1312,101 @@ def spectroscopic_loglike(pred_fluxes, obs_fluxes, obs_errors, mask, systematics
     return jnp.sum(jnp.where(valid, student.log_prob(obs_fluxes), 0.0)) + penalty
 
 
+def spectroscopic_likelihood_weight(wave_obs, mask, spectrum_index, likelihood_weight_mode, resolving_power):
+    """Return a scalar spectral likelihood weight."""
+    if str(likelihood_weight_mode).lower() not in {"resolution_elements", "resolution"}:
+        return jnp.asarray(1.0, dtype=jnp.float64)
+    if resolving_power is None or not np.isfinite(float(resolving_power)) or float(resolving_power) <= 0.0:
+        return jnp.asarray(1.0, dtype=jnp.float64)
+    wave_obs = jnp.asarray(wave_obs, dtype=jnp.float64)
+    mask = jnp.asarray(mask, dtype=bool)
+    spectrum_index = jnp.asarray(spectrum_index, dtype=jnp.int32)
+    if wave_obs.size < 2:
+        return jnp.asarray(1.0, dtype=jnp.float64)
+
+    prev_delta = jnp.zeros_like(wave_obs)
+    next_delta = jnp.zeros_like(wave_obs)
+    same_adjacent = spectrum_index[1:] == spectrum_index[:-1]
+    delta = jnp.abs(wave_obs[1:] - wave_obs[:-1])
+    prev_delta = prev_delta.at[1:].set(jnp.where(same_adjacent, delta, 0.0))
+    next_delta = next_delta.at[:-1].set(jnp.where(same_adjacent, delta, 0.0))
+    pixel_width = 0.5 * (prev_delta + next_delta)
+    valid = mask & jnp.isfinite(wave_obs) & (wave_obs > 0.0) & (pixel_width > 0.0)
+    resolution_width = wave_obs / float(resolving_power)
+    n_eff = jnp.sum(jnp.where(valid, pixel_width / jnp.maximum(resolution_width, 1.0e-30), 0.0))
+    n_pix = jnp.sum(valid.astype(jnp.float64))
+    return jnp.where(n_pix > 0.0, jnp.minimum(n_eff / n_pix, 1.0), jnp.asarray(1.0, dtype=jnp.float64))
+
+
 def _flambda_to_mjy(wave_obs, flux_lambda):
     """Convert internal f_lambda values on an observed wavelength grid to mJy."""
     return 1.0e-10 / 299792458.0 * 1.0e29 * wave_obs * wave_obs * flux_lambda
+
+
+def _fixed_spectral_line_coverage_rest(context: ModelContext, cfg: FitConfig) -> tuple[float, float] | None:
+    """Return fixed-redshift rest coverage for the jaxqsofit tied-line table."""
+    if cfg.observation.fits_redshift:
+        return None
+    if str(cfg.spectroscopy_config.backend).lower() != "jaxqsofit":
+        return None
+    if not bool(cfg.spectroscopy_config.jaxqsofit.use_spectral_lines):
+        return None
+    spec_wave = np.asarray(context.spec_wave_obs, dtype=float)
+    spec_mask = np.asarray(context.spec_mask, dtype=bool)
+    valid = spec_mask & np.isfinite(spec_wave) & (spec_wave > 0.0)
+    if not np.any(valid):
+        return None
+    redshift = max(float(cfg.observation.redshift), 0.0)
+    margin = max(float(cfg.spectroscopy_config.jaxqsofit.line_coverage_margin_kms), 0.0) / C_KMS
+    rest_min = float(np.min(spec_wave[valid]) / (1.0 + redshift))
+    rest_max = float(np.max(spec_wave[valid]) / (1.0 + redshift))
+    return (rest_min * (1.0 - margin), rest_max * (1.0 + margin))
+
+
+def _photometric_agn_line_mask(context: ModelContext, cfg: FitConfig, line_wave, redshift):
+    """Mask native AGN SED lines to those not covered by jaxqsofit spectroscopy."""
+    if str(cfg.spectroscopy_config.backend).lower() != "jaxqsofit":
+        return jnp.ones_like(line_wave)
+    jqf_cfg = cfg.spectroscopy_config.jaxqsofit
+    if not bool(jqf_cfg.use_photometric_lines):
+        return jnp.zeros_like(line_wave)
+    if (
+        not cfg.spectroscopy_config.enabled
+        or not bool(jqf_cfg.use_spectral_lines)
+        or len(context.spec_wave_obs) == 0
+        or not np.any(context.spec_mask)
+    ):
+        return jnp.ones_like(line_wave)
+
+    spec_wave = jnp.asarray(context.spec_wave_obs, dtype=jnp.float64)
+    spec_mask = jnp.asarray(context.spec_mask, dtype=bool)
+    valid = spec_mask & jnp.isfinite(spec_wave) & (spec_wave > 0.0)
+    spec_min = jnp.min(jnp.where(valid, spec_wave, jnp.inf))
+    spec_max = jnp.max(jnp.where(valid, spec_wave, -jnp.inf))
+    margin = jnp.asarray(max(float(jqf_cfg.line_coverage_margin_kms), 0.0) / C_KMS, dtype=jnp.float64)
+    line_obs = jnp.asarray(line_wave, dtype=jnp.float64) * jnp.maximum(1.0 + redshift, 1.0e-8)
+    covered = (line_obs >= spec_min * (1.0 - margin)) & (line_obs <= spec_max * (1.0 + margin))
+    return jnp.where(covered, 0.0, 1.0)
+
+
+def _integrated_spectral_flux_proxy(wave_obs, flux_mjy, mask):
+    """Integrate positive line flux density on the observed spectral grid."""
+    wave_obs = jnp.asarray(wave_obs, dtype=jnp.float64)
+    flux_mjy = jnp.asarray(flux_mjy, dtype=jnp.float64)
+    mask = jnp.asarray(mask, dtype=bool)
+    positive_flux = jnp.where(mask, jnp.clip(flux_mjy, 0.0, None), 0.0)
+    return jnp.trapezoid(positive_flux, wave_obs)
+
+
+def _line_strength_bridge_logprob(pred_flux, ref_flux, sigma_dex):
+    """Broad log-normal bridge between same-grid integrated line-flux proxies."""
+    floor = jnp.asarray(1.0e-30, dtype=jnp.float64)
+    sigma_ln = jnp.maximum(jnp.asarray(float(sigma_dex), dtype=jnp.float64) * jnp.log(10.0), 1.0e-6)
+    pred = jnp.maximum(jnp.asarray(pred_flux, dtype=jnp.float64), floor)
+    ref = jnp.maximum(jnp.asarray(ref_flux, dtype=jnp.float64), floor)
+    resid = (jnp.log(pred) - jnp.log(ref)) / sigma_ln
+    active = ref_flux > floor * 10.0
+    return jnp.where(active, -0.5 * resid * resid, jnp.asarray(0.0, dtype=jnp.float64))
 
 
 def _evaluate_jaxqsofit_backend(
@@ -1358,6 +1417,7 @@ def _evaluate_jaxqsofit_backend(
     line_prior_config,
     rest_wave,
     feii_template_flux,
+    line_coverage_rest=None,
     fixed_narrow_fwhm_kms=None,
     fixed_narrow_amp_scale=None,
 ):
@@ -1379,11 +1439,12 @@ def _evaluate_jaxqsofit_backend(
         line_table=jqf_cfg.line_table,
         line_prior_config=line_prior_config,
         line_flux_scale_mjy=float(jqf_cfg.line_flux_scale_mjy),
+        line_coverage_rest=line_coverage_rest,
         include_elg_narrow_lines=bool(jqf_cfg.include_elg_narrow_lines),
         include_high_ionization_lines=bool(jqf_cfg.include_high_ionization_lines),
-        broad_fwhm_kms_default=float(cfg.agn.line_width_kms_default),
-        feii_fwhm_kms_default=float(cfg.agn.line_width_kms_default),
-        balmer_velocity_kms_default=float(cfg.agn.line_width_kms_default),
+        broad_fwhm_kms_default=float(cfg.agn.broad_line_width_kms_default),
+        feii_fwhm_kms_default=float(cfg.agn.broad_line_width_kms_default),
+        balmer_velocity_kms_default=float(cfg.agn.broad_line_width_kms_default),
         fixed_narrow_fwhm_kms=fixed_narrow_fwhm_kms,
         fixed_narrow_amp_scale=fixed_narrow_amp_scale,
     )
@@ -1439,6 +1500,20 @@ def evaluate_photometric_state(
         and len(context.spec_wave_obs) > 0
         and np.any(context.spec_mask)
     )
+    jqf_cfg = cfg.spectroscopy_config.jaxqsofit
+    jaxqsofit_backend_enabled = bool(
+        spectroscopy_enabled
+        and str(cfg.spectroscopy_config.backend).lower() == "jaxqsofit"
+    )
+    use_native_feii = bool(
+        include_sed_agn_features
+        and not (jaxqsofit_backend_enabled and bool(jqf_cfg.use_spectral_feii))
+    )
+    use_native_balmer = bool(
+        include_sed_agn_features
+        and not (jaxqsofit_backend_enabled and bool(jqf_cfg.use_spectral_balmer_continuum))
+    )
+    jaxqsofit_line_coverage_rest = _fixed_spectral_line_coverage_rest(context, cfg) if spectroscopy_enabled else None
     has_phot_spatial_scale = bool(
         np.any(np.isfinite(context.effective_spatial_scale_arcsec) & (np.asarray(context.effective_spatial_scale_arcsec, dtype=float) > 0.0))
     )
@@ -1472,9 +1547,10 @@ def evaluate_photometric_state(
         else _empty_host_state(context)
     )
     host_rest = host_state["host_rest"]
-    if fit_host and bool(cfg.galaxy.fit_host_kinematics):
-        gal_v_kms = numpyro.sample("gal_v_kms", dist.Normal(*_cfg_norm(prior_config, "gal_v_kms", 0.0, 150.0)))
-        gal_sigma_kms = numpyro.sample("gal_sigma_kms", dist.HalfNormal(_cfg_halfnorm(prior_config, "gal_sigma_kms", 150.0)))
+    host_kinematics_enabled = bool(fit_host and cfg.galaxy.fit_host_kinematics and spectroscopy_enabled)
+    if host_kinematics_enabled:
+        gal_v_kms = _sample_prior(prior_config, "gal_v_kms", dist.Normal(0.0, 150.0))
+        gal_sigma_kms = _sample_prior(prior_config, "gal_sigma_kms", dist.HalfNormal(150.0))
         host_rest = _shift_and_broaden_single_spectrum_lnlam(jnp.log(rest_wave), host_rest, gal_v_kms, gal_sigma_kms)
     else:
         gal_v_kms = jnp.asarray(0.0, dtype=jnp.float64)
@@ -1485,16 +1561,10 @@ def evaluate_photometric_state(
         # Infer the AGN normalization directly from the photometry rather than
         # forcing the host 5100 A continuum to set the AGN amplitude.
         fracagn_5100 = jnp.asarray(0.999, dtype=jnp.float64)
-        log_agn_amp = numpyro.sample(
+        log_agn_amp = _sample_prior(
+            prior_config,
             "log_agn_amp",
-            dist.Normal(
-                *_cfg_norm(
-                    prior_config,
-                    "log_agn_amp",
-                    _estimate_log_agn_amp_prior_loc(context, cfg.observation.redshift),
-                    2.0,
-                ),
-            ),
+            dist.Normal(_estimate_log_agn_amp_prior_loc(context, cfg.observation.redshift), 2.0),
         )
         agn_amp = jnp.exp(log_agn_amp)
         if fit_host:
@@ -1511,34 +1581,83 @@ def evaluate_photometric_state(
 
     agn_type = int(cfg.agn.agn_type)
     if fit_agn:
-        pl_loc, pl_scale, pl_low, pl_high = _cfg_truncnorm(prior_config, "pl_slope", -1.8, 0.4, -2.5, -1.0)
-        pl_slope = numpyro.sample("pl_slope", dist.TruncatedNormal(pl_loc, pl_scale, low=pl_low, high=pl_high))
-        uv_slope_delta = numpyro.sample("uv_slope_delta", dist.LogNormal(*_cfg_norm(prior_config, "log_uv_slope_delta", np.log(1.8), 0.4)))
+        pl_slope = _sample_prior(prior_config, "pl_slope", dist.TruncatedNormal(-1.8, 0.4, low=-2.5, high=-1.0))
+        uv_slope_delta = _sample_positive_distribution(
+            prior_config,
+            value_key="uv_slope_delta",
+            log_key="log_uv_slope_delta",
+            default_value_distribution=dist.LogNormal(np.log(1.8), 0.4),
+            default_log_distribution=dist.Normal(np.log(1.8), 0.4),
+        )
         uv_slope = pl_slope + uv_slope_delta
         numpyro.deterministic("uv_slope", uv_slope)
-        pl_bend_loc = numpyro.sample("pl_bend_loc", dist.LogNormal(*_cfg_norm(prior_config, "log_pl_bend_loc", np.log(GRAHSP_PL_BEND_LOC_A), 0.2)))
-        pl_bend_width = numpyro.sample("pl_bend_width", dist.LogNormal(*_cfg_norm(prior_config, "log_pl_bend_width", np.log(GRAHSP_PL_BEND_WIDTH), 0.4)))
-        pl_cutoff = numpyro.sample("pl_cutoff", dist.LogNormal(*_cfg_norm(prior_config, "log_pl_cutoff", np.log(GRAHSP_PL_CUTOFF_A), 0.6)))
+        pl_bend_loc = _sample_positive_distribution(
+            prior_config,
+            value_key="pl_bend_loc",
+            log_key="log_pl_bend_loc",
+            default_value_distribution=dist.LogNormal(np.log(GRAHSP_PL_BEND_LOC_A), 0.2),
+            default_log_distribution=dist.Normal(np.log(GRAHSP_PL_BEND_LOC_A), 0.2),
+        )
+        pl_bend_width = _sample_positive_distribution(
+            prior_config,
+            value_key="pl_bend_width",
+            log_key="log_pl_bend_width",
+            default_value_distribution=dist.LogNormal(np.log(GRAHSP_PL_BEND_WIDTH), 0.4),
+            default_log_distribution=dist.Normal(np.log(GRAHSP_PL_BEND_WIDTH), 0.4),
+        )
+        pl_cutoff = _sample_positive_distribution(
+            prior_config,
+            value_key="pl_cutoff",
+            log_key="log_pl_cutoff",
+            default_value_distribution=dist.LogNormal(np.log(GRAHSP_PL_CUTOFF_A), 0.6),
+            default_log_distribution=dist.Normal(np.log(GRAHSP_PL_CUTOFF_A), 0.6),
+        )
         disk_rest = _powerlaw_jax(rest_wave, agn_amp / 5100.0, uv_slope, pl_slope, 5100.0, pl_bend_loc, pl_bend_width, pl_cutoff)
 
-        fcov = _sample_log_positive(
+        fcov = _sample_positive_distribution(
             prior_config,
             value_key="fcov",
             log_key="log_fcov",
-            default_value=0.2,
-            default_log_scale=0.6,
+            default_value_distribution=dist.LogNormal(np.log(0.2), 0.6),
+            default_log_distribution=dist.Normal(np.log(0.2), 0.6),
+            default_to_log=True,
         )
-        si = numpyro.sample("si", dist.Normal(*_cfg_norm(prior_config, "si", 0.0, 1.0)))
-        cool_lam = numpyro.sample("cool_lam", dist.LogNormal(*_cfg_norm(prior_config, "log_cool_lam", np.log(17.0), 0.2)))
-        cool_width = numpyro.sample("cool_width", dist.LogNormal(*_cfg_norm(prior_config, "log_cool_width", np.log(0.45), 0.2)))
-        hot_lam = numpyro.sample("hot_lam", dist.LogNormal(*_cfg_norm(prior_config, "log_hot_lam", np.log(2.0), 0.3)))
-        hot_width = numpyro.sample("hot_width", dist.LogNormal(*_cfg_norm(prior_config, "log_hot_width", np.log(0.5), 0.2)))
-        hot_fcov = _sample_log_positive(
+        si = _sample_prior(prior_config, "si", dist.Normal(0.0, 1.0))
+        cool_lam = _sample_positive_distribution(
+            prior_config,
+            value_key="cool_lam",
+            log_key="log_cool_lam",
+            default_value_distribution=dist.LogNormal(np.log(17.0), 0.2),
+            default_log_distribution=dist.Normal(np.log(17.0), 0.2),
+        )
+        cool_width = _sample_positive_distribution(
+            prior_config,
+            value_key="cool_width",
+            log_key="log_cool_width",
+            default_value_distribution=dist.LogNormal(np.log(0.45), 0.2),
+            default_log_distribution=dist.Normal(np.log(0.45), 0.2),
+        )
+        hot_lam = _sample_positive_distribution(
+            prior_config,
+            value_key="hot_lam",
+            log_key="log_hot_lam",
+            default_value_distribution=dist.LogNormal(np.log(2.0), 0.3),
+            default_log_distribution=dist.Normal(np.log(2.0), 0.3),
+        )
+        hot_width = _sample_positive_distribution(
+            prior_config,
+            value_key="hot_width",
+            log_key="log_hot_width",
+            default_value_distribution=dist.LogNormal(np.log(0.5), 0.2),
+            default_log_distribution=dist.Normal(np.log(0.5), 0.2),
+        )
+        hot_fcov = _sample_positive_distribution(
             prior_config,
             value_key="hot_fcov",
             log_key="log_hot_fcov",
-            default_value=0.1,
-            default_log_scale=0.8,
+            default_value_distribution=dist.LogNormal(np.log(0.1), 0.8),
+            default_log_distribution=dist.Normal(np.log(0.1), 0.8),
+            default_to_log=True,
         )
         torus_rest = _torus_component(
             rest_wave,
@@ -1558,31 +1677,82 @@ def evaluate_photometric_state(
         )
 
         if include_sed_agn_features:
-            lines_strength = numpyro.sample("lines_strength", dist.LogNormal(*_cfg_norm(prior_config, "log_lines_strength", np.log(max(cfg.agn.lines_strength_default, 1e-3)), 0.5)))
-            line_width = numpyro.sample("line_width_kms", dist.LogNormal(*_cfg_norm(prior_config, "log_line_width_kms", np.log(cfg.agn.line_width_kms_default), 0.4)))
-            balmer_enabled = bool(cfg.agn.fit_balmer_continuum) and agn_type == 1
+            broad_lines_strength = _sample_positive_distribution(
+                prior_config,
+                value_key="broad_lines_strength",
+                log_key="log_broad_lines_strength",
+                default_value_distribution=dist.LogNormal(np.log(max(cfg.agn.broad_lines_strength_default, 1e-3)), 0.5),
+                default_log_distribution=dist.Normal(np.log(max(cfg.agn.broad_lines_strength_default, 1e-3)), 0.5),
+            )
+            narrow_lines_strength = _sample_positive_distribution(
+                prior_config,
+                value_key="narrow_lines_strength",
+                log_key="log_narrow_lines_strength",
+                default_value_distribution=dist.LogNormal(np.log(max(cfg.agn.narrow_lines_strength_default, 1e-3)), 0.5),
+                default_log_distribution=dist.Normal(np.log(max(cfg.agn.narrow_lines_strength_default, 1e-3)), 0.5),
+            )
+            broad_line_width = _sample_log_positive_from_distribution(
+                prior_config,
+                value_key="broad_line_width_kms",
+                log_key="log_broad_line_width_kms",
+                default_distribution=dist.TruncatedNormal(
+                    np.log(max(cfg.agn.broad_line_width_kms_default, DEFAULT_BROAD_LINE_WIDTH_KMS_MIN)),
+                    0.4,
+                    low=np.log(DEFAULT_BROAD_LINE_WIDTH_KMS_MIN),
+                    high=np.log(DEFAULT_BROAD_LINE_WIDTH_KMS_MAX),
+                ),
+            )
+            narrow_line_width = _sample_log_positive_from_distribution(
+                prior_config,
+                value_key="narrow_line_width_kms",
+                log_key="log_narrow_line_width_kms",
+                default_distribution=dist.TruncatedNormal(
+                    np.log(max(cfg.agn.narrow_line_width_kms_default, DEFAULT_NARROW_LINE_WIDTH_KMS_MIN)),
+                    0.3,
+                    low=np.log(DEFAULT_NARROW_LINE_WIDTH_KMS_MIN),
+                    high=np.log(DEFAULT_NARROW_LINE_WIDTH_KMS_MAX),
+                ),
+            )
+            balmer_enabled = bool(use_native_balmer and cfg.agn.fit_balmer_continuum and agn_type == 1)
             if balmer_enabled:
-                balmer_norm = numpyro.sample(
-                    "balmer_norm",
-                    dist.LogNormal(*_cfg_norm(prior_config, "log_balmer_norm", np.log(max(cfg.agn.balmer_continuum_default, 1e-3)), 1.0)),
+                balmer_norm = _sample_positive_distribution(
+                    prior_config,
+                    value_key="balmer_norm",
+                    log_key="log_balmer_norm",
+                    default_value_distribution=dist.LogNormal(np.log(max(cfg.agn.balmer_continuum_default, 1e-3)), 1.0),
+                    default_log_distribution=dist.Normal(np.log(max(cfg.agn.balmer_continuum_default, 1e-3)), 1.0),
                 )
-                balmer_tau = numpyro.sample("balmer_tau", dist.LogNormal(*_cfg_norm(prior_config, "log_balmer_tau", np.log(1.0), 0.5)))
-                balmer_vel = numpyro.sample("balmer_vel", dist.LogNormal(*_cfg_norm(prior_config, "log_balmer_vel", np.log(cfg.agn.line_width_kms_default), 0.4)))
+                balmer_tau = _sample_positive_distribution(
+                    prior_config,
+                    value_key="balmer_tau",
+                    log_key="log_balmer_tau",
+                    default_value_distribution=dist.LogNormal(np.log(1.0), 0.5),
+                    default_log_distribution=dist.Normal(np.log(1.0), 0.5),
+                )
+                balmer_vel = _sample_positive_distribution(
+                    prior_config,
+                    value_key="balmer_vel",
+                    log_key="log_balmer_vel",
+                    default_value_distribution=dist.LogNormal(np.log(cfg.agn.broad_line_width_kms_default), 0.4),
+                    default_log_distribution=dist.Normal(np.log(cfg.agn.broad_line_width_kms_default), 0.4),
+                )
             else:
                 balmer_norm = jnp.asarray(0.0, dtype=jnp.float64)
                 balmer_tau = jnp.asarray(1.0, dtype=jnp.float64)
-                balmer_vel = jnp.asarray(float(cfg.agn.line_width_kms_default), dtype=jnp.float64)
+                balmer_vel = jnp.asarray(float(cfg.agn.broad_line_width_kms_default), dtype=jnp.float64)
         else:
-            lines_strength = jnp.asarray(0.0, dtype=jnp.float64)
-            line_width = jnp.asarray(float(cfg.agn.line_width_kms_default), dtype=jnp.float64)
+            broad_lines_strength = jnp.asarray(0.0, dtype=jnp.float64)
+            narrow_lines_strength = jnp.asarray(0.0, dtype=jnp.float64)
+            broad_line_width = jnp.asarray(float(cfg.agn.broad_line_width_kms_default), dtype=jnp.float64)
+            narrow_line_width = jnp.asarray(float(cfg.agn.narrow_line_width_kms_default), dtype=jnp.float64)
             balmer_norm = jnp.asarray(0.0, dtype=jnp.float64)
             balmer_tau = jnp.asarray(1.0, dtype=jnp.float64)
-            balmer_vel = jnp.asarray(float(cfg.agn.line_width_kms_default), dtype=jnp.float64)
+            balmer_vel = jnp.asarray(float(cfg.agn.broad_line_width_kms_default), dtype=jnp.float64)
             balmer_enabled = False
         l_agn_lambda_5100 = agn_amp / 5100.0
         agn_bol_luminosity = agn_amp * AGN_BOLOMETRIC_CORRECTION_5100
-        l_broadlines = 0.02 * l_agn_lambda_5100 * lines_strength
-        l_narrowlines = 0.002 * l_agn_lambda_5100 * lines_strength
+        l_broadlines = 0.02 * l_agn_lambda_5100 * broad_lines_strength
+        l_narrowlines = 0.002 * l_agn_lambda_5100 * narrow_lines_strength
 
         if skip_coarse_agn_line_grid:
             line_bl_rest = jnp.zeros_like(rest_wave)
@@ -1592,35 +1762,47 @@ def evaluate_photometric_state(
         else:
             line_bl_rest = jnp.where(
                 agn_type == 1,
-                _line_gaussians(rest_wave, line_wave, l_broadlines * line_blagn, line_width),
+                _line_gaussians(rest_wave, line_wave, l_broadlines * line_blagn, broad_line_width),
                 jnp.zeros_like(rest_wave),
             )
             line_nl_rest = jnp.where(
                 agn_type in (1, 2),
-                _line_gaussians(rest_wave, line_wave, l_narrowlines * line_sy2, line_width),
+                _line_gaussians(rest_wave, line_wave, l_narrowlines * line_sy2, narrow_line_width),
                 jnp.zeros_like(rest_wave),
             )
             line_liner_rest = jnp.where(
                 agn_type == 3,
-                _line_gaussians(rest_wave, line_wave, l_narrowlines * line_liner, line_width),
+                _line_gaussians(rest_wave, line_wave, l_narrowlines * line_liner, narrow_line_width),
                 jnp.zeros_like(rest_wave),
             )
             line_rest = line_bl_rest + line_nl_rest + line_liner_rest
 
-        if include_sed_agn_features and agn_type == 1:
-            feii_norm = numpyro.sample("feii_norm", dist.LogNormal(*_cfg_norm(prior_config, "log_feii_norm", np.log(max(cfg.agn.feii_strength_default, 1e-3)), 0.8)))
+        if use_native_feii and agn_type == 1:
+            feii_norm = _sample_positive_distribution(
+                prior_config,
+                value_key="feii_norm",
+                log_key="log_feii_norm",
+                default_value_distribution=dist.LogNormal(np.log(max(cfg.agn.feii_strength_default, 1e-3)), 0.8),
+                default_log_distribution=dist.Normal(np.log(max(cfg.agn.feii_strength_default, 1e-3)), 0.8),
+            )
             l_feii = feii_norm * l_broadlines
             if cfg.agn.fit_feii_broadening:
-                feii_fwhm = numpyro.sample("feii_fwhm", dist.LogNormal(*_cfg_norm(prior_config, "log_feii_fwhm", np.log(cfg.agn.line_width_kms_default), 0.3)))
-                feii_shift = numpyro.sample("feii_shift", dist.Normal(*_cfg_norm(prior_config, "feii_shift", 0.0, 0.01)))
+                feii_fwhm = _sample_positive_distribution(
+                    prior_config,
+                    value_key="feii_fwhm",
+                    log_key="log_feii_fwhm",
+                    default_value_distribution=dist.LogNormal(np.log(cfg.agn.broad_line_width_kms_default), 0.3),
+                    default_log_distribution=dist.Normal(np.log(cfg.agn.broad_line_width_kms_default), 0.3),
+                )
+                feii_shift = _sample_prior(prior_config, "feii_shift", dist.Normal(0.0, 0.01))
                 feii_rest = _feii_component(rest_wave, feii_template_on_rest, l_feii, feii_fwhm, feii_shift)
             else:
-                feii_fwhm = jnp.asarray(float(cfg.agn.line_width_kms_default), dtype=jnp.float64)
+                feii_fwhm = jnp.asarray(float(cfg.agn.broad_line_width_kms_default), dtype=jnp.float64)
                 feii_shift = jnp.asarray(0.0, dtype=jnp.float64)
                 feii_rest = l_feii * jnp.maximum(feii_template_on_rest, 0.0)
         else:
             feii_norm = jnp.asarray(0.0, dtype=jnp.float64)
-            feii_fwhm = jnp.asarray(float(cfg.agn.line_width_kms_default), dtype=jnp.float64)
+            feii_fwhm = jnp.asarray(float(cfg.agn.broad_line_width_kms_default), dtype=jnp.float64)
             feii_shift = jnp.asarray(0.0, dtype=jnp.float64)
             feii_rest = jnp.zeros_like(rest_wave)
         balmer_rest = (
@@ -1643,11 +1825,13 @@ def evaluate_photometric_state(
         hot_width = jnp.asarray(0.5, dtype=jnp.float64)
         hot_fcov = jnp.asarray(0.0, dtype=jnp.float64)
         torus_rest = jnp.zeros_like(rest_wave)
-        lines_strength = jnp.asarray(0.0, dtype=jnp.float64)
-        line_width = jnp.asarray(float(cfg.agn.line_width_kms_default), dtype=jnp.float64)
+        broad_lines_strength = jnp.asarray(0.0, dtype=jnp.float64)
+        narrow_lines_strength = jnp.asarray(0.0, dtype=jnp.float64)
+        broad_line_width = jnp.asarray(float(cfg.agn.broad_line_width_kms_default), dtype=jnp.float64)
+        narrow_line_width = jnp.asarray(float(cfg.agn.narrow_line_width_kms_default), dtype=jnp.float64)
         balmer_norm = jnp.asarray(0.0, dtype=jnp.float64)
         balmer_tau = jnp.asarray(1.0, dtype=jnp.float64)
-        balmer_vel = jnp.asarray(float(cfg.agn.line_width_kms_default), dtype=jnp.float64)
+        balmer_vel = jnp.asarray(float(cfg.agn.broad_line_width_kms_default), dtype=jnp.float64)
         l_agn_lambda_5100 = jnp.asarray(0.0, dtype=jnp.float64)
         agn_bol_luminosity = jnp.asarray(0.0, dtype=jnp.float64)
         line_bl_rest = jnp.zeros_like(rest_wave)
@@ -1655,55 +1839,48 @@ def evaluate_photometric_state(
         line_liner_rest = jnp.zeros_like(rest_wave)
         line_rest = jnp.zeros_like(rest_wave)
         feii_norm = jnp.asarray(0.0, dtype=jnp.float64)
-        feii_fwhm = jnp.asarray(float(cfg.agn.line_width_kms_default), dtype=jnp.float64)
+        feii_fwhm = jnp.asarray(float(cfg.agn.broad_line_width_kms_default), dtype=jnp.float64)
         feii_shift = jnp.asarray(0.0, dtype=jnp.float64)
         feii_rest = jnp.zeros_like(rest_wave)
         balmer_rest = jnp.zeros_like(rest_wave)
 
     ebv_gal = (
-        _sample_log_positive(
+        _sample_positive_distribution(
             prior_config,
             value_key="ebv_gal",
             log_key="log_ebv_gal",
-            default_value=0.05,
-            default_log_scale=1.0,
+            default_value_distribution=dist.LogNormal(np.log(0.05), 1.0),
+            default_log_distribution=dist.Normal(np.log(0.05), 1.0),
+            default_to_log=True,
         )
         if fit_host
         else jnp.asarray(0.0, dtype=jnp.float64)
     )
     ebv_agn = (
-        _sample_log_positive(
+        _sample_positive_distribution(
             prior_config,
             value_key="ebv_agn",
             log_key="log_ebv_agn",
-            default_value=0.05,
-            default_log_scale=1.0,
+            default_value_distribution=dist.LogNormal(np.log(0.05), 1.0),
+            default_log_distribution=dist.Normal(np.log(0.05), 1.0),
+            default_to_log=True,
         )
         if fit_agn
         else jnp.asarray(0.0, dtype=jnp.float64)
     )
     if cfg.galaxy.use_energy_balance and fit_host:
-        dust_alpha = numpyro.sample(
+        dust_alpha = _sample_prior(
+            prior_config,
             "dust_alpha",
-            dist.TruncatedNormal(
-                *_cfg_norm(prior_config, "dust_alpha", cfg.galaxy.dust_alpha, 0.4),
-                low=float(np.min(dust_alpha_grid)),
-                high=float(np.max(dust_alpha_grid)),
-            ),
+            dist.TruncatedNormal(cfg.galaxy.dust_alpha, 0.4, low=float(np.min(dust_alpha_grid)), high=float(np.max(dust_alpha_grid))),
         )
     else:
         dust_alpha = jnp.asarray(float(cfg.galaxy.dust_alpha), dtype=jnp.float64)
     if cfg.likelihood.fit_intrinsic_scatter:
-        log_intrinsic_scatter = numpyro.sample(
+        log_intrinsic_scatter = _sample_prior(
+            prior_config,
             "log_intrinsic_scatter",
-            dist.Normal(
-                *_cfg_norm(
-                    prior_config,
-                    "log_intrinsic_scatter",
-                    np.log(max(cfg.likelihood.intrinsic_scatter_default, 1.0e-8)),
-                    1.0,
-                ),
-            ),
+            dist.Normal(np.log(max(cfg.likelihood.intrinsic_scatter_default, 1.0e-8)), 1.0),
         )
         intrinsic_scatter = jnp.exp(log_intrinsic_scatter)
     else:
@@ -1795,32 +1972,56 @@ def evaluate_photometric_state(
         and bool(cfg.likelihood.use_local_line_photometry)
     )
     if correct_agn_line_photometry:
+        photometric_agn_line_mask = _photometric_agn_line_mask(context, cfg, line_wave, redshift)
         if agn_type == 1:
-            local_line_lumin = l_broadlines * line_blagn + l_narrowlines * line_sy2
+            local_broad_line_lumin = l_broadlines * line_blagn
+            local_narrow_line_lumin = l_narrowlines * line_sy2
         elif agn_type == 2:
-            local_line_lumin = l_narrowlines * line_sy2
+            local_broad_line_lumin = jnp.zeros_like(line_wave)
+            local_narrow_line_lumin = l_narrowlines * line_sy2
         elif agn_type == 3:
-            local_line_lumin = l_narrowlines * line_liner
+            local_broad_line_lumin = jnp.zeros_like(line_wave)
+            local_narrow_line_lumin = l_narrowlines * line_liner
         else:
-            local_line_lumin = jnp.zeros_like(line_wave)
+            local_broad_line_lumin = jnp.zeros_like(line_wave)
+            local_narrow_line_lumin = jnp.zeros_like(line_wave)
+        local_broad_line_lumin = local_broad_line_lumin * photometric_agn_line_mask
+        local_narrow_line_lumin = local_narrow_line_lumin * photometric_agn_line_mask
         if context.fixed_local_line_projection_cache_jax is not None and not cfg.observation.fits_redshift:
-            local_agn_line_fluxes = _project_fixed_cached_local_line_filters(
+            local_broad_line_fluxes = _project_fixed_cached_local_line_filters(
                 context,
-                local_line_lumin,
-                line_width,
+                local_broad_line_lumin,
+                broad_line_width,
+                ebv_gal + ebv_agn,
+            )
+            local_narrow_line_fluxes = _project_fixed_cached_local_line_filters(
+                context,
+                local_narrow_line_lumin,
+                narrow_line_width,
                 ebv_gal + ebv_agn,
             )
         else:
-            local_agn_line_fluxes = _project_local_line_filters(
+            local_broad_line_fluxes = _project_local_line_filters(
                 context,
                 line_wave,
-                local_line_lumin,
-                line_width,
+                local_broad_line_lumin,
+                broad_line_width,
                 ebv_gal + ebv_agn,
                 redshift,
                 luminosity_distance_m,
                 igm,
             )
+            local_narrow_line_fluxes = _project_local_line_filters(
+                context,
+                line_wave,
+                local_narrow_line_lumin,
+                narrow_line_width,
+                ebv_gal + ebv_agn,
+                redshift,
+                luminosity_distance_m,
+                igm,
+            )
+        local_agn_line_fluxes = local_broad_line_fluxes + local_narrow_line_fluxes
         if fast_projection_enabled:
             coarse_agn_line_fluxes = _project_rest_luminosity_filters(context, line_att_rest)
         elif redshift_projection_enabled:
@@ -1856,6 +2057,7 @@ def evaluate_photometric_state(
             coarse_nebular_line_obs = _redshift_to_obs(rest_wave, nebular_lines_att_rest * igm, obs_wave, redshift, luminosity_distance_m)
             coarse_nebular_line_fluxes = _project_filters(coarse_nebular_line_obs, context.packed_filters_jax)
         pred_fluxes_raw = pred_fluxes_raw - coarse_nebular_line_fluxes + local_nebular_line_fluxes
+    host_dust_fluxes_total = jnp.zeros_like(pred_fluxes_raw)
     if host_capture_enabled or include_components or spectroscopy_enabled:
         host_obs = (
             jnp.zeros_like(obs_wave)
@@ -1870,17 +2072,29 @@ def evaluate_photometric_state(
             host_fluxes_total = _project_filters(host_obs, context.packed_filters_jax)
         if correct_nebular_line_photometry:
             host_fluxes_total = host_fluxes_total - coarse_nebular_line_fluxes + local_nebular_line_fluxes
+        if host_capture_enabled:
+            if fast_projection_enabled:
+                host_dust_fluxes_total = _project_rest_luminosity_filters(context, dust_rest)
+            elif redshift_projection_enabled:
+                host_dust_fluxes_total = _project_redshift_luminosity_filters(context, dust_rest, redshift)
+            else:
+                host_dust_obs = _redshift_to_obs(rest_wave, dust_rest * igm, obs_wave, redshift, luminosity_distance_m)
+                host_dust_fluxes_total = _project_filters(host_dust_obs, context.packed_filters_jax)
     else:
         host_obs = jnp.zeros_like(total_obs)
         host_fluxes_total = jnp.zeros_like(pred_fluxes_raw)
     if host_capture_enabled:
-        log_host_capture_scale_arcsec = numpyro.sample(
+        log_host_capture_scale_arcsec = _sample_prior(
+            prior_config,
             "log_host_capture_scale_arcsec",
-            dist.Normal(*_cfg_norm(prior_config, "log_host_capture_scale_arcsec", np.log(3.0), 1.0)),
+            dist.Normal(np.log(3.0), 1.0),
         )
-        host_capture_slope = numpyro.sample(
-            "host_capture_slope",
-            dist.LogNormal(*_cfg_norm(prior_config, "log_host_capture_slope", np.log(2.0), 0.5)),
+        host_capture_slope = _sample_positive_distribution(
+            prior_config,
+            value_key="host_capture_slope",
+            log_key="log_host_capture_slope",
+            default_value_distribution=dist.LogNormal(np.log(2.0), 0.5),
+            default_log_distribution=dist.Normal(np.log(2.0), 0.5),
         )
         phot_capture_raw = _host_capture_fraction(
             spatial_scale_arcsec,
@@ -1901,8 +2115,15 @@ def evaluate_photometric_state(
         host_capture_slope = jnp.asarray(2.0, dtype=jnp.float64)
         host_capture_fraction = jnp.ones_like(pred_fluxes_raw)
         spec_host_capture_fraction_by_spectrum = jnp.ones_like(spec_spatial_scale_arcsec)
+    host_capture_source_fluxes = host_fluxes_total + host_dust_fluxes_total
     host_fluxes = host_fluxes_total * host_capture_fraction
-    pred_fluxes = pred_fluxes_raw if not host_capture_enabled else pred_fluxes_raw - host_fluxes_total + host_fluxes
+    captured_host_dust_fluxes = host_dust_fluxes_total * host_capture_fraction
+    captured_host_source_fluxes = host_capture_source_fluxes * host_capture_fraction
+    pred_fluxes = (
+        pred_fluxes_raw
+        if not host_capture_enabled
+        else pred_fluxes_raw - host_capture_source_fluxes + captured_host_source_fluxes
+    )
 
     spec_model_fluxes = jnp.zeros_like(spec_fluxes)
     spec_host_model_fluxes = jnp.zeros_like(spec_fluxes)
@@ -1910,6 +2131,7 @@ def evaluate_photometric_state(
     spec_torus_model_fluxes = jnp.zeros_like(spec_fluxes)
     spec_continuum_model_fluxes = jnp.zeros_like(spec_fluxes)
     spectrum_scale = jnp.asarray(1.0, dtype=jnp.float64)
+    spec_likelihood_weight = jnp.asarray(1.0, dtype=jnp.float64)
     if spectroscopy_enabled:
         backend = str(cfg.spectroscopy_config.backend).lower()
         if backend == "jaxqsofit":
@@ -1938,7 +2160,7 @@ def evaluate_photometric_state(
                     right=0.0,
                 )
                 spec_host_intrinsic = _host_rest_on_basis(host_state, context.spec_host_basis_jax)
-                if fit_host and bool(cfg.galaxy.fit_host_kinematics):
+                if host_kinematics_enabled:
                     spec_host_intrinsic = _shift_and_broaden_single_spectrum_lnlam(
                         jnp.log(spec_rest_wave),
                         spec_host_intrinsic,
@@ -2029,29 +2251,98 @@ def evaluate_photometric_state(
                 context.jaxqsofit_prior_config,
                 rest_wave,
                 feii_template_on_rest,
+                line_coverage_rest=jaxqsofit_line_coverage_rest,
                 fixed_narrow_fwhm_kms=nebular["lines_width"],
-                fixed_narrow_amp_scale=nebular["line_scale"],
             )
+            jqf_cfg = cfg.spectroscopy_config.jaxqsofit
+            if bool(jqf_cfg.use_line_strength_priors) and bool(jqf_cfg.use_spectral_lines):
+                sed_broad_line_obs = _redshift_to_obs(
+                    rest_wave,
+                    line_bl_att_rest * igm,
+                    obs_wave,
+                    redshift,
+                    luminosity_distance_m,
+                )
+                sed_narrow_line_obs = _redshift_to_obs(
+                    rest_wave,
+                    line_nl_att_rest * igm,
+                    obs_wave,
+                    redshift,
+                    luminosity_distance_m,
+                )
+                sed_broad_line_mjy = _flambda_to_mjy(
+                    spec_wave_obs,
+                    jnp.interp(spec_wave_obs, obs_wave, sed_broad_line_obs, left=0.0, right=0.0),
+                )
+                sed_narrow_line_mjy = _flambda_to_mjy(
+                    spec_wave_obs,
+                    jnp.interp(spec_wave_obs, obs_wave, sed_narrow_line_obs, left=0.0, right=0.0),
+                )
+                sed_narrow_bridge_mjy = sed_narrow_line_mjy
+                if bool(jqf_cfg.use_nebular_line_prior):
+                    sed_nebular_line_obs = _redshift_to_obs(
+                        rest_wave,
+                        nebular_lines_att_rest * igm,
+                        obs_wave,
+                        redshift,
+                        luminosity_distance_m,
+                    )
+                    sed_nebular_line_mjy = _flambda_to_mjy(
+                        spec_wave_obs,
+                        jnp.interp(spec_wave_obs, obs_wave, sed_nebular_line_obs, left=0.0, right=0.0),
+                    )
+                    if host_capture_enabled:
+                        sed_nebular_line_mjy = sed_nebular_line_mjy * spec_host_capture_fraction_by_spectrum[spec_spectrum_index]
+                    sed_narrow_bridge_mjy = sed_narrow_bridge_mjy + sed_nebular_line_mjy
+
+                jqf_broad_flux = _integrated_spectral_flux_proxy(spec_wave_obs, jqf_components["line_broad"], spec_mask)
+                sed_broad_flux = _integrated_spectral_flux_proxy(spec_wave_obs, sed_broad_line_mjy, spec_mask)
+                jqf_narrow_flux = _integrated_spectral_flux_proxy(spec_wave_obs, jqf_components["line_narrow"], spec_mask)
+                sed_narrow_flux = _integrated_spectral_flux_proxy(spec_wave_obs, sed_narrow_bridge_mjy, spec_mask)
+                numpyro.factor(
+                    "jqf_broad_to_sed_broad_line_prior",
+                    _line_strength_bridge_logprob(
+                        sed_broad_flux,
+                        jqf_broad_flux,
+                        jqf_cfg.line_strength_prior_sigma_dex,
+                    ),
+                )
+                narrow_sigma_dex = (
+                    jqf_cfg.nebular_line_prior_sigma_dex
+                    if bool(jqf_cfg.use_nebular_line_prior)
+                    else jqf_cfg.line_strength_prior_sigma_dex
+                )
+                numpyro.factor(
+                    "jqf_narrow_to_sed_narrow_line_prior",
+                    _line_strength_bridge_logprob(
+                        sed_narrow_flux,
+                        jqf_narrow_flux,
+                        narrow_sigma_dex,
+                    ),
+                )
+                numpyro.deterministic("jqf_broad_line_flux_proxy", jqf_broad_flux)
+                numpyro.deterministic("sed_broad_line_flux_proxy", sed_broad_flux)
+                numpyro.deterministic("jqf_narrow_line_flux_proxy", jqf_narrow_flux)
+                numpyro.deterministic("sed_narrow_line_flux_proxy", sed_narrow_flux)
             spec_model_fluxes = jqf_components["total"]
         if cfg.spectroscopy_config.fit_scale:
-            scale_loc, scale_width = _cfg_norm(
+            scale_prior = _prior_distribution(
                 prior_config,
                 "log_spectrum_scale",
-                0.0,
-                np.log(10.0) * cfg.spectroscopy_config.scale_prior_sigma_dex,
+                dist.Normal(0.0, np.log(10.0) * cfg.spectroscopy_config.scale_prior_sigma_dex),
             )
             n_spectra = len(context.spec_instruments)
             if n_spectra > 1:
                 log_spectrum_scale = numpyro.sample(
                     "log_spectrum_scale",
-                    dist.Normal(scale_loc, scale_width).expand([n_spectra]).to_event(1),
+                    scale_prior.expand([n_spectra]).to_event(1),
                 )
                 spectrum_scale = jnp.exp(log_spectrum_scale)
                 spec_model_fluxes = spectrum_scale[spec_spectrum_index] * spec_model_fluxes
             else:
                 log_spectrum_scale = numpyro.sample(
                     "log_spectrum_scale",
-                    dist.Normal(scale_loc, scale_width),
+                    scale_prior,
                 )
                 spectrum_scale = jnp.exp(log_spectrum_scale)
                 spec_model_fluxes = spectrum_scale * spec_model_fluxes
@@ -2065,6 +2356,14 @@ def evaluate_photometric_state(
             cfg.spectroscopy_config.systematics_width,
             cfg.spectroscopy_config.student_t_df,
         )
+        spec_likelihood_weight = spectroscopic_likelihood_weight(
+            spec_wave_obs,
+            spec_mask,
+            spec_spectrum_index,
+            cfg.spectroscopy_config.likelihood_weight_mode,
+            cfg.spectroscopy_config.resolving_power,
+        )
+        spec_logl = spec_likelihood_weight * spec_logl
         if add_likelihood:
             numpyro.factor("spectroscopy_loglike_factor", spec_logl)
     else:
@@ -2196,6 +2495,7 @@ def evaluate_photometric_state(
     numpyro.deterministic("spectrum_scale_fit", spectrum_scale)
     numpyro.deterministic("log_spectrum_scale_fit", log_spectrum_scale)
     numpyro.deterministic("spectrum_host_capture_fraction", spec_host_capture_fraction_by_spectrum)
+    numpyro.deterministic("spectroscopy_likelihood_weight", spec_likelihood_weight)
     numpyro.deterministic("spectroscopy_loglike", spec_logl)
     numpyro.deterministic("intrinsic_scatter_fit", intrinsic_scatter)
     numpyro.deterministic("fracAGN_5100_fit", fracagn_5100)
@@ -2205,6 +2505,8 @@ def evaluate_photometric_state(
     numpyro.deterministic("agn_variability_nev", _agn_variability_nev(agn_bol_luminosity, cfg.likelihood.agn_nev))
     numpyro.deterministic("transmitted_fraction_fluxes", trans_fluxes)
     numpyro.deterministic("host_total_fluxes", host_fluxes_total)
+    numpyro.deterministic("host_capture_source_fluxes", host_capture_source_fluxes)
+    numpyro.deterministic("captured_host_dust_fluxes", captured_host_dust_fluxes)
     numpyro.deterministic("host_capture_fraction_fluxes", host_capture_fraction)
     numpyro.deterministic("log_host_capture_scale_arcsec_fit", log_host_capture_scale_arcsec)
     numpyro.deterministic("host_capture_slope_fit", host_capture_slope)
@@ -2305,6 +2607,8 @@ def evaluate_photometric_state(
         "agn_fluxes": agn_fluxes,
         "host_fluxes": host_fluxes,
         "host_total_fluxes": host_fluxes_total,
+        "host_capture_source_fluxes": host_capture_source_fluxes,
+        "captured_host_dust_fluxes": captured_host_dust_fluxes,
         "dust_fluxes": dust_fluxes if include_components else jnp.zeros_like(pred_fluxes),
         "nebular_fluxes": nebular_fluxes if include_components else jnp.zeros_like(pred_fluxes),
         "nebular_lines_fluxes": nebular_lines_fluxes if include_components else jnp.zeros_like(pred_fluxes),
@@ -2314,6 +2618,7 @@ def evaluate_photometric_state(
         "redshift_fit": redshift,
         "photometry_loglike": logl,
         "spectroscopy_loglike": spec_logl,
+        "spectroscopy_likelihood_weight": spec_likelihood_weight,
     }
     if include_components:
         state.update(
