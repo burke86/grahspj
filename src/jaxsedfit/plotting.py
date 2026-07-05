@@ -361,6 +361,9 @@ def plot_fit_sed(
     obs_flux = np.asarray(fitter.config.photometry.fluxes, dtype=float)
     obs_err = np.asarray(fitter.config.photometry.errors, dtype=float)
     labels = list(fitter.config.photometry.filter_names)
+    methods_raw = getattr(fitter.config.photometry, "photometry_method", None)
+    methods = ["" for _ in labels] if methods_raw is None else ["" if method is None else str(method) for method in methods_raw]
+    psf_mask = np.asarray(["psf" in method.lower() for method in methods], dtype=bool)
     plotted_components: list[np.ndarray] = []
     legend_labels_seen: set[str] = set()
 
@@ -459,26 +462,46 @@ def plot_fit_sed(
                     zorder=2,
                 )
 
-        ax_sed.errorbar(
-            phot_wave,
-            obs_flux,
-            yerr=obs_err,
-            fmt="o",
-            color="#c53030",
-            ms=5,
-            capsize=2,
-            label="Observed photometry",
-            zorder=5,
-        )
+        non_psf_mask = ~psf_mask
+        if np.any(non_psf_mask):
+            ax_sed.errorbar(
+                phot_wave[non_psf_mask],
+                obs_flux[non_psf_mask],
+                yerr=obs_err[non_psf_mask],
+                fmt="o",
+                color="#c53030",
+                ms=5,
+                capsize=2,
+                label="Observed photometry",
+                zorder=5,
+            )
+        if np.any(psf_mask):
+            ax_sed.errorbar(
+                phot_wave[psf_mask],
+                obs_flux[psf_mask],
+                yerr=obs_err[psf_mask],
+                fmt="D",
+                color="#2b6cb0",
+                mec="white",
+                mew=0.6,
+                ms=5,
+                capsize=2,
+                label="Observed PSF photometry",
+                zorder=7,
+            )
         ax_sed.scatter(phot_wave, model_flux, color="#111111", marker="s", s=28, label="Model photometry", zorder=6)
         if annotate_band_names:
-            for x, y, label in zip(phot_wave, obs_flux, labels):
-                ax_sed.annotate(label, (x, y), xytext=(4, 5), textcoords="offset points", fontsize=8)
+            for x, y, label, method in zip(phot_wave, obs_flux, labels, methods):
+                suffix = " PSF" if "psf" in method.lower() else ""
+                ax_sed.annotate(f"{label}{suffix}", (x, y), xytext=(4, 5), textcoords="offset points", fontsize=8)
 
         resid = obs_flux - model_flux
         eff_variance = _median_effective_variance(fitter, pred)
         eff_sigma = np.sqrt(np.clip(eff_variance, 1e-30, 1.0e60))
-        ax_resid.errorbar(phot_wave, resid, yerr=eff_sigma, fmt="o", color="black", ms=4, capsize=2)
+        if np.any(non_psf_mask):
+            ax_resid.errorbar(phot_wave[non_psf_mask], resid[non_psf_mask], yerr=eff_sigma[non_psf_mask], fmt="o", color="black", ms=4, capsize=2)
+        if np.any(psf_mask):
+            ax_resid.errorbar(phot_wave[psf_mask], resid[psf_mask], yerr=eff_sigma[psf_mask], fmt="D", color="#2b6cb0", mec="white", mew=0.6, ms=4, capsize=2)
         ax_resid.axhline(0.0, color="black", lw=1.0, ls="--")
         upper_limits = np.asarray(getattr(fitter.context, "upper_limits", np.zeros_like(obs_flux, dtype=bool)), dtype=bool)
         finite_chi2 = np.isfinite(obs_flux) & np.isfinite(model_flux) & np.isfinite(eff_sigma) & (eff_sigma > 0.0) & (~upper_limits)
