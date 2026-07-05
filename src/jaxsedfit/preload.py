@@ -409,12 +409,10 @@ def _build_jaxqsofit_prior_config(cfg: FitConfig, spec_fluxes: np.ndarray, spec_
     if str(spec_cfg.backend).lower() != "jaxqsofit":
         return None
     jqf_cfg = spec_cfg.jaxqsofit
-    if jqf_cfg.line_prior_config is not None:
-        return dict(jqf_cfg.line_prior_config)
     if not bool(jqf_cfg.use_spectral_smart_priors):
         return None
     try:
-        from jaxqsofit.defaults import build_default_prior_config
+        from jaxqsofit.config import PriorConfig as JaxQSOFitPriorConfig
     except Exception as exc:  # pragma: no cover - exercised only without optional dependency
         raise ImportError(
             "SpectroscopyConfig.backend='jaxqsofit' with smart priors requires jaxqsofit on PYTHONPATH."
@@ -426,8 +424,9 @@ def _build_jaxqsofit_prior_config(cfg: FitConfig, spec_fluxes: np.ndarray, spec_
     flux_for_priors = flux[valid]
     if flux_for_priors.size == 0:
         flux_for_priors = np.asarray([max(float(jqf_cfg.line_flux_scale_mjy), 1.0e-8)], dtype=float)
-    return build_default_prior_config(
-        flux_for_priors,
+    return JaxQSOFitPriorConfig.from_spectrum(
+        flux=flux_for_priors,
+        redshift=cfg.observation.redshift,
         include_elg_narrow_lines=bool(jqf_cfg.include_elg_narrow_lines),
         include_high_ionization_lines=bool(jqf_cfg.include_high_ionization_lines),
     )

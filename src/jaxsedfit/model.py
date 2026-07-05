@@ -39,6 +39,12 @@ DEFAULT_BROAD_LINE_WIDTH_KMS_MIN = 1000.0
 DEFAULT_BROAD_LINE_WIDTH_KMS_MAX = 15000.0
 DEFAULT_NARROW_LINE_WIDTH_KMS_MIN = 100.0
 DEFAULT_NARROW_LINE_WIDTH_KMS_MAX = 1500.0
+DEFAULT_BROAD_LINE_WIDTH_KMS = 3000.0
+DEFAULT_NARROW_LINE_WIDTH_KMS = 500.0
+DEFAULT_BROAD_LINES_STRENGTH = 1.0
+DEFAULT_NARROW_LINES_STRENGTH = 1.0
+DEFAULT_FEII_STRENGTH = 5.0
+DEFAULT_BALMER_CONTINUUM_STRENGTH = 1.0e-3
 GRAHSP_BIATTENUATION_BREAK_A = 11000.0
 GRAHSP_PL_BEND_LOC_A = 1000.0
 GRAHSP_PL_BEND_WIDTH = 10.0
@@ -1442,9 +1448,9 @@ def _evaluate_jaxqsofit_backend(
         line_coverage_rest=line_coverage_rest,
         include_elg_narrow_lines=bool(jqf_cfg.include_elg_narrow_lines),
         include_high_ionization_lines=bool(jqf_cfg.include_high_ionization_lines),
-        broad_fwhm_kms_default=float(cfg.agn.broad_line_width_kms_default),
-        feii_fwhm_kms_default=float(cfg.agn.broad_line_width_kms_default),
-        balmer_velocity_kms_default=float(cfg.agn.broad_line_width_kms_default),
+        broad_fwhm_kms_default=DEFAULT_BROAD_LINE_WIDTH_KMS,
+        feii_fwhm_kms_default=DEFAULT_BROAD_LINE_WIDTH_KMS,
+        balmer_velocity_kms_default=DEFAULT_BROAD_LINE_WIDTH_KMS,
         fixed_narrow_fwhm_kms=fixed_narrow_fwhm_kms,
         fixed_narrow_amp_scale=fixed_narrow_amp_scale,
     )
@@ -1681,22 +1687,22 @@ def evaluate_photometric_state(
                 prior_config,
                 value_key="broad_lines_strength",
                 log_key="log_broad_lines_strength",
-                default_value_distribution=dist.LogNormal(np.log(max(cfg.agn.broad_lines_strength_default, 1e-3)), 0.5),
-                default_log_distribution=dist.Normal(np.log(max(cfg.agn.broad_lines_strength_default, 1e-3)), 0.5),
+                default_value_distribution=dist.LogNormal(np.log(DEFAULT_BROAD_LINES_STRENGTH), 0.5),
+                default_log_distribution=dist.Normal(np.log(DEFAULT_BROAD_LINES_STRENGTH), 0.5),
             )
             narrow_lines_strength = _sample_positive_distribution(
                 prior_config,
                 value_key="narrow_lines_strength",
                 log_key="log_narrow_lines_strength",
-                default_value_distribution=dist.LogNormal(np.log(max(cfg.agn.narrow_lines_strength_default, 1e-3)), 0.5),
-                default_log_distribution=dist.Normal(np.log(max(cfg.agn.narrow_lines_strength_default, 1e-3)), 0.5),
+                default_value_distribution=dist.LogNormal(np.log(DEFAULT_NARROW_LINES_STRENGTH), 0.5),
+                default_log_distribution=dist.Normal(np.log(DEFAULT_NARROW_LINES_STRENGTH), 0.5),
             )
             broad_line_width = _sample_log_positive_from_distribution(
                 prior_config,
                 value_key="broad_line_width_kms",
                 log_key="log_broad_line_width_kms",
                 default_distribution=dist.TruncatedNormal(
-                    np.log(max(cfg.agn.broad_line_width_kms_default, DEFAULT_BROAD_LINE_WIDTH_KMS_MIN)),
+                    np.log(DEFAULT_BROAD_LINE_WIDTH_KMS),
                     0.4,
                     low=np.log(DEFAULT_BROAD_LINE_WIDTH_KMS_MIN),
                     high=np.log(DEFAULT_BROAD_LINE_WIDTH_KMS_MAX),
@@ -1707,7 +1713,7 @@ def evaluate_photometric_state(
                 value_key="narrow_line_width_kms",
                 log_key="log_narrow_line_width_kms",
                 default_distribution=dist.TruncatedNormal(
-                    np.log(max(cfg.agn.narrow_line_width_kms_default, DEFAULT_NARROW_LINE_WIDTH_KMS_MIN)),
+                    np.log(DEFAULT_NARROW_LINE_WIDTH_KMS),
                     0.3,
                     low=np.log(DEFAULT_NARROW_LINE_WIDTH_KMS_MIN),
                     high=np.log(DEFAULT_NARROW_LINE_WIDTH_KMS_MAX),
@@ -1719,8 +1725,8 @@ def evaluate_photometric_state(
                     prior_config,
                     value_key="balmer_norm",
                     log_key="log_balmer_norm",
-                    default_value_distribution=dist.LogNormal(np.log(max(cfg.agn.balmer_continuum_default, 1e-3)), 1.0),
-                    default_log_distribution=dist.Normal(np.log(max(cfg.agn.balmer_continuum_default, 1e-3)), 1.0),
+                    default_value_distribution=dist.LogNormal(np.log(DEFAULT_BALMER_CONTINUUM_STRENGTH), 1.0),
+                    default_log_distribution=dist.Normal(np.log(DEFAULT_BALMER_CONTINUUM_STRENGTH), 1.0),
                 )
                 balmer_tau = _sample_positive_distribution(
                     prior_config,
@@ -1733,21 +1739,21 @@ def evaluate_photometric_state(
                     prior_config,
                     value_key="balmer_vel",
                     log_key="log_balmer_vel",
-                    default_value_distribution=dist.LogNormal(np.log(cfg.agn.broad_line_width_kms_default), 0.4),
-                    default_log_distribution=dist.Normal(np.log(cfg.agn.broad_line_width_kms_default), 0.4),
+                    default_value_distribution=dist.LogNormal(np.log(DEFAULT_BROAD_LINE_WIDTH_KMS), 0.4),
+                    default_log_distribution=dist.Normal(np.log(DEFAULT_BROAD_LINE_WIDTH_KMS), 0.4),
                 )
             else:
                 balmer_norm = jnp.asarray(0.0, dtype=jnp.float64)
                 balmer_tau = jnp.asarray(1.0, dtype=jnp.float64)
-                balmer_vel = jnp.asarray(float(cfg.agn.broad_line_width_kms_default), dtype=jnp.float64)
+                balmer_vel = jnp.asarray(DEFAULT_BROAD_LINE_WIDTH_KMS, dtype=jnp.float64)
         else:
             broad_lines_strength = jnp.asarray(0.0, dtype=jnp.float64)
             narrow_lines_strength = jnp.asarray(0.0, dtype=jnp.float64)
-            broad_line_width = jnp.asarray(float(cfg.agn.broad_line_width_kms_default), dtype=jnp.float64)
-            narrow_line_width = jnp.asarray(float(cfg.agn.narrow_line_width_kms_default), dtype=jnp.float64)
+            broad_line_width = jnp.asarray(DEFAULT_BROAD_LINE_WIDTH_KMS, dtype=jnp.float64)
+            narrow_line_width = jnp.asarray(DEFAULT_NARROW_LINE_WIDTH_KMS, dtype=jnp.float64)
             balmer_norm = jnp.asarray(0.0, dtype=jnp.float64)
             balmer_tau = jnp.asarray(1.0, dtype=jnp.float64)
-            balmer_vel = jnp.asarray(float(cfg.agn.broad_line_width_kms_default), dtype=jnp.float64)
+            balmer_vel = jnp.asarray(DEFAULT_BROAD_LINE_WIDTH_KMS, dtype=jnp.float64)
             balmer_enabled = False
         l_agn_lambda_5100 = agn_amp / 5100.0
         agn_bol_luminosity = agn_amp * AGN_BOLOMETRIC_CORRECTION_5100
@@ -1782,8 +1788,8 @@ def evaluate_photometric_state(
                 prior_config,
                 value_key="feii_norm",
                 log_key="log_feii_norm",
-                default_value_distribution=dist.LogNormal(np.log(max(cfg.agn.feii_strength_default, 1e-3)), 0.8),
-                default_log_distribution=dist.Normal(np.log(max(cfg.agn.feii_strength_default, 1e-3)), 0.8),
+                default_value_distribution=dist.LogNormal(np.log(DEFAULT_FEII_STRENGTH), 0.8),
+                default_log_distribution=dist.Normal(np.log(DEFAULT_FEII_STRENGTH), 0.8),
             )
             l_feii = feii_norm * l_broadlines
             if cfg.agn.fit_feii_broadening:
@@ -1791,18 +1797,18 @@ def evaluate_photometric_state(
                     prior_config,
                     value_key="feii_fwhm",
                     log_key="log_feii_fwhm",
-                    default_value_distribution=dist.LogNormal(np.log(cfg.agn.broad_line_width_kms_default), 0.3),
-                    default_log_distribution=dist.Normal(np.log(cfg.agn.broad_line_width_kms_default), 0.3),
+                    default_value_distribution=dist.LogNormal(np.log(DEFAULT_BROAD_LINE_WIDTH_KMS), 0.3),
+                    default_log_distribution=dist.Normal(np.log(DEFAULT_BROAD_LINE_WIDTH_KMS), 0.3),
                 )
                 feii_shift = _sample_prior(prior_config, "feii_shift", dist.Normal(0.0, 0.01))
                 feii_rest = _feii_component(rest_wave, feii_template_on_rest, l_feii, feii_fwhm, feii_shift)
             else:
-                feii_fwhm = jnp.asarray(float(cfg.agn.broad_line_width_kms_default), dtype=jnp.float64)
+                feii_fwhm = jnp.asarray(DEFAULT_BROAD_LINE_WIDTH_KMS, dtype=jnp.float64)
                 feii_shift = jnp.asarray(0.0, dtype=jnp.float64)
                 feii_rest = l_feii * jnp.maximum(feii_template_on_rest, 0.0)
         else:
             feii_norm = jnp.asarray(0.0, dtype=jnp.float64)
-            feii_fwhm = jnp.asarray(float(cfg.agn.broad_line_width_kms_default), dtype=jnp.float64)
+            feii_fwhm = jnp.asarray(DEFAULT_BROAD_LINE_WIDTH_KMS, dtype=jnp.float64)
             feii_shift = jnp.asarray(0.0, dtype=jnp.float64)
             feii_rest = jnp.zeros_like(rest_wave)
         balmer_rest = (
@@ -1827,11 +1833,11 @@ def evaluate_photometric_state(
         torus_rest = jnp.zeros_like(rest_wave)
         broad_lines_strength = jnp.asarray(0.0, dtype=jnp.float64)
         narrow_lines_strength = jnp.asarray(0.0, dtype=jnp.float64)
-        broad_line_width = jnp.asarray(float(cfg.agn.broad_line_width_kms_default), dtype=jnp.float64)
-        narrow_line_width = jnp.asarray(float(cfg.agn.narrow_line_width_kms_default), dtype=jnp.float64)
+        broad_line_width = jnp.asarray(DEFAULT_BROAD_LINE_WIDTH_KMS, dtype=jnp.float64)
+        narrow_line_width = jnp.asarray(DEFAULT_NARROW_LINE_WIDTH_KMS, dtype=jnp.float64)
         balmer_norm = jnp.asarray(0.0, dtype=jnp.float64)
         balmer_tau = jnp.asarray(1.0, dtype=jnp.float64)
-        balmer_vel = jnp.asarray(float(cfg.agn.broad_line_width_kms_default), dtype=jnp.float64)
+        balmer_vel = jnp.asarray(DEFAULT_BROAD_LINE_WIDTH_KMS, dtype=jnp.float64)
         l_agn_lambda_5100 = jnp.asarray(0.0, dtype=jnp.float64)
         agn_bol_luminosity = jnp.asarray(0.0, dtype=jnp.float64)
         line_bl_rest = jnp.zeros_like(rest_wave)
@@ -1839,7 +1845,7 @@ def evaluate_photometric_state(
         line_liner_rest = jnp.zeros_like(rest_wave)
         line_rest = jnp.zeros_like(rest_wave)
         feii_norm = jnp.asarray(0.0, dtype=jnp.float64)
-        feii_fwhm = jnp.asarray(float(cfg.agn.broad_line_width_kms_default), dtype=jnp.float64)
+        feii_fwhm = jnp.asarray(DEFAULT_BROAD_LINE_WIDTH_KMS, dtype=jnp.float64)
         feii_shift = jnp.asarray(0.0, dtype=jnp.float64)
         feii_rest = jnp.zeros_like(rest_wave)
         balmer_rest = jnp.zeros_like(rest_wave)
