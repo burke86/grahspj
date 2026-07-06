@@ -74,7 +74,6 @@ def _cfg(
             fit_agn=fit_agn,
             fit_feii_broadening=fit_feii_broadening,
             fit_balmer_continuum=fit_balmer_continuum,
-            balmer_continuum_default=0.2,
             feii_template=FeIITemplate(name="fe", wave=[1000.0, 2000.0, 3000.0], lumin=[0.0, 1.0, 0.0]),
             emission_line_template=EmissionLineTemplate(
                 wave=[486.1, 656.3],
@@ -101,7 +100,7 @@ def _cfg(
         spectroscopy_config=SpectroscopyConfig(enabled=spectroscopy_enabled),
         nebular=NebularConfig(enabled=True, f_esc=0.0, f_dust=0.2, zgas=0.02, lines_width=300.0),
         inference=InferenceConfig(map_steps=2),
-        prior_config=PriorConfig(stellar_mass={"dist": "uniform", "low": 8.0, "high": 8.0}),
+        prior_config=PriorConfig(stellar_mass=dist.Normal(8.0, 1.0e-6)),
     )
 
 
@@ -168,7 +167,6 @@ def test_native_agn_lines_use_distinct_broad_and_narrow_widths(monkeypatch):
     cfg = _cfg(fit_host=False, n_wave=4096, rest_wave_max=1000.0)
     cfg.nebular.enabled = False
     cfg.agn.fit_balmer_continuum = False
-    cfg.agn.feii_strength_default = 0.0
     context = build_model_context(cfg)
 
     data = _fixed_component_data()
@@ -538,7 +536,7 @@ def test_host_only_context_skips_agn_template_loading(monkeypatch):
     assert np.asarray(context.templates.line_wave, dtype=float).size == 1
 
 
-def test_balmer_continuum_default_off_skips_balmer_kernel(monkeypatch):
+def test_disabled_balmer_continuum_skips_balmer_kernel(monkeypatch):
     _patch_ssp(monkeypatch)
 
     def _raise_if_called(*args, **kwargs):
@@ -726,7 +724,6 @@ def test_local_line_photometry_improves_coarse_grid_line_projection(monkeypatch)
         cfg.likelihood.variability_uncertainty = False
         cfg.nebular.enabled = False
         cfg.agn.fit_balmer_continuum = False
-        cfg.agn.feii_strength_default = 0.0
         return cfg
 
     data = _fixed_component_data()
@@ -773,7 +770,6 @@ def test_component_prediction_uses_local_agn_line_photometry(monkeypatch):
     cfg.likelihood.variability_uncertainty = False
     cfg.nebular.enabled = False
     cfg.agn.fit_balmer_continuum = False
-    cfg.agn.feii_strength_default = 0.0
     context = build_model_context(cfg)
 
     data = _fixed_component_data()
@@ -808,7 +804,6 @@ def test_fixed_local_line_cache_matches_exact_local_line_projection(monkeypatch)
         cfg.likelihood.variability_uncertainty = False
         cfg.nebular.enabled = False
         cfg.agn.fit_balmer_continuum = False
-        cfg.agn.feii_strength_default = 0.0
         return cfg
 
     data = _fixed_component_data()
@@ -850,7 +845,6 @@ def test_local_line_photometry_improves_redshift_fit_line_projection(monkeypatch
         cfg.likelihood.variability_uncertainty = False
         cfg.nebular.enabled = False
         cfg.agn.fit_balmer_continuum = False
-        cfg.agn.feii_strength_default = 0.0
         return cfg
 
     data = _fixed_component_data()

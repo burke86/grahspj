@@ -468,7 +468,7 @@ def plot_fit_sed(
             ms=5,
             capsize=2,
             label="Observed photometry",
-            zorder=5,
+            zorder=7,
         )
         ax_sed.scatter(phot_wave, model_flux, color="#111111", marker="s", s=28, label="Model photometry", zorder=6)
         if annotate_band_names:

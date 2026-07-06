@@ -24,7 +24,6 @@ from jaxsedfit.config import (
     MassMetallicityPriorConfig,
     SpectroscopyConfig,
     SpectroscopyData,
-    _coerce_spectroscopy_config,
     fit_config_from_mapping,
 )
 from jaxsedfit.core import JAXSEDFit
@@ -843,19 +842,23 @@ def test_context_accepts_multiple_spectra(monkeypatch):
     assert context.spec_instruments == ("sdss", "desi")
 
 
-def test_spectroscopy_config_migrates_legacy_jaxqsofit_flags():
-    cfg = _coerce_spectroscopy_config(
+def test_spectroscopy_config_uses_nested_jaxqsofit_section():
+    cfg = fit_config_from_mapping(
         {
-            "enabled": True,
-            "backend": "jaxqsofit",
-            "jaxqsofit_use_lines": False,
-            "jaxqsofit_use_feii": True,
-            "jaxqsofit": {
-                "use_balmer_continuum": True,
-                "line_flux_scale_mjy": 0.1,
+            "observation": {"object_id": "obj", "redshift": 0.1},
+            "photometry": {"filter_names": ["f1"], "fluxes": [1.0], "errors": [0.1]},
+            "spectroscopy_config": {
+                "enabled": True,
+                "backend": "jaxqsofit",
+                "jaxqsofit": {
+                    "use_spectral_lines": False,
+                    "use_spectral_feii": True,
+                    "use_spectral_balmer_continuum": True,
+                    "line_flux_scale_mjy": 0.1,
+                },
             },
         }
-    )
+    ).spectroscopy_config
 
     assert cfg.jaxqsofit.use_spectral_lines is False
     assert cfg.jaxqsofit.use_spectral_feii is True
@@ -886,7 +889,7 @@ def test_jaxqsofit_fixed_narrow_width_component_reports_tied_width():
     assert tr["jqf_line_narrow_amp_scale"]["value"] == pytest.approx(2.5)
 
 
-def test_fit_config_mapping_coerces_balmer_continuum_gate():
+def test_fit_config_mapping_coerces_agn_template_config():
     cfg = fit_config_from_mapping(
         {
             "observation": {"object_id": "obj", "redshift": 0.1},
@@ -894,34 +897,40 @@ def test_fit_config_mapping_coerces_balmer_continuum_gate():
             "agn": {
                 "fit_feii_broadening": True,
                 "fit_balmer_continuum": True,
-                "balmer_continuum_default": 0.2,
+                "feii_template": {"name": "custom"},
             },
         }
     )
 
     assert cfg.agn.fit_feii_broadening is True
     assert cfg.agn.fit_balmer_continuum is True
-    assert cfg.agn.balmer_continuum_default == 0.2
+    assert cfg.agn.feii_template.name == "custom"
 
 
-def test_fit_config_mapping_preserves_agn_line_width_defaults():
-    cfg = fit_config_from_mapping(
-        {
-            "observation": {"object_id": "obj", "redshift": 0.1},
-            "photometry": {"filter_names": ["f1"], "fluxes": [1.0], "errors": [0.1]},
-            "agn": {
-                "broad_line_width_kms_default": 4000.0,
-                "narrow_line_width_kms_default": 400.0,
-            },
-        }
-    )
+def test_fit_config_mapping_rejects_legacy_agn_defaults():
+    with pytest.raises(TypeError, match="broad_line_width_kms_default"):
+        fit_config_from_mapping(
+            {
+                "observation": {"object_id": "obj", "redshift": 0.1},
+                "photometry": {"filter_names": ["f1"], "fluxes": [1.0], "errors": [0.1]},
+                "agn": {"broad_line_width_kms_default": 4000.0},
+            }
+        )
 
-    assert cfg.agn.broad_line_width_kms_default == 4000.0
-    assert cfg.agn.narrow_line_width_kms_default == 400.0
+
+def test_fit_config_mapping_rejects_flat_prior_config():
+    with pytest.raises(TypeError, match="log_stellar_mass"):
+        fit_config_from_mapping(
+            {
+                "observation": {"object_id": "obj", "redshift": 0.1},
+                "photometry": {"filter_names": ["f1"], "fluxes": [1.0], "errors": [0.1]},
+                "prior_config": {"log_stellar_mass": {"loc": 10.0, "scale": 1.0}},
+            }
+        )
 
 
 def test_jaxqsofit_joint_backend_builds_flux_scaled_smart_priors(monkeypatch):
-    pytest.importorskip("jaxqsofit.defaults")
+    pytest.importorskip("jaxqsofit.config")
 
     class _SSPData:
         ssp_lgmet = np.array([-1.0, 0.0])
@@ -1054,7 +1063,7 @@ def test_jaxqsofit_spectrum_resolution_host_basis_uses_host_kinematics(monkeypat
             ),
         ),
         inference=InferenceConfig(map_steps=2),
-        prior_config=PriorConfig(stellar_mass={"dist": "uniform", "low": 8.0, "high": 8.0}),
+        prior_config=PriorConfig(stellar_mass=dist.Normal(8.0, 1.0e-6)),
     )
     context = build_model_context(cfg)
 

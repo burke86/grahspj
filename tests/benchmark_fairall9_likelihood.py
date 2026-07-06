@@ -8,6 +8,7 @@ from pathlib import Path
 
 import jax
 import numpy as np
+import numpyro.distributions as dist
 from numpyro.infer.util import log_density
 
 from jaxsedfit.config import AGNConfig, FilterSet, FitConfig, GalaxyConfig, InferenceConfig, LikelihoodConfig, Observation, PhotometryData, PriorConfig
@@ -78,9 +79,9 @@ def build_fairall9_fixedz_config() -> FitConfig:
             seed=0,
         ),
         prior_config=PriorConfig(
-            stellar_mass={"loc": 10.5, "scale": 1.0},
-            host={"ebv_gal": {"scale": 0.15}},
-            agn={"ebv_agn": {"scale": 0.15}},
+            stellar_mass=dist.Normal(10.5, 1.0),
+            host={"ebv_gal": dist.HalfNormal(0.15)},
+            agn={"ebv_agn": dist.HalfNormal(0.15)},
         ),
     )
     return cfg

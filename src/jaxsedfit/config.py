@@ -177,14 +177,13 @@ class AGNConfig:
     feii_template: FeIITemplate = field(default_factory=FeIITemplate)
     emission_line_template: EmissionLineTemplate = field(default_factory=EmissionLineTemplate)
     agn_type: int = 1
-    broad_line_width_kms_default: float = 3000.0
-    narrow_line_width_kms_default: float = 500.0
-    broad_lines_strength_default: float = 1.0
-    narrow_lines_strength_default: float = 1.0
-    feii_strength_default: float = 5.0
     fit_feii_broadening: bool = False
     fit_balmer_continuum: bool = False
-    balmer_continuum_default: float = 0.0
+
+    def __post_init__(self) -> None:
+        """Normalize nested template sections."""
+        self.feii_template = _coerce_dataclass(FeIITemplate, self.feii_template)
+        self.emission_line_template = _coerce_dataclass(EmissionLineTemplate, self.emission_line_template)
 
 
 @dataclass
@@ -241,7 +240,6 @@ class JaxQSOFitConfig:
     include_elg_narrow_lines: bool = False
     include_high_ionization_lines: bool = False
     line_table: Sequence[Mapping[str, Any]] | None = None
-    line_prior_config: Mapping[str, Any] | None = None
 
 
 @dataclass
@@ -360,12 +358,10 @@ def _numpyro_distribution_to_mapping(value: Any) -> dict[str, Any] | None:
 
 def _prior_to_mapping(value: Any) -> Any:
     """Convert public prior specs to low-level mappings."""
-    if isinstance(value, Mapping):
-        return dict(value)
     prior = _numpyro_distribution_to_mapping(value)
     if prior is not None:
         return prior
-    raise TypeError("Prior fields must be mappings or supported numpyro.distributions objects.")
+    raise TypeError("Prior fields must be supported numpyro.distributions objects.")
 
 
 @dataclass
@@ -752,6 +748,10 @@ def _coerce_dataclass(cls, value: Any):
         data = dict(value)
         if cls is Observation and "fit_redshift" in data and "redshift_mode" not in data:
             data["redshift_mode"] = "fit" if bool(data.pop("fit_redshift")) else "fixed"
+        unknown = set(data) - set(cls.__dataclass_fields__)
+        if unknown:
+            unknown_list = ", ".join(sorted(unknown))
+            raise TypeError(f"Unknown {cls.__name__} field(s): {unknown_list}")
         kwargs = {}
         for field_name, field_def in cls.__dataclass_fields__.items():
             if field_name not in data:
@@ -762,54 +762,28 @@ def _coerce_dataclass(cls, value: Any):
 
 
 def _coerce_jaxqsofit_config(value: Any) -> JaxQSOFitConfig:
-    """Coerce jaxqsofit config and migrate older generic flag names."""
-    if isinstance(value, JaxQSOFitConfig):
-        return value
-    if not isinstance(value, Mapping):
-        return _coerce_dataclass(JaxQSOFitConfig, value)
-    data = dict(value)
-    aliases = {
-        "use_lines": "use_spectral_lines",
-        "use_feii": "use_spectral_feii",
-        "use_balmer_continuum": "use_spectral_balmer_continuum",
-    }
-    for old_name, new_name in aliases.items():
-        if old_name in data and new_name not in data:
-            data[new_name] = data[old_name]
-    return _coerce_dataclass(JaxQSOFitConfig, data)
+    """Coerce jaxqsofit config into the structured config object."""
+    return _coerce_dataclass(JaxQSOFitConfig, value)
 
 
 def _coerce_spectroscopy_config(value: Any) -> SpectroscopyConfig:
-    """Coerce spectroscopy config while supporting nested jaxqsofit config."""
+    """Coerce spectroscopy config while preserving the nested jaxqsofit config."""
     if isinstance(value, SpectroscopyConfig):
         return value
     if not isinstance(value, Mapping):
         return _coerce_dataclass(SpectroscopyConfig, value)
+    unknown = set(value) - set(SpectroscopyConfig.__dataclass_fields__)
+    if unknown:
+        unknown_list = ", ".join(sorted(unknown))
+        raise TypeError(f"Unknown SpectroscopyConfig field(s): {unknown_list}")
     kwargs = {}
-    legacy_jaxqsofit = {}
-    legacy_aliases = {
-        "jaxqsofit_use_lines": "use_spectral_lines",
-        "jaxqsofit_use_feii": "use_spectral_feii",
-        "jaxqsofit_use_balmer_continuum": "use_spectral_balmer_continuum",
-        "jaxqsofit_use_multiplicative_tilt": "use_multiplicative_tilt",
-    }
-    for old_name, new_name in legacy_aliases.items():
-        if old_name in value:
-            legacy_jaxqsofit[new_name] = value[old_name]
     for field_name in SpectroscopyConfig.__dataclass_fields__:
         if field_name not in value:
             continue
         if field_name == "jaxqsofit":
-            merged_jaxqsofit = dict(legacy_jaxqsofit)
-            if isinstance(value[field_name], Mapping):
-                merged_jaxqsofit.update(value[field_name])
-                kwargs[field_name] = _coerce_jaxqsofit_config(merged_jaxqsofit)
-            else:
-                kwargs[field_name] = _coerce_jaxqsofit_config(value[field_name])
+            kwargs[field_name] = _coerce_jaxqsofit_config(value[field_name])
         else:
             kwargs[field_name] = value[field_name]
-    if "jaxqsofit" not in kwargs and legacy_jaxqsofit:
-        kwargs["jaxqsofit"] = _coerce_jaxqsofit_config(legacy_jaxqsofit)
     return SpectroscopyConfig(**kwargs)
 
 
@@ -824,6 +798,10 @@ def _coerce_prior_config(value: Any) -> PriorConfig:
 
     data = dict(value)
     nested_keys = {"redshift", "stellar_mass", "mass_metallicity", "host", "agn", "nebular", "likelihood"}
+    unknown = set(data) - nested_keys
+    if unknown:
+        unknown_list = ", ".join(sorted(unknown))
+        raise TypeError(f"Unknown PriorConfig section(s): {unknown_list}")
     if data and not any(key in data for key in nested_keys):
         raise ValueError("prior_config mappings must use structured PriorConfig sections.")
     return PriorConfig(
@@ -839,6 +817,12 @@ def _coerce_prior_config(value: Any) -> PriorConfig:
 
 def fit_config_from_mapping(data: Mapping[str, Any]) -> FitConfig:
     """Build a validated FitConfig from a nested mapping."""
+    valid_top_level = set(FitConfig.__dataclass_fields__)
+    unknown = set(data) - valid_top_level
+    if unknown:
+        unknown_list = ", ".join(sorted(unknown))
+        raise TypeError(f"Unknown FitConfig field(s): {unknown_list}")
+
     filters_raw = data.get("filters", {})
     if isinstance(filters_raw, Mapping):
         curves_raw = filters_raw.get("curves", [])
@@ -848,25 +832,7 @@ def fit_config_from_mapping(data: Mapping[str, Any]) -> FitConfig:
     else:
         filters_obj = _coerce_dataclass(FilterSet, filters_raw)
 
-    agn_raw = data.get("agn", {})
-    if isinstance(agn_raw, Mapping):
-        agn_obj = AGNConfig(
-            fit_agn=bool(agn_raw.get("fit_agn", True)),
-            use_powerlaw_disk=bool(agn_raw.get("use_powerlaw_disk", True)),
-            feii_template=_coerce_dataclass(FeIITemplate, agn_raw.get("feii_template", {})),
-            emission_line_template=_coerce_dataclass(EmissionLineTemplate, agn_raw.get("emission_line_template", {})),
-            agn_type=int(agn_raw.get("agn_type", 1)),
-            broad_line_width_kms_default=float(agn_raw.get("broad_line_width_kms_default", 3000.0)),
-            narrow_line_width_kms_default=float(agn_raw.get("narrow_line_width_kms_default", 500.0)),
-            broad_lines_strength_default=float(agn_raw.get("broad_lines_strength_default", 1.0)),
-            narrow_lines_strength_default=float(agn_raw.get("narrow_lines_strength_default", 1.0)),
-            feii_strength_default=float(agn_raw.get("feii_strength_default", 5.0)),
-            fit_feii_broadening=bool(agn_raw.get("fit_feii_broadening", False)),
-            fit_balmer_continuum=bool(agn_raw.get("fit_balmer_continuum", False)),
-            balmer_continuum_default=float(agn_raw.get("balmer_continuum_default", 0.0)),
-        )
-    else:
-        agn_obj = _coerce_dataclass(AGNConfig, agn_raw)
+    agn_obj = _coerce_dataclass(AGNConfig, data.get("agn", {}))
 
     spectroscopy_raw = data.get("spectroscopy")
     if spectroscopy_raw is None:
