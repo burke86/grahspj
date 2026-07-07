@@ -972,9 +972,49 @@ def _load_nebular_templates_jax(enabled: bool) -> NebularTemplatesJax:
     return loaded
 
 
-def _nearest_index_np(grid: np.ndarray, value: float) -> int:
-    """Return the index of the nearest tabulated grid value."""
-    return int(np.argmin(np.abs(np.asarray(grid, dtype=float) - float(value))))
+def _interp_grid_axis_np(grid: np.ndarray, value: float, *, log_scale: bool = False) -> tuple[int, int, float]:
+    """Return bracketing indices and interpolation weight for one template axis."""
+    grid = np.asarray(grid, dtype=float)
+    x_grid = np.log10(np.clip(grid, 1.0e-300, None)) if log_scale else grid
+    x = np.log10(max(float(value), 1.0e-300)) if log_scale else float(value)
+    x = float(np.clip(x, x_grid[0], x_grid[-1]))
+    upper = int(np.clip(np.searchsorted(x_grid, x, side="right"), 1, grid.size - 1))
+    lower = upper - 1
+    denom = max(float(x_grid[upper] - x_grid[lower]), 1.0e-300)
+    weight = float(np.clip((x - x_grid[lower]) / denom, 0.0, 1.0))
+    return lower, upper, weight
+
+
+def _trilinear_nebular_grid_np(
+    values: np.ndarray,
+    z_grid: np.ndarray,
+    logu_grid: np.ndarray,
+    ne_grid: np.ndarray,
+    zgas: float,
+    logu: float,
+    ne: float,
+) -> np.ndarray:
+    """Interpolate a nebular template grid in log Z, log U, and log density."""
+    z0, z1, wz = _interp_grid_axis_np(z_grid, zgas, log_scale=True)
+    u0, u1, wu = _interp_grid_axis_np(logu_grid, logu, log_scale=False)
+    n0, n1, wn = _interp_grid_axis_np(ne_grid, ne, log_scale=True)
+
+    c000 = values[z0, u0, n0]
+    c001 = values[z0, u0, n1]
+    c010 = values[z0, u1, n0]
+    c011 = values[z0, u1, n1]
+    c100 = values[z1, u0, n0]
+    c101 = values[z1, u0, n1]
+    c110 = values[z1, u1, n0]
+    c111 = values[z1, u1, n1]
+
+    c00 = c000 * (1.0 - wn) + c001 * wn
+    c01 = c010 * (1.0 - wn) + c011 * wn
+    c10 = c100 * (1.0 - wn) + c101 * wn
+    c11 = c110 * (1.0 - wn) + c111 * wn
+    c0 = c00 * (1.0 - wu) + c01 * wu
+    c1 = c10 * (1.0 - wu) + c11 * wu
+    return c0 * (1.0 - wz) + c1 * wz
 
 
 def _flux_conserving_line_gaussians_np(
@@ -1015,25 +1055,31 @@ def _build_fixed_nebular_line_profile(
     ne_grid = np.asarray(templates.ne_grid, dtype=float)
     line_wave = np.asarray(templates.line_wave_a, dtype=float)
     line_lumin_per_photon = np.asarray(templates.line_lumin_per_photon, dtype=float)
-    z_idx = _nearest_index_np(z_grid, float(neb.zgas))
-    u_idx = _nearest_index_np(logu_grid, float(neb.logU))
-    ne_idx = _nearest_index_np(ne_grid, float(neb.ne))
     cache_key = (
         float(rest_wave[0]),
         float(rest_wave[-1]),
         int(rest_wave.size),
-        z_idx,
-        u_idx,
-        ne_idx,
+        float(neb.zgas),
+        float(neb.logU),
+        float(neb.ne),
         float(neb.lines_width),
     )
     cached = _FIXED_NEBULAR_LINE_PROFILE_CACHE.get(cache_key)
     if cached is not None:
         return cached
+    line_lumin_interp = _trilinear_nebular_grid_np(
+        line_lumin_per_photon,
+        z_grid,
+        logu_grid,
+        ne_grid,
+        float(neb.zgas),
+        float(neb.logU),
+        float(neb.ne),
+    )
     profile = _flux_conserving_line_gaussians_np(
         rest_wave,
         line_wave,
-        line_lumin_per_photon[z_idx, u_idx, ne_idx],
+        line_lumin_interp,
         float(neb.lines_width),
     ).astype(float)
     _FIXED_NEBULAR_LINE_PROFILE_CACHE[cache_key] = profile
