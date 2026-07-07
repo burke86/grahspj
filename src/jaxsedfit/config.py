@@ -189,13 +189,11 @@ class AGNConfig:
 @dataclass
 class LikelihoodConfig:
     """Likelihood and extra model-mismatch configuration."""
-    systematics_width: float = 0.05
+    systematics_width: float = 0.10
     fit_systematics_width: bool = True
-    systematics_width_prior_scale: float = 0.05
+    systematics_width_prior_scale: float = 0.10
     likelihood_family: str = "gaussian"
     student_t_df: float = 5.0
-    fit_intrinsic_scatter: bool = True
-    intrinsic_scatter_default: float = 1.0e-4
     variability_uncertainty: bool = True
     agn_nev: float = 0.1
     attenuation_model_uncertainty: bool = False
@@ -205,6 +203,7 @@ class LikelihoodConfig:
     use_host_capture_model: bool = False
     use_fast_photometry_projection: bool = True
     use_local_line_photometry: bool = True
+    local_nebular_line_uncertainty_dex: float = 0.3
     use_fixed_local_line_cache: bool = True
     fixed_local_line_cache_n_width: int = 128
     fixed_local_line_cache_min_width_kms: float = 200.0
@@ -240,6 +239,13 @@ class JaxQSOFitConfig:
     include_elg_narrow_lines: bool = False
     include_high_ionization_lines: bool = False
     line_table: Sequence[Mapping[str, Any]] | None = None
+    broadening_convolution: str = "fft"
+
+    def __post_init__(self) -> None:
+        method = str(self.broadening_convolution).lower()
+        if method not in {"fft", "direct"}:
+            raise ValueError("JaxQSOFitConfig.broadening_convolution must be 'fft' or 'direct'.")
+        self.broadening_convolution = method
 
 
 @dataclass
@@ -619,8 +625,6 @@ class LikelihoodPriorConfig:
     """Likelihood and calibration prior options."""
     systematics_width: Any | None = None
     log_systematics_width: Any | None = None
-    intrinsic_scatter: Any | None = None
-    log_intrinsic_scatter: Any | None = None
     host_capture_scale_arcsec: Any | None = None
     log_host_capture_scale_arcsec: Any | None = None
     host_capture_slope: Any | None = None
@@ -635,8 +639,6 @@ class LikelihoodPriorConfig:
             {
                 "systematics_width": "systematics_width",
                 "log_systematics_width": "log_systematics_width",
-                "intrinsic_scatter": "intrinsic_scatter",
-                "log_intrinsic_scatter": "log_intrinsic_scatter",
                 "host_capture_scale_arcsec": "host_capture_scale_arcsec",
                 "log_host_capture_scale_arcsec": "log_host_capture_scale_arcsec",
                 "host_capture_slope": "host_capture_slope",

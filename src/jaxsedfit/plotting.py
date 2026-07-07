@@ -307,7 +307,6 @@ def _median_effective_variance(fitter, pred: dict[str, Any]) -> np.ndarray:
     """Rebuild the model's effective variance from predictive median sites."""
     pred_fluxes = np.asarray(_median_site(pred, "pred_fluxes"), dtype=float)
     agn_fluxes = np.asarray(_median_site(pred, "agn_fluxes"), dtype=float) if "agn_fluxes" in pred else np.zeros_like(pred_fluxes)
-    intrinsic_scatter = float(np.median(np.asarray(pred["intrinsic_scatter_fit"], dtype=float))) if "intrinsic_scatter_fit" in pred else 0.0
     agn_variability_nev = float(np.median(np.asarray(pred["agn_variability_nev"], dtype=float))) if "agn_variability_nev" in pred else 0.0
     transmitted_fraction = (
         np.asarray(_median_site(pred, "transmitted_fraction_fluxes"), dtype=float)
@@ -329,8 +328,13 @@ def _median_effective_variance(fitter, pred: dict[str, Any]) -> np.ndarray:
 
         cfg = _FallbackLikelihood()
 
-    obs_variance = obs_errors**2 + np.maximum(intrinsic_scatter, 0.0) ** 2
-    sys_variance = (float(cfg.systematics_width) * pred_fluxes) ** 2
+    obs_variance = obs_errors**2
+    systematics_width = (
+        float(np.median(np.asarray(pred["systematics_width"], dtype=float)))
+        if "systematics_width" in pred
+        else float(cfg.systematics_width)
+    )
+    sys_variance = (systematics_width * pred_fluxes) ** 2
     var_variance = np.where(bool(cfg.variability_uncertainty), agn_variability_nev * agn_fluxes**2, 0.0)
     if cfg.attenuation_model_uncertainty:
         tf = np.clip(transmitted_fraction, 1e-4, 1.0)

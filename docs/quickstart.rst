@@ -37,6 +37,33 @@ the config first, pass it to :class:`jaxsedfit.JAXSEDFit`, and then call
    result.summary
    result.plot_corner()
 
+Changing jaxqsofit broad-line components
+----------------------------------------
+
+When spectroscopy uses the ``jaxqsofit`` backend, the number of broad
+Gaussian components is set by the line-table ``ngauss`` field. The default
+``jaxqsofit`` line table uses names such as ``Ha_br``, ``Hb_br``, ``MgII_br``,
+``CIV_br``, and ``Lya_br`` for broad components. Copy the table, adjust
+``ngauss`` for the rows you want, and assign it before constructing
+:class:`jaxsedfit.JAXSEDFit`.
+
+.. code-block:: python
+
+   from copy import deepcopy
+
+   from jaxqsofit.defaults import DEFAULT_LINE_PRIOR_ROWS
+
+   line_table = deepcopy(DEFAULT_LINE_PRIOR_ROWS)
+
+   for row in line_table:
+       if row["linename"] in {"Ha_br", "Hb_br", "MgII_br"}:
+           row["ngauss"] = 3
+       if row["linename"] in {"CIV_br", "Lya_br"}:
+           row["ngauss"] = 2
+
+   cfg.spectroscopy_config.backend = "jaxqsofit"
+   cfg.spectroscopy_config.jaxqsofit.line_table = line_table
+
 When ``save_result=True`` or :meth:`jaxsedfit.FitResult.save` is used,
 ``jaxsedfit`` writes an HDF5 posterior bundle named
 ``<object_id>_samples.h5``. The bundle contains the fit config, posterior

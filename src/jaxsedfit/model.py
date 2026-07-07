@@ -546,6 +546,14 @@ def _attenuation_transmitted_fraction(direct_attenuated, direct_intrinsic):
     )
 
 
+def _apply_extended_capture(total_flux, extended_flux, capture_fraction):
+    """Return total flux after aperture capture of extended components only."""
+    total_flux = jnp.asarray(total_flux, dtype=jnp.float64)
+    extended_flux = jnp.asarray(extended_flux, dtype=jnp.float64)
+    capture_fraction = jnp.asarray(capture_fraction, dtype=jnp.float64)
+    return total_flux - extended_flux + capture_fraction * extended_flux
+
+
 def _redshift_to_obs(rest_wave, rest_lum, obs_wave, redshift, luminosity_distance_m):
     """Project a rest-frame luminosity density to the observed frame."""
     wave_obs = rest_wave * (1.0 + redshift)
@@ -1092,24 +1100,8 @@ def _build_nebular_components(context: ModelContext, host_state: dict[str, Any],
     f_esc = _sample_optional_truncnorm(prior_config, "nebular_f_esc", float(cfg.f_esc), 0.1, 0.0, 1.0)
     f_dust_raw = _sample_optional_truncnorm(prior_config, "nebular_f_dust", float(cfg.f_dust), 0.1, 0.0, 1.0)
     f_dust = jnp.minimum(f_dust_raw, jnp.maximum(1.0 - f_esc, 0.0))
-    tie_width_to_jaxqsofit = bool(
-        context.fit_config.spectroscopy_config.enabled
-        and str(context.fit_config.spectroscopy_config.backend).lower() == "jaxqsofit"
-        and context.fit_config.spectroscopy_config.jaxqsofit.use_spectral_lines
-    )
-    if tie_width_to_jaxqsofit and "nebular_lines_width" not in prior_config:
-        lines_width = numpyro.sample(
-            "nebular_lines_width",
-            dist.TruncatedNormal(
-                loc=jnp.asarray(float(cfg.lines_width), dtype=jnp.float64),
-                scale=jnp.asarray(100.0, dtype=jnp.float64),
-                low=jnp.asarray(1.0, dtype=jnp.float64),
-                high=jnp.asarray(1.0e5, dtype=jnp.float64),
-            ),
-        )
-    else:
-        lines_width = jnp.clip(_sample_optional_normal(prior_config, "nebular_lines_width", float(cfg.lines_width), 100.0), 0.0, 1.0e5)
-    if tie_width_to_jaxqsofit or "log_nebular_line_scale" in prior_config:
+    lines_width = jnp.clip(_sample_optional_normal(prior_config, "nebular_lines_width", float(cfg.lines_width), 100.0), 0.0, 1.0e5)
+    if "log_nebular_line_scale" in prior_config:
         line_scale = _sample_log_positive_from_distribution(
             prior_config,
             value_key="nebular_line_scale",
@@ -1271,15 +1263,41 @@ def _host_capture_fraction(spatial_scale_arcsec, turnover_arcsec, slope):
     return jnp.where(valid, frac, 1.0)
 
 
-def photometric_loglike(pred_fluxes, obs_fluxes, obs_errors, upper_limits, data_mask, systematics_width, intrinsic_scatter, likelihood_family, student_t_df, agn_component, agn_bol_lum_w, agn_nev, variability_uncertainty, attenuation_model_uncertainty, transmitted_fraction, lyman_break_uncertainty, filter_wavelength, redshift):
+def photometric_loglike(
+    pred_fluxes,
+    obs_fluxes,
+    obs_errors,
+    upper_limits,
+    data_mask,
+    systematics_width,
+    likelihood_family,
+    student_t_df,
+    agn_component,
+    agn_bol_lum_w,
+    agn_nev,
+    variability_uncertainty,
+    attenuation_model_uncertainty,
+    transmitted_fraction,
+    lyman_break_uncertainty,
+    filter_wavelength,
+    redshift,
+    nebular_line_component=None,
+    local_nebular_line_uncertainty_dex=0.0,
+):
     """Evaluate the broadband photometric log-likelihood for one model state."""
     pred_fluxes = jnp.nan_to_num(pred_fluxes, nan=0.0, posinf=1.0e30, neginf=-1.0e30)
     agn_component = jnp.nan_to_num(agn_component, nan=0.0, posinf=1.0e30, neginf=-1.0e30)
     transmitted_fraction = jnp.nan_to_num(transmitted_fraction, nan=1.0e-4, posinf=1.0, neginf=1.0e-4)
-    obs_variance = obs_errors**2 + jnp.maximum(intrinsic_scatter, 0.0) ** 2
+    obs_variance = obs_errors**2
     variability_nev = _agn_variability_nev(agn_bol_lum_w, agn_nev)
     var_variance = jnp.where(variability_uncertainty, variability_nev * agn_component**2, 0.0)
     sys_variance = (systematics_width * pred_fluxes) ** 2
+    if nebular_line_component is not None:
+        nebular_line_component = jnp.nan_to_num(nebular_line_component, nan=0.0, posinf=1.0e30, neginf=-1.0e30)
+        nebular_line_sigma = jnp.expm1(
+            jnp.log(10.0) * jnp.maximum(jnp.asarray(local_nebular_line_uncertainty_dex, dtype=jnp.float64), 0.0)
+        )
+        sys_variance = sys_variance + (nebular_line_sigma * nebular_line_component) ** 2
     if attenuation_model_uncertainty:
         tf = jnp.clip(transmitted_fraction, 1e-4, 1.0)
         neg_log = -jnp.log10(tf + 1e-4)
@@ -1451,6 +1469,7 @@ def _evaluate_jaxqsofit_backend(
         broad_fwhm_kms_default=DEFAULT_BROAD_LINE_WIDTH_KMS,
         feii_fwhm_kms_default=DEFAULT_BROAD_LINE_WIDTH_KMS,
         balmer_velocity_kms_default=DEFAULT_BROAD_LINE_WIDTH_KMS,
+        broadening_convolution=jqf_cfg.broadening_convolution,
         fixed_narrow_fwhm_kms=fixed_narrow_fwhm_kms,
         fixed_narrow_amp_scale=fixed_narrow_amp_scale,
     )
@@ -1882,24 +1901,28 @@ def evaluate_photometric_state(
         )
     else:
         dust_alpha = jnp.asarray(float(cfg.galaxy.dust_alpha), dtype=jnp.float64)
-    if cfg.likelihood.fit_intrinsic_scatter:
-        log_intrinsic_scatter = _sample_prior(
-            prior_config,
-            "log_intrinsic_scatter",
-            dist.Normal(np.log(max(cfg.likelihood.intrinsic_scatter_default, 1.0e-8)), 1.0),
-        )
-        intrinsic_scatter = jnp.exp(log_intrinsic_scatter)
-    else:
-        intrinsic_scatter = jnp.asarray(float(cfg.likelihood.intrinsic_scatter_default), dtype=jnp.float64)
     if cfg.likelihood.fit_systematics_width:
-        systematics_width = _sample_positive(
-            prior_config,
-            value_key="systematics_width",
-            log_key="log_systematics_width",
-            default_value=float(cfg.likelihood.systematics_width_prior_scale),
-            default_log_scale=1.0,
-            default_family="exponential",
-        )
+        if "systematics_width" in prior_config or "log_systematics_width" in prior_config:
+            systematics_width = _sample_positive(
+                prior_config,
+                value_key="systematics_width",
+                log_key="log_systematics_width",
+                default_value=float(cfg.likelihood.systematics_width_prior_scale),
+                default_log_scale=1.0,
+                default_family="exponential",
+            )
+        else:
+            systematics_width = _sample_log_positive_from_distribution(
+                prior_config,
+                value_key="systematics_width",
+                log_key="log_systematics_width",
+                default_distribution=dist.TruncatedNormal(
+                    np.log(0.10),
+                    0.05,
+                    low=np.log(0.07),
+                    high=np.log(0.15),
+                ),
+            )
     else:
         systematics_width = jnp.asarray(float(cfg.likelihood.systematics_width), dtype=jnp.float64)
     if cfg.observation.fits_redshift:
@@ -1971,6 +1994,8 @@ def evaluate_photometric_state(
         total_obs = _redshift_to_obs(rest_wave, total_rest * igm, obs_wave, redshift, luminosity_distance_m)
         pred_fluxes_raw = _project_filters(total_obs, context.packed_filters_jax)
     local_agn_line_fluxes = jnp.zeros_like(pred_fluxes_raw)
+    local_broad_line_fluxes = jnp.zeros_like(pred_fluxes_raw)
+    local_narrow_line_fluxes = jnp.zeros_like(pred_fluxes_raw)
     coarse_agn_line_fluxes = jnp.zeros_like(pred_fluxes_raw)
     correct_agn_line_photometry = (
         fit_agn
@@ -2122,13 +2147,28 @@ def evaluate_photometric_state(
         host_capture_fraction = jnp.ones_like(pred_fluxes_raw)
         spec_host_capture_fraction_by_spectrum = jnp.ones_like(spec_spatial_scale_arcsec)
     host_capture_source_fluxes = host_fluxes_total + host_dust_fluxes_total
+    agn_narrow_line_fluxes_total = jnp.zeros_like(pred_fluxes_raw)
+    if host_capture_enabled and fit_agn and include_sed_agn_features:
+        if correct_agn_line_photometry:
+            agn_narrow_line_fluxes_total = local_narrow_line_fluxes
+        else:
+            if fast_projection_enabled:
+                agn_narrow_line_fluxes_total = _project_rest_luminosity_filters(context, line_nl_att_rest)
+            elif redshift_projection_enabled:
+                agn_narrow_line_fluxes_total = _project_redshift_luminosity_filters(context, line_nl_att_rest, redshift)
+            else:
+                line_nl_obs_for_capture = _redshift_to_obs(rest_wave, line_nl_att_rest * igm, obs_wave, redshift, luminosity_distance_m)
+                agn_narrow_line_fluxes_total = _project_filters(line_nl_obs_for_capture, context.packed_filters_jax)
+    extended_capture_source_fluxes = host_capture_source_fluxes + agn_narrow_line_fluxes_total
     host_fluxes = host_fluxes_total * host_capture_fraction
     captured_host_dust_fluxes = host_dust_fluxes_total * host_capture_fraction
     captured_host_source_fluxes = host_capture_source_fluxes * host_capture_fraction
+    captured_agn_narrow_line_fluxes = agn_narrow_line_fluxes_total * host_capture_fraction
+    captured_extended_source_fluxes = extended_capture_source_fluxes * host_capture_fraction
     pred_fluxes = (
         pred_fluxes_raw
         if not host_capture_enabled
-        else pred_fluxes_raw - host_capture_source_fluxes + captured_host_source_fluxes
+        else _apply_extended_capture(pred_fluxes_raw, extended_capture_source_fluxes, host_capture_fraction)
     )
 
     spec_model_fluxes = jnp.zeros_like(spec_fluxes)
@@ -2258,9 +2298,29 @@ def evaluate_photometric_state(
                 rest_wave,
                 feii_template_on_rest,
                 line_coverage_rest=jaxqsofit_line_coverage_rest,
-                fixed_narrow_fwhm_kms=nebular["lines_width"],
             )
             jqf_cfg = cfg.spectroscopy_config.jaxqsofit
+            if host_capture_enabled and bool(jqf_cfg.use_spectral_lines):
+                spec_capture_at_pixel = spec_host_capture_fraction_by_spectrum[spec_spectrum_index]
+                jqf_line_model_aperture = _apply_extended_capture(
+                    jqf_components["lines"],
+                    jqf_components["line_narrow"],
+                    spec_capture_at_pixel,
+                )
+                jqf_total_aperture = (
+                    jqf_components["continuum"]
+                    + jqf_components["feii"]
+                    + jqf_components["balmer"]
+                    + jqf_line_model_aperture
+                )
+                jqf_components = {
+                    **jqf_components,
+                    "total": jqf_total_aperture,
+                    "lines": jqf_line_model_aperture,
+                    "line_narrow": spec_capture_at_pixel * jqf_components["line_narrow"],
+                }
+                numpyro.deterministic("jqf_line_model_aperture", jqf_line_model_aperture)
+                numpyro.deterministic("jqf_line_model_narrow_aperture", jqf_components["line_narrow"])
             if bool(jqf_cfg.use_line_strength_priors) and bool(jqf_cfg.use_spectral_lines):
                 sed_broad_line_obs = _redshift_to_obs(
                     rest_wave,
@@ -2284,6 +2344,8 @@ def evaluate_photometric_state(
                     spec_wave_obs,
                     jnp.interp(spec_wave_obs, obs_wave, sed_narrow_line_obs, left=0.0, right=0.0),
                 )
+                if host_capture_enabled:
+                    sed_narrow_line_mjy = sed_narrow_line_mjy * spec_host_capture_fraction_by_spectrum[spec_spectrum_index]
                 sed_narrow_bridge_mjy = sed_narrow_line_mjy
                 if bool(jqf_cfg.use_nebular_line_prior):
                     sed_nebular_line_obs = _redshift_to_obs(
@@ -2427,7 +2489,13 @@ def evaluate_photometric_state(
         trans_fluxes = _project_filters(transmitted_fraction_obs, context.packed_filters_jax)
         if correct_agn_line_photometry:
             agn_fluxes = agn_fluxes - coarse_agn_line_fluxes + local_agn_line_fluxes
-            line_fluxes = local_agn_line_fluxes
+            line_bl_fluxes = local_broad_line_fluxes
+            line_nl_fluxes = local_narrow_line_fluxes
+            line_fluxes = line_bl_fluxes + line_nl_fluxes
+        if host_capture_enabled and fit_agn and include_sed_agn_features:
+            agn_fluxes = _apply_extended_capture(agn_fluxes, agn_narrow_line_fluxes_total, host_capture_fraction)
+            line_nl_fluxes = captured_agn_narrow_line_fluxes
+            line_fluxes = line_bl_fluxes + line_nl_fluxes
     else:
         nebular_lines_local_obs_wave = jnp.zeros((1,), dtype=jnp.float64)
         nebular_lines_local_obs = jnp.zeros((1,), dtype=jnp.float64)
@@ -2448,6 +2516,8 @@ def evaluate_photometric_state(
                     agn_fluxes = agn_fluxes - coarse_agn_line_fluxes + local_agn_line_fluxes
         else:
             agn_fluxes = jnp.zeros_like(pred_fluxes)
+        if host_capture_enabled and fit_agn and include_sed_agn_features and need_agn_fluxes:
+            agn_fluxes = _apply_extended_capture(agn_fluxes, agn_narrow_line_fluxes_total, host_capture_fraction)
         if need_trans_fluxes:
             if fast_projection_enabled:
                 trans_fluxes = _project_rest_scalar_filters(context, transmitted_fraction)
@@ -2466,7 +2536,6 @@ def evaluate_photometric_state(
         upper_limits=upper_limits,
         data_mask=data_mask,
         systematics_width=systematics_width,
-        intrinsic_scatter=intrinsic_scatter,
         likelihood_family=cfg.likelihood.likelihood_family,
         student_t_df=cfg.likelihood.student_t_df,
         agn_component=agn_fluxes,
@@ -2478,6 +2547,8 @@ def evaluate_photometric_state(
         lyman_break_uncertainty=cfg.likelihood.lyman_break_uncertainty,
         filter_wavelength=filter_wavelength,
         redshift=redshift,
+        nebular_line_component=local_nebular_line_fluxes,
+        local_nebular_line_uncertainty_dex=cfg.likelihood.local_nebular_line_uncertainty_dex,
     )
     if add_likelihood:
         numpyro.factor("photometry_loglike", logl)
@@ -2503,7 +2574,6 @@ def evaluate_photometric_state(
     numpyro.deterministic("spectrum_host_capture_fraction", spec_host_capture_fraction_by_spectrum)
     numpyro.deterministic("spectroscopy_likelihood_weight", spec_likelihood_weight)
     numpyro.deterministic("spectroscopy_loglike", spec_logl)
-    numpyro.deterministic("intrinsic_scatter_fit", intrinsic_scatter)
     numpyro.deterministic("fracAGN_5100_fit", fracagn_5100)
     numpyro.deterministic("log_agn_amp_fit", log_agn_amp)
     numpyro.deterministic("log_disk_luminosity_fit", _safe_log10(l_agn_lambda_5100))
@@ -2513,6 +2583,10 @@ def evaluate_photometric_state(
     numpyro.deterministic("host_total_fluxes", host_fluxes_total)
     numpyro.deterministic("host_capture_source_fluxes", host_capture_source_fluxes)
     numpyro.deterministic("captured_host_dust_fluxes", captured_host_dust_fluxes)
+    numpyro.deterministic("agn_narrow_line_fluxes_total", agn_narrow_line_fluxes_total)
+    numpyro.deterministic("captured_agn_narrow_line_fluxes", captured_agn_narrow_line_fluxes)
+    numpyro.deterministic("extended_capture_source_fluxes", extended_capture_source_fluxes)
+    numpyro.deterministic("captured_extended_source_fluxes", captured_extended_source_fluxes)
     numpyro.deterministic("host_capture_fraction_fluxes", host_capture_fraction)
     numpyro.deterministic("log_host_capture_scale_arcsec_fit", log_host_capture_scale_arcsec)
     numpyro.deterministic("host_capture_slope_fit", host_capture_slope)

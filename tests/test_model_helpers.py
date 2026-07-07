@@ -40,6 +40,7 @@ from jaxsedfit.model import (
     _attenuation_transmitted_fraction,
     _attenuation_curve,
     _apply_biattenuation,
+    _apply_extended_capture,
     _balmer_continuum_jax,
     _chi2_upper_limit,
     _feii_component,
@@ -48,6 +49,7 @@ from jaxsedfit.model import (
     _host_dust_emission,
     _igm_transmission,
     _line_gaussians,
+    _evaluate_jaxqsofit_backend,
     _powerlaw_jax,
     _project_filters,
     _redshift_to_obs,
@@ -84,6 +86,15 @@ def test_likelihood_defaults_include_absolute_flux_scale_prior():
     cfg = LikelihoodConfig()
     assert cfg.use_absolute_flux_scale_prior is True
     assert cfg.absolute_flux_scale_prior_sigma_dex > 0.0
+    assert cfg.use_local_line_photometry is True
+    assert cfg.local_nebular_line_uncertainty_dex == pytest.approx(0.3)
+
+
+def test_jaxqsofit_config_broadening_convolution_default_and_validation():
+    assert JaxQSOFitConfig().broadening_convolution == "fft"
+    assert JaxQSOFitConfig(broadening_convolution="direct").broadening_convolution == "direct"
+    with pytest.raises(ValueError, match="broadening_convolution"):
+        JaxQSOFitConfig(broadening_convolution="scipy")
 
 
 def test_public_model_names_delegate_to_legacy_implementations(monkeypatch):
@@ -296,6 +307,16 @@ def test_attenuation_transmitted_fraction_uses_only_direct_light():
     np.testing.assert_allclose(frac[:2], [0.2, 0.8])
     assert frac[2] == pytest.approx(1.0e-4)
     assert np.all(total_emergent_fraction[:2] > frac[:2])
+
+
+def test_extended_capture_leaves_compact_flux_unchanged_and_scales_extended_flux():
+    total = np.asarray([10.0, 20.0, 30.0])
+    extended = np.asarray([2.0, 5.0, 10.0])
+    capture = np.asarray([0.5, 0.2, 1.0])
+
+    captured = np.asarray(_apply_extended_capture(total, extended, capture))
+
+    np.testing.assert_allclose(captured, np.asarray([9.0, 16.0, 30.0]))
 
 
 def test_dale2014_host_dust_matches_cigale_v2025_1_reference():
@@ -541,7 +562,6 @@ def test_lyman_break_uncertainty_threshold_uses_angstroms():
         upper_limits=np.asarray([False]),
         data_mask=np.asarray([True]),
         systematics_width=0.0,
-        intrinsic_scatter=0.0,
         likelihood_family="gaussian",
         student_t_df=5.0,
         agn_component=np.asarray([0.0]),
@@ -559,6 +579,43 @@ def test_lyman_break_uncertainty_threshold_uses_angstroms():
 
     assert logl_without_uncertainty < -1.0e5
     assert logl_with_uncertainty > -100.0
+
+
+def test_local_nebular_line_uncertainty_regularizes_only_line_component():
+    kwargs = dict(
+        pred_fluxes=np.asarray([10.0]),
+        obs_fluxes=np.asarray([5.0]),
+        obs_errors=np.asarray([0.1]),
+        upper_limits=np.asarray([False]),
+        data_mask=np.asarray([True]),
+        systematics_width=0.0,
+        likelihood_family="gaussian",
+        student_t_df=5.0,
+        agn_component=np.asarray([0.0]),
+        agn_bol_lum_w=1.0e38,
+        agn_nev=0.1,
+        variability_uncertainty=False,
+        attenuation_model_uncertainty=False,
+        transmitted_fraction=np.asarray([1.0]),
+        lyman_break_uncertainty=False,
+        filter_wavelength=np.asarray([5000.0]),
+        redshift=0.0,
+        nebular_line_component=np.asarray([5.0]),
+    )
+
+    exact = float(photometric_loglike(**kwargs, local_nebular_line_uncertainty_dex=0.0))
+    regularized = float(photometric_loglike(**kwargs, local_nebular_line_uncertainty_dex=0.3))
+
+    assert exact < -1.0e3
+    assert regularized > exact
+
+    no_line_component = float(
+        photometric_loglike(
+            **{**kwargs, "nebular_line_component": np.asarray([0.0])},
+            local_nebular_line_uncertainty_dex=0.3,
+        )
+    )
+    assert no_line_component == pytest.approx(exact)
 
 
 def test_spectroscopic_likelihood_weight_uses_resolution_elements():
@@ -889,6 +946,56 @@ def test_jaxqsofit_fixed_narrow_width_component_reports_tied_width():
     assert tr["jqf_line_narrow_amp_scale"]["value"] == pytest.approx(2.5)
 
 
+def test_jaxqsofit_backend_does_not_fix_narrow_width_without_explicit_override(monkeypatch):
+    jqf_components = pytest.importorskip("jaxqsofit.components")
+    captured = {}
+
+    def fake_evaluate_joint_spectral_components(wave_obs, redshift, continuum_mjy, *, config, **kwargs):
+        captured["config"] = config
+        zeros = np.zeros_like(np.asarray(wave_obs, dtype=float))
+        return {
+            "total": np.asarray(continuum_mjy, dtype=float),
+            "continuum": np.asarray(continuum_mjy, dtype=float),
+            "lines": zeros,
+            "line_broad": zeros,
+            "line_narrow": zeros,
+            "feii": zeros,
+            "balmer": zeros,
+        }
+
+    monkeypatch.setattr(jqf_components, "evaluate_joint_spectral_components", fake_evaluate_joint_spectral_components)
+    cfg = FitConfig(
+        observation=Observation(redshift=0.0),
+        photometry=PhotometryData(filter_names=["f1"], fluxes=[1.0], errors=[0.1]),
+        spectroscopy_config=SpectroscopyConfig(
+            enabled=True,
+            backend="jaxqsofit",
+            jaxqsofit=JaxQSOFitConfig(
+                use_spectral_lines=True,
+                use_tied_lines=False,
+                line_table=None,
+                use_spectral_feii=False,
+                use_spectral_balmer_continuum=False,
+            ),
+        ),
+    )
+    wave = np.asarray([4995.0, 5000.0, 5005.0], dtype=float)
+    out = _evaluate_jaxqsofit_backend(
+        wave,
+        0.0,
+        np.ones_like(wave),
+        cfg,
+        {"line": {"table": []}},
+        wave,
+        np.zeros_like(wave),
+    )
+
+    assert np.allclose(out["total"], 1.0)
+    assert captured["config"].fixed_narrow_fwhm_kms is None
+    assert captured["config"].fixed_narrow_amp_scale is None
+    assert captured["config"].narrow_fwhm_kms_default == pytest.approx(500.0)
+
+
 def test_fit_config_mapping_coerces_agn_template_config():
     cfg = fit_config_from_mapping(
         {
@@ -930,7 +1037,7 @@ def test_fit_config_mapping_rejects_flat_prior_config():
 
 
 def test_jaxqsofit_joint_backend_builds_flux_scaled_smart_priors(monkeypatch):
-    pytest.importorskip("jaxqsofit.config")
+    jqf_config = pytest.importorskip("jaxqsofit.config")
 
     class _SSPData:
         ssp_lgmet = np.array([-1.0, 0.0])
@@ -967,7 +1074,11 @@ def test_jaxqsofit_joint_backend_builds_flux_scaled_smart_priors(monkeypatch):
     assert prior is not None
     if hasattr(prior, "to_mapping"):
         prior = prior.to_mapping()
-    assert prior["log_cont_norm"]["loc"] == pytest.approx(np.log(3.0))
+    expected = jqf_config.PriorConfig.from_spectrum(
+        flux=np.asarray([2.0, 4.0]),
+        redshift=0.1,
+    ).to_mapping()
+    assert prior["log_cont_norm"]["loc"] == pytest.approx(expected["log_cont_norm"]["loc"])
     line_table = prior["line"]["table"]
     assert line_table
     assert min(float(row["minsca"]) for row in line_table) >= 3.0e-4
@@ -1042,7 +1153,6 @@ def test_jaxqsofit_spectrum_resolution_host_basis_uses_host_kinematics(monkeypat
         agn=AGNConfig(fit_agn=False),
         nebular=NebularConfig(enabled=False),
         likelihood=LikelihoodConfig(
-            fit_intrinsic_scatter=False,
             variability_uncertainty=False,
             use_absolute_flux_scale_prior=False,
         ),
@@ -1084,7 +1194,7 @@ def test_jaxqsofit_spectrum_resolution_host_basis_uses_host_kinematics(monkeypat
     assert np.asarray(tr["pred_spectrum_fluxes"]["value"]).shape == (3,)
 
 
-def test_jaxqsofit_backend_always_uses_dynamic_nebular_width(monkeypatch):
+def test_jaxqsofit_backend_keeps_nebular_width_fixed_without_nebular_prior(monkeypatch):
     class _SSPData:
         ssp_lgmet = np.array([-1.0, 0.0])
         ssp_lg_age_gyr = np.array([-1.0, 0.0])
@@ -1109,7 +1219,6 @@ def test_jaxqsofit_backend_always_uses_dynamic_nebular_width(monkeypatch):
         ),
         nebular=NebularConfig(enabled=True, zgas=0.02),
         likelihood=LikelihoodConfig(
-            fit_intrinsic_scatter=False,
             variability_uncertainty=False,
             use_absolute_flux_scale_prior=False,
         ),
@@ -1134,8 +1243,8 @@ def test_jaxqsofit_backend_always_uses_dynamic_nebular_width(monkeypatch):
     )
     context = build_model_context(cfg)
 
-    assert context.fixed_nebular_line_profile_jax is None
-    assert context.nebular_rest_templates_jax.line_profile_per_photon is None
+    assert context.fixed_nebular_line_profile_jax is not None
+    assert context.nebular_rest_templates_jax.line_profile_per_photon is not None
 
 
 def test_jaxsedfit_model_can_call_jaxqsofit_backend(monkeypatch):
@@ -1170,7 +1279,6 @@ def test_jaxsedfit_model_can_call_jaxqsofit_backend(monkeypatch):
         ),
         likelihood=LikelihoodConfig(
             use_host_capture_model=True,
-            fit_intrinsic_scatter=False,
             variability_uncertainty=False,
             use_absolute_flux_scale_prior=False,
         ),
@@ -1250,7 +1358,6 @@ def test_jaxsedfit_jaxqsofit_backend_uses_nested_tied_line_config(monkeypatch):
         galaxy=GalaxyConfig(dsps_ssp_fn="fake.h5", n_wave=64, fit_host=False),
         agn=AGNConfig(),
         likelihood=LikelihoodConfig(
-            fit_intrinsic_scatter=False,
             variability_uncertainty=False,
             use_absolute_flux_scale_prior=False,
         ),
@@ -1354,7 +1461,6 @@ def test_jaxsedfit_jaxqsofit_tied_line_backend_runs_svi_jit(monkeypatch):
         galaxy=GalaxyConfig(dsps_ssp_fn="fake.h5", n_wave=64, fit_host=False),
         agn=AGNConfig(),
         likelihood=LikelihoodConfig(
-            fit_intrinsic_scatter=False,
             variability_uncertainty=False,
             use_absolute_flux_scale_prior=False,
         ),
@@ -1425,6 +1531,7 @@ def test_plot_jaxqsofit_spectrum_adapts_joint_predictive(monkeypatch):
         "spec_torus_model_fluxes": np.asarray([[0.05, 0.06, 0.07], [0.055, 0.065, 0.075]]),
         "jqf_continuum_model": np.asarray([[1.0, 2.0, 3.0], [1.0, 2.0, 3.0]]),
         "jqf_line_model": np.asarray([[0.1, 0.2, 0.3], [0.3, 0.4, 0.5]]),
+        "jqf_line_model_aperture": np.asarray([[1.0, 1.0, 1.0], [3.0, 3.0, 3.0]]),
         "spectrum_scale_fit": np.asarray([2.0, 2.0]),
         "spectrum_host_capture_fraction": np.asarray([0.5, 0.5]),
         "host_obs_sed": np.asarray([[1.0e-20, 2.0e-20, 3.0e-20], [1.0e-20, 2.0e-20, 3.0e-20]]),
@@ -1442,7 +1549,14 @@ def test_plot_jaxqsofit_spectrum_adapts_joint_predictive(monkeypatch):
     assert captured["wave"].tolist() == [2000.0, 2500.0, 3000.0]
     assert np.all(captured["model_total"] > captured["flux"] * 0.0)
     assert np.all(captured["host"] > 0.0)
-    assert np.all(captured["line"] > 0.0)
+    np.testing.assert_allclose(
+        captured["line"],
+        JAXSEDFit._mjy_to_rest_flambda_1e17(
+            np.asarray([4000.0, 5000.0, 6000.0]),
+            2.0 * np.asarray([2.0, 2.0, 2.0]),
+            1.0,
+        ),
+    )
     assert "jaxsedfit_torus" in captured["custom_components"]
     assert "jaxsedfit_host_dust" in captured["custom_components"]
     assert "jaxsedfit_sed_lines" not in captured["custom_components"]

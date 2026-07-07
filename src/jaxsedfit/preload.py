@@ -1001,16 +1001,9 @@ def _build_fixed_nebular_line_profile(
 ) -> np.ndarray | None:
     """Precompute fixed nebular line profile per ionizing photon when shape is static."""
     neb = cfg.nebular
-    tie_width_to_jaxqsofit = bool(
-        cfg.spectroscopy_config.enabled
-        and str(cfg.spectroscopy_config.backend).lower() == "jaxqsofit"
-        and cfg.spectroscopy_config.jaxqsofit.use_spectral_lines
-    )
     if not (cfg.galaxy.fit_host and neb.enabled and neb.emission):
         return np.zeros_like(rest_wave, dtype=float)
     if neb.zgas is None:
-        return None
-    if tie_width_to_jaxqsofit:
         return None
     prior_config = cfg.prior_config.to_mapping()
     shape_keys = {"nebular_logU", "nebular_zgas", "nebular_ne", "nebular_lines_width"}
@@ -1061,12 +1054,7 @@ def _build_nebular_rest_templates_jax(
         )
 
     prior_config = cfg.prior_config.to_mapping()
-    tie_width_to_jaxqsofit = bool(
-        cfg.spectroscopy_config.enabled
-        and str(cfg.spectroscopy_config.backend).lower() == "jaxqsofit"
-        and cfg.spectroscopy_config.jaxqsofit.use_spectral_lines
-    )
-    line_width_fixed = "nebular_lines_width" not in prior_config and not tie_width_to_jaxqsofit
+    line_width_fixed = "nebular_lines_width" not in prior_config
     cache_key = (
         float(rest_wave[0]),
         float(rest_wave[-1]),
