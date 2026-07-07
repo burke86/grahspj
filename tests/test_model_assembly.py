@@ -83,7 +83,6 @@ def _cfg(
             ),
         ),
         likelihood=LikelihoodConfig(
-            fit_intrinsic_scatter=False,
             variability_uncertainty=False,
             use_absolute_flux_scale_prior=False,
             use_host_capture_model=False,
@@ -183,12 +182,39 @@ def test_native_agn_lines_use_distinct_broad_and_narrow_widths(monkeypatch):
     assert broad_std > 5.0 * narrow_std
 
 
+def test_systematics_width_default_is_tight_log_prior(monkeypatch):
+    _patch_ssp(monkeypatch)
+    cfg = _cfg()
+    cfg.likelihood.fit_systematics_width = True
+    context = build_model_context(cfg)
+
+    tr = _deterministic_likelihood_trace(
+        context,
+        {
+            **_fixed_component_data(),
+            "log_systematics_width": _log_positive(0.10),
+        },
+    )
+
+    assert "log_systematics_width" in tr
+    assert "systematics_width" in tr
+    assert tr["log_systematics_width"]["type"] == "sample"
+    assert tr["systematics_width"]["type"] == "deterministic"
+    fn = tr["log_systematics_width"]["fn"]
+    assert fn.__class__.__name__ == "TwoSidedTruncatedDistribution"
+    assert np.isclose(np.asarray(fn.base_dist.loc), np.log(0.10))
+    assert np.isclose(np.asarray(fn.base_dist.scale), 0.05)
+    assert np.isclose(np.asarray(fn.low), np.log(0.07))
+    assert np.isclose(np.asarray(fn.high), np.log(0.15))
+    assert np.isclose(_site(tr, "systematics_width"), 0.10)
+    assert "photometry_loglike" in tr
+
+
 def test_systematics_width_can_be_sampled_with_exponential_prior(monkeypatch):
     _patch_ssp(monkeypatch)
     cfg = _cfg()
     cfg.likelihood.fit_systematics_width = True
-    cfg.likelihood.systematics_width = 0.05
-    cfg.likelihood.systematics_width_prior_scale = 0.05
+    cfg.prior_config.likelihood.systematics_width = dist.Exponential(20.0)
     context = build_model_context(cfg)
 
     tr = _deterministic_likelihood_trace(

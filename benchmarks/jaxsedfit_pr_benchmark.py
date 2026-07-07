@@ -18,6 +18,7 @@ from typing import Any, Callable
 import jax
 import jax.numpy as jnp
 import numpy as np
+import numpyro.distributions as dist
 from numpyro.infer.util import log_density
 
 from diffmah.diffmah_kernels import DEFAULT_MAH_PARAMS
@@ -93,6 +94,30 @@ def _percent_delta_stderr(candidate: float, baseline: float, candidate_stderr: f
     return float(100.0 * np.sqrt(term_candidate * term_candidate + term_baseline * term_baseline))
 
 
+def _block_until_ready_tree(value: Any) -> None:
+    for leaf in jax.tree_util.tree_leaves(value):
+        jax.block_until_ready(leaf)
+
+
+def _preview_scalar(value: Any) -> float:
+    leaves = jax.tree_util.tree_leaves(value)
+    if not leaves:
+        return float("nan")
+    return float(np.asarray(leaves[0]).ravel()[0])
+
+
+_PHOTOMETRIC_LOGLIKE_PARAMETERS = set(inspect.signature(photometric_loglike).parameters)
+
+
+def _photometric_loglike_compat(**kwargs):
+    """Call photometric_loglike across benchmark base/head API revisions."""
+    if "intrinsic_scatter" in _PHOTOMETRIC_LOGLIKE_PARAMETERS and "intrinsic_scatter" not in kwargs:
+        kwargs["intrinsic_scatter"] = jnp.asarray(1.0e-4, dtype=jnp.float64)
+    return photometric_loglike(
+        **{key: value for key, value in kwargs.items() if key in _PHOTOMETRIC_LOGLIKE_PARAMETERS}
+    )
+
+
 def _workflow_url() -> str:
     server = os.getenv("GITHUB_SERVER_URL", "https://github.com")
     repo = os.getenv("GITHUB_REPOSITORY", "")
@@ -135,9 +160,9 @@ def _benchmark_prior_config():
     if "host" not in inspect.signature(PriorConfig).parameters:
         return flat_prior
     return PriorConfig(
-        stellar_mass=flat_prior["log_stellar_mass"],
-        host={"ebv_gal": flat_prior["ebv_gal"]},
-        agn={"ebv_agn": flat_prior["ebv_agn"]},
+        stellar_mass=dist.Normal(10.5, 1.0),
+        host={"ebv_gal": dist.HalfNormal(0.15)},
+        agn={"ebv_agn": dist.HalfNormal(0.15)},
     )
 
 
@@ -182,7 +207,7 @@ def _bench_jitted(name: str, fn: Callable[[], Any], repeats: int, trials: int) -
     compile_start = time.perf_counter()
     compiled = jax.jit(fn)
     out = compiled()
-    jax.block_until_ready(out)
+    _block_until_ready_tree(out)
     compile_seconds = time.perf_counter() - compile_start
     trial_elapsed = []
     trial_ms = []
@@ -190,7 +215,7 @@ def _bench_jitted(name: str, fn: Callable[[], Any], repeats: int, trials: int) -
         start = time.perf_counter()
         for _ in range(repeats):
             out = compiled()
-        jax.block_until_ready(out)
+        _block_until_ready_tree(out)
         elapsed = time.perf_counter() - start
         trial_elapsed.append(float(elapsed))
         trial_ms.append(float(1.0e3 * elapsed / repeats))
@@ -205,7 +230,7 @@ def _bench_jitted(name: str, fn: Callable[[], Any], repeats: int, trials: int) -
         "ms_per_eval": _mean(trial_ms),
         "ms_per_eval_stdev": _stdev(trial_ms),
         "ms_per_eval_stderr": _stderr(trial_ms),
-        "value": float(np.asarray(out).ravel()[0]),
+        "value": _preview_scalar(out),
     }
 
 
@@ -367,25 +392,24 @@ def _build_component_functions(fitter: JAXSEDFit) -> dict[str, Callable[[], Any]
     pred_fluxes = _project_rest_luminosity_filters(ctx, total_rest)
 
     def photometric_loglike_only():
-        return photometric_loglike(
-            pred_fluxes,
-            jnp.asarray(ctx.fluxes, dtype=jnp.float64),
-            jnp.asarray(ctx.errors, dtype=jnp.float64),
-            jnp.asarray(ctx.upper_limits, dtype=bool),
-            jnp.asarray(ctx.data_mask, dtype=bool),
-            ctx.fit_config.likelihood.systematics_width,
-            1.0e-4,
-            ctx.fit_config.likelihood.likelihood_family,
-            ctx.fit_config.likelihood.student_t_df,
-            jnp.zeros_like(pred_fluxes),
-            agn_amp * AGN_BOLOMETRIC_CORRECTION_5100,
-            ctx.fit_config.likelihood.agn_nev,
-            False,
-            False,
-            jnp.ones_like(pred_fluxes),
-            False,
-            ctx.filter_effective_wavelength_jax,
-            ctx.fixed_redshift_jax,
+        return _photometric_loglike_compat(
+            pred_fluxes=pred_fluxes,
+            obs_fluxes=jnp.asarray(ctx.fluxes, dtype=jnp.float64),
+            obs_errors=jnp.asarray(ctx.errors, dtype=jnp.float64),
+            upper_limits=jnp.asarray(ctx.upper_limits, dtype=bool),
+            data_mask=jnp.asarray(ctx.data_mask, dtype=bool),
+            systematics_width=ctx.fit_config.likelihood.systematics_width,
+            likelihood_family=ctx.fit_config.likelihood.likelihood_family,
+            student_t_df=ctx.fit_config.likelihood.student_t_df,
+            agn_component=jnp.zeros_like(pred_fluxes),
+            agn_bol_lum_w=agn_amp * AGN_BOLOMETRIC_CORRECTION_5100,
+            agn_nev=ctx.fit_config.likelihood.agn_nev,
+            variability_uncertainty=False,
+            attenuation_model_uncertainty=False,
+            transmitted_fraction=jnp.ones_like(pred_fluxes),
+            lyman_break_uncertainty=False,
+            filter_wavelength=ctx.filter_effective_wavelength_jax,
+            redshift=ctx.fixed_redshift_jax,
         )
 
     return {
@@ -402,6 +426,202 @@ def _build_component_functions(fitter: JAXSEDFit) -> dict[str, Callable[[], Any]
         "fast_filter_projection": fast_filter_projection,
         "legacy_redshift_plus_projection": legacy_redshift_plus_projection,
         "photometric_loglike_only": photometric_loglike_only,
+    }
+
+
+def _build_component_gradient_functions(fitter: JAXSEDFit) -> dict[str, Callable[[], Any]]:
+    """Build scalar value-and-gradient probes for the major differentiable kernels."""
+    ctx = fitter.context
+    rest_wave = ctx.rest_wave_jax
+    obs_wave = ctx.obs_wave_jax
+    gal_lgmet = jnp.asarray(-0.3, dtype=jnp.float64)
+    gal_lgmet_scatter = jnp.asarray(0.2, dtype=jnp.float64)
+    u_defaults = {
+        key: jnp.asarray(float(np.asarray(getattr(DEFAULT_DIFFSTAR_U_PARAMS, key))), dtype=jnp.float64)
+        for key in DEFAULT_DIFFSTAR_U_PARAMS._fields
+    }
+
+    def host_outputs(log_stellar_mass):
+        bounded = get_bounded_diffstar_params(DiffstarUParams(**u_defaults))
+        base_history = calc_sfh_singlegal(
+            bounded,
+            DEFAULT_MAH_PARAMS,
+            ctx.host_basis_jax.gal_t_table,
+            lgt0=DIFFSTAR_LGT0,
+            fb=DIFFSTAR_FB,
+            return_smh=True,
+        )
+        info = calc_ssp_weights_sfh_table_lognormal_mdf(
+            ctx.host_basis_jax.gal_t_table,
+            base_history.sfh,
+            gal_lgmet,
+            gal_lgmet_scatter,
+            ctx.host_basis_jax.ssp_lgmet,
+            ctx.host_basis_jax.ssp_lg_age_gyr,
+            jnp.asarray(ctx.t_obs_gyr, dtype=jnp.float64),
+        )
+        surviving = jnp.clip(jnp.sum(info.age_weights * ctx.host_basis_jax.surviving_frac_by_age), 1.0e-12, 1.0)
+        formed_mass = 10.0**log_stellar_mass / surviving
+        host_rest = formed_mass * jnp.tensordot(info.weights, ctx.host_basis_jax.rest_llambda, axes=((0, 1), (0, 1)))
+        return host_rest, formed_mass, info.weights
+
+    def host_diffstar_ssp_mix_grad(log_stellar_mass):
+        return jnp.sum(host_outputs(log_stellar_mass)[0])
+
+    def host_sfh_weights_grad(metallicity):
+        bounded = get_bounded_diffstar_params(DiffstarUParams(**u_defaults))
+        base_history = calc_sfh_singlegal(
+            bounded,
+            DEFAULT_MAH_PARAMS,
+            ctx.host_basis_jax.gal_t_table,
+            lgt0=DIFFSTAR_LGT0,
+            fb=DIFFSTAR_FB,
+            return_smh=True,
+        )
+        info = calc_ssp_weights_sfh_table_lognormal_mdf(
+            ctx.host_basis_jax.gal_t_table,
+            base_history.sfh,
+            metallicity,
+            gal_lgmet_scatter,
+            ctx.host_basis_jax.ssp_lgmet,
+            ctx.host_basis_jax.ssp_lg_age_gyr,
+            jnp.asarray(ctx.t_obs_gyr, dtype=jnp.float64),
+        )
+        return jnp.sum(info.weights) + base_history.smh[-1]
+
+    host_rest, formed_mass, host_weights = jax.jit(lambda: host_outputs(jnp.asarray(10.0, dtype=jnp.float64)))()
+    jax.block_until_ready(host_rest)
+
+    line_wave = jnp.asarray(ctx.templates.line_wave, dtype=jnp.float64)
+    line_blagn = jnp.asarray(ctx.templates.line_blagn, dtype=jnp.float64)
+    line_sy2 = jnp.asarray(ctx.templates.line_sy2, dtype=jnp.float64)
+    feii_template = ctx.feii_template_on_rest_jax
+
+    def agn_disk_plus_torus_grad(log_agn_amp):
+        agn_amp = jnp.exp(log_agn_amp)
+        disk = _powerlaw_jax(rest_wave, agn_amp / 5100.0, 0.0, -1.0, 5100.0, GRAHSP_PL_BEND_LOC_A, GRAHSP_PL_BEND_WIDTH, GRAHSP_PL_CUTOFF_A)
+        torus = _torus_component(
+            rest_wave,
+            0.2,
+            0.0,
+            17.0,
+            0.45,
+            2.0,
+            0.5,
+            0.1,
+            0.29,
+            GRAHSP_SI_EM_LAM_A,
+            GRAHSP_SI_ABS_LAM_A,
+            GRAHSP_SI_EM_WIDTH_A,
+            GRAHSP_SI_ABS_WIDTH_A,
+            agn_amp,
+        )
+        return jnp.sum(disk + torus)
+
+    def agn_line_gaussians_grad(log_width):
+        agn_amp = jnp.asarray(1.0e37, dtype=jnp.float64)
+        l5100 = agn_amp / 5100.0
+        width = jnp.exp(log_width)
+        broad = _line_gaussians(rest_wave, line_wave, 0.02 * l5100 * line_blagn, width)
+        narrow = _line_gaussians(rest_wave, line_wave, 0.002 * l5100 * line_sy2, width)
+        return jnp.sum(broad + narrow)
+
+    def agn_feii_grad(log_fwhm):
+        agn_amp = jnp.asarray(1.0e37, dtype=jnp.float64)
+        return jnp.sum(_feii_component(rest_wave, feii_template, 5.0 * 0.02 * agn_amp / 5100.0, jnp.exp(log_fwhm), 0.0))
+
+    def agn_balmer_grad(log_velocity):
+        return jnp.sum(_balmer_continuum_jax(rest_wave, 1.0e-6, 15000.0, 1.0, jnp.exp(log_velocity)))
+
+    host_state = {
+        "host_rest": host_rest,
+        "formed_mass": formed_mass,
+        "host_ssp_weights": host_weights,
+        "gal_lgmet": gal_lgmet,
+        "ssp_lgmet": ctx.host_basis_jax.ssp_lgmet,
+    }
+    neb = _build_nebular_components(ctx, host_state, host_rest, {})
+    host_with_neb = host_rest + neb["absorption_rest"] + neb["emission_rest"]
+    agn_amp = jnp.asarray(1.0e37, dtype=jnp.float64)
+    disk = _powerlaw_jax(rest_wave, agn_amp / 5100.0, 0.0, -1.0, 5100.0, GRAHSP_PL_BEND_LOC_A, GRAHSP_PL_BEND_WIDTH, GRAHSP_PL_CUTOFF_A)
+    torus = _torus_component(rest_wave, 0.2, 0.0, 17.0, 0.45, 2.0, 0.5, 0.1, 0.29, GRAHSP_SI_EM_LAM_A, GRAHSP_SI_ABS_LAM_A, GRAHSP_SI_EM_WIDTH_A, GRAHSP_SI_ABS_WIDTH_A, agn_amp)
+    agn_spec = disk + torus
+    gal_att, agn_att, _, dust_lum = _apply_biattenuation(rest_wave, host_with_neb, agn_spec, 0.1, 0.1, -1.2, -3.0, 1.2, GRAHSP_BIATTENUATION_BREAK_A)
+    dust_rest = _host_dust_emission(ctx, dust_lum + neb["dust_luminosity"], 2.0)
+    total_rest = gal_att + agn_att + dust_rest
+    pred_fluxes = _project_rest_luminosity_filters(ctx, total_rest)
+
+    def nebular_lines_grad(log_width):
+        weights = formed_mass * host_weights
+        n_ly_total = jnp.sum(weights * ctx.host_basis_jax.n_ly_per_msun)
+        templates = ctx.nebular_templates_jax
+        z_idx = jnp.argmin(jnp.abs(templates.z_grid - jnp.power(10.0, gal_lgmet)))
+        u_idx = jnp.argmin(jnp.abs(templates.logu_grid - -2.0))
+        ne_idx = jnp.argmin(jnp.abs(templates.ne_grid - 100.0))
+        line_lumin = templates.line_lumin_per_photon[z_idx, u_idx, ne_idx] * n_ly_total
+        return jnp.sum(_flux_conserving_line_gaussians(rest_wave, templates.line_wave_a, line_lumin, jnp.exp(log_width)))
+
+    def nebular_continuum_grad(scale):
+        weights = formed_mass * host_weights
+        n_ly_total = jnp.exp(scale) * jnp.sum(weights * ctx.host_basis_jax.n_ly_per_msun)
+        templates = ctx.nebular_templates_jax
+        z_idx = jnp.argmin(jnp.abs(templates.z_grid - jnp.power(10.0, gal_lgmet)))
+        u_idx = jnp.argmin(jnp.abs(templates.logu_grid - -2.0))
+        ne_idx = jnp.argmin(jnp.abs(templates.ne_grid - 100.0))
+        cont = jnp.interp(rest_wave, templates.continuum_wave_a, templates.continuum_lumin_per_a_per_photon[z_idx, u_idx, ne_idx], left=0.0, right=0.0)
+        return jnp.sum(cont * n_ly_total * _cigale_nebular_correction(0.0, 0.0))
+
+    def attenuation_plus_dale_dust_grad(ebv_gal):
+        gal, agn, absorbed, dlum = _apply_biattenuation(rest_wave, host_with_neb, agn_spec, ebv_gal, 0.1, -1.2, -3.0, 1.2, GRAHSP_BIATTENUATION_BREAK_A)
+        dust = _host_dust_emission(ctx, dlum + neb["dust_luminosity"], 2.0)
+        return jnp.sum(gal + agn + absorbed + dust)
+
+    def fast_filter_projection_grad(scale):
+        return jnp.sum(_project_rest_luminosity_filters(ctx, total_rest * jnp.exp(scale)))
+
+    def legacy_redshift_plus_projection_grad(scale):
+        obs = _redshift_to_obs(rest_wave, total_rest * jnp.exp(scale) * ctx.fixed_igm_jax, obs_wave, ctx.fixed_redshift_jax, ctx.fixed_luminosity_distance_m_jax)
+        return jnp.sum(_project_filters(obs, ctx.packed_filters_jax))
+
+    def photometric_loglike_grad(scale):
+        scaled_pred = pred_fluxes * jnp.exp(scale)
+        return _photometric_loglike_compat(
+            pred_fluxes=scaled_pred,
+            obs_fluxes=jnp.asarray(ctx.fluxes, dtype=jnp.float64),
+            obs_errors=jnp.asarray(ctx.errors, dtype=jnp.float64),
+            upper_limits=jnp.asarray(ctx.upper_limits, dtype=bool),
+            data_mask=jnp.asarray(ctx.data_mask, dtype=bool),
+            systematics_width=ctx.fit_config.likelihood.systematics_width,
+            likelihood_family=ctx.fit_config.likelihood.likelihood_family,
+            student_t_df=ctx.fit_config.likelihood.student_t_df,
+            agn_component=jnp.zeros_like(scaled_pred),
+            agn_bol_lum_w=agn_amp * AGN_BOLOMETRIC_CORRECTION_5100,
+            agn_nev=ctx.fit_config.likelihood.agn_nev,
+            variability_uncertainty=False,
+            attenuation_model_uncertainty=False,
+            transmitted_fraction=jnp.ones_like(scaled_pred),
+            lyman_break_uncertainty=False,
+            filter_wavelength=ctx.filter_effective_wavelength_jax,
+            redshift=ctx.fixed_redshift_jax,
+        )
+
+    def grad_probe(fn, value):
+        x0 = jnp.asarray(value, dtype=jnp.float64)
+        return lambda: jax.value_and_grad(fn)(x0)
+
+    return {
+        "host_diffstar_ssp_mix_grad_log_mass": grad_probe(host_diffstar_ssp_mix_grad, 10.0),
+        "host_sfh_weights_grad_metallicity": grad_probe(host_sfh_weights_grad, -0.3),
+        "agn_disk_plus_torus_grad_log_amp": grad_probe(agn_disk_plus_torus_grad, np.log(1.0e37)),
+        "agn_line_gaussians_grad_log_width": grad_probe(agn_line_gaussians_grad, np.log(3000.0)),
+        "agn_feii_grad_log_fwhm": grad_probe(agn_feii_grad, np.log(3000.0)),
+        "agn_balmer_grad_log_velocity": grad_probe(agn_balmer_grad, np.log(3000.0)),
+        "nebular_lines_grad_log_width": grad_probe(nebular_lines_grad, np.log(300.0)),
+        "nebular_continuum_grad_scale": grad_probe(nebular_continuum_grad, 0.0),
+        "attenuation_plus_dale_dust_grad_ebv": grad_probe(attenuation_plus_dale_dust_grad, 0.1),
+        "fast_filter_projection_grad_scale": grad_probe(fast_filter_projection_grad, 0.0),
+        "legacy_redshift_plus_projection_grad_scale": grad_probe(legacy_redshift_plus_projection_grad, 0.0),
+        "photometric_loglike_grad_scale": grad_probe(photometric_loglike_grad, 0.0),
     }
 
 
@@ -452,6 +672,14 @@ def run_benchmark(
     whole_start = time.perf_counter()
     whole = _bench_jitted("whole_log_density", lambda: log_density(model, (), {}, params)[0], repeats, trials)
     phase_timings["whole_log_density_benchmark_seconds"] = time.perf_counter() - whole_start
+    whole_grad_start = time.perf_counter()
+    whole_grad = _bench_jitted(
+        "whole_value_and_grad",
+        lambda: jax.value_and_grad(lambda p: log_density(model, (), {}, p)[0])(params),
+        repeats,
+        trials,
+    )
+    phase_timings["whole_value_and_grad_benchmark_seconds"] = time.perf_counter() - whole_grad_start
     no_features_start = time.perf_counter()
     whole_no_features = _bench_jitted(
         "whole_log_density_no_sed_agn_features",
@@ -460,13 +688,25 @@ def run_benchmark(
         trials,
     )
     phase_timings["whole_no_features_benchmark_seconds"] = time.perf_counter() - no_features_start
+    no_features_grad_start = time.perf_counter()
+    whole_no_features_grad = _bench_jitted(
+        "whole_value_and_grad_no_sed_agn_features",
+        lambda: jax.value_and_grad(lambda p: log_density(model_no_features, (), {}, p)[0])(params),
+        repeats,
+        trials,
+    )
+    phase_timings["whole_no_features_value_and_grad_benchmark_seconds"] = time.perf_counter() - no_features_grad_start
 
     component_setup_start = time.perf_counter()
     component_functions = _build_component_functions(fitter)
+    component_gradient_functions = _build_component_gradient_functions(fitter)
     phase_timings["component_callable_setup_seconds"] = time.perf_counter() - component_setup_start
     component_bench_start = time.perf_counter()
     components = [_bench_jitted(name, fn, component_repeats, trials) for name, fn in component_functions.items()]
     phase_timings["component_benchmark_seconds"] = time.perf_counter() - component_bench_start
+    component_grad_bench_start = time.perf_counter()
+    component_gradients = [_bench_jitted(name, fn, component_repeats, trials) for name, fn in component_gradient_functions.items()]
+    phase_timings["component_gradient_benchmark_seconds"] = time.perf_counter() - component_grad_bench_start
     phase_timings["total_seconds"] = time.perf_counter() - benchmark_start
 
     return {
@@ -485,8 +725,11 @@ def run_benchmark(
         "setup_seconds": float(phase_timings["setup_seconds"]),
         "map_seconds": float(phase_timings["map_seconds"]),
         "whole_log_density": whole,
+        "whole_value_and_grad": whole_grad,
         "whole_log_density_no_sed_agn_features": whole_no_features,
+        "whole_value_and_grad_no_sed_agn_features": whole_no_features_grad,
         "components": components,
+        "component_gradients": component_gradients,
     }
 
 
@@ -523,6 +766,7 @@ def _component_map(result: dict[str, Any]) -> dict[str, dict[str, Any]]:
 
 def render_markdown(result: dict[str, Any], *, workflow_url: str) -> str:
     whole_ms = _metric_mean(result["whole_log_density"], "ms_per_eval")
+    whole_grad_ms = _metric_mean(result["whole_value_and_grad"], "ms_per_eval")
     lines = [
         "<!-- jaxsedfit benchmark -->",
         "### jaxsedfit PR benchmark",
@@ -540,8 +784,12 @@ def render_markdown(result: dict[str, Any], *, workflow_url: str) -> str:
         f"| MAP time | {result['map_seconds']:.3f} s |",
         f"| whole log-density | {_fmt_ms_row(result['whole_log_density'])} |",
         f"| whole log-density compile | {result['whole_log_density'].get('compile_seconds', 0.0):.3f} s |",
+        f"| whole value+grad | {_fmt_ms_row(result['whole_value_and_grad'])} |",
+        f"| whole value+grad compile | {result['whole_value_and_grad'].get('compile_seconds', 0.0):.3f} s |",
         f"| whole log-density, no SED AGN features | {_fmt_ms_row(result['whole_log_density_no_sed_agn_features'])} |",
         f"| whole log-density, no SED AGN features compile | {result['whole_log_density_no_sed_agn_features'].get('compile_seconds', 0.0):.3f} s |",
+        f"| whole value+grad, no SED AGN features | {_fmt_ms_row(result['whole_value_and_grad_no_sed_agn_features'])} |",
+        f"| whole value+grad, no SED AGN features compile | {result['whole_value_and_grad_no_sed_agn_features'].get('compile_seconds', 0.0):.3f} s |",
         f"| total benchmark runtime | {_phase_timings(result).get('total_seconds', 0.0):.3f} s |",
         "",
         "| phase | seconds | share of total |",
@@ -562,6 +810,14 @@ def render_markdown(result: dict[str, Any], *, workflow_url: str) -> str:
     for row in sorted(result["components"], key=lambda item: _metric_mean(item, "ms_per_eval"), reverse=True):
         row_ms = _metric_mean(row, "ms_per_eval")
         lines.append(f"| `{row['name']}` | {_fmt_ms_row(row)} | {100.0 * row_ms / whole_ms:.1f}% |")
+    lines.extend([
+        "",
+        "| component gradient | ms/eval | share of whole value+grad |",
+        "| --- | ---: | ---: |",
+    ])
+    for row in sorted(result.get("component_gradients", []), key=lambda item: _metric_mean(item, "ms_per_eval"), reverse=True):
+        row_ms = _metric_mean(row, "ms_per_eval")
+        lines.append(f"| `{row['name']}` | {_fmt_ms_row(row)} | {100.0 * row_ms / whole_grad_ms:.1f}% |")
     lines.extend(["", f"Run: {workflow_url}", ""])
     return "\n".join(lines)
 
@@ -571,10 +827,18 @@ def render_comparison_markdown(baseline: dict[str, Any], candidate: dict[str, An
     cand_whole = _metric_mean(candidate["whole_log_density"], "ms_per_eval")
     base_whole_se = _metric_stderr(baseline["whole_log_density"], "ms_per_eval")
     cand_whole_se = _metric_stderr(candidate["whole_log_density"], "ms_per_eval")
+    base_whole_grad = _metric_mean(baseline["whole_value_and_grad"], "ms_per_eval")
+    cand_whole_grad = _metric_mean(candidate["whole_value_and_grad"], "ms_per_eval")
+    base_whole_grad_se = _metric_stderr(baseline["whole_value_and_grad"], "ms_per_eval")
+    cand_whole_grad_se = _metric_stderr(candidate["whole_value_and_grad"], "ms_per_eval")
     base_no_features = _metric_mean(baseline["whole_log_density_no_sed_agn_features"], "ms_per_eval")
     cand_no_features = _metric_mean(candidate["whole_log_density_no_sed_agn_features"], "ms_per_eval")
     base_no_features_se = _metric_stderr(baseline["whole_log_density_no_sed_agn_features"], "ms_per_eval")
     cand_no_features_se = _metric_stderr(candidate["whole_log_density_no_sed_agn_features"], "ms_per_eval")
+    base_no_features_grad = _metric_mean(baseline["whole_value_and_grad_no_sed_agn_features"], "ms_per_eval")
+    cand_no_features_grad = _metric_mean(candidate["whole_value_and_grad_no_sed_agn_features"], "ms_per_eval")
+    base_no_features_grad_se = _metric_stderr(baseline["whole_value_and_grad_no_sed_agn_features"], "ms_per_eval")
+    cand_no_features_grad_se = _metric_stderr(candidate["whole_value_and_grad_no_sed_agn_features"], "ms_per_eval")
     base_phases = _phase_timings(baseline)
     cand_phases = _phase_timings(candidate)
     lines = [
@@ -593,8 +857,12 @@ def render_comparison_markdown(baseline: dict[str, Any], candidate: dict[str, An
         f"| MAP time | {baseline['map_seconds']:.3f} s | {candidate['map_seconds']:.3f} s | {_percent_delta(candidate['map_seconds'], baseline['map_seconds']):+.2f}% |",
         f"| whole log-density | {_fmt_ms_row(baseline['whole_log_density'])} | {_fmt_ms_row(candidate['whole_log_density'])} | {_fmt_percent_delta(cand_whole, base_whole, cand_whole_se, base_whole_se)} |",
         f"| whole log-density compile | {baseline['whole_log_density'].get('compile_seconds', 0.0):.3f} s | {candidate['whole_log_density'].get('compile_seconds', 0.0):.3f} s | {_percent_delta(candidate['whole_log_density'].get('compile_seconds', 0.0), baseline['whole_log_density'].get('compile_seconds', 0.0)):+.2f}% |",
+        f"| whole value+grad | {_fmt_ms_row(baseline['whole_value_and_grad'])} | {_fmt_ms_row(candidate['whole_value_and_grad'])} | {_fmt_percent_delta(cand_whole_grad, base_whole_grad, cand_whole_grad_se, base_whole_grad_se)} |",
+        f"| whole value+grad compile | {baseline['whole_value_and_grad'].get('compile_seconds', 0.0):.3f} s | {candidate['whole_value_and_grad'].get('compile_seconds', 0.0):.3f} s | {_percent_delta(candidate['whole_value_and_grad'].get('compile_seconds', 0.0), baseline['whole_value_and_grad'].get('compile_seconds', 0.0)):+.2f}% |",
         f"| whole log-density, no SED AGN features | {_fmt_ms_row(baseline['whole_log_density_no_sed_agn_features'])} | {_fmt_ms_row(candidate['whole_log_density_no_sed_agn_features'])} | {_fmt_percent_delta(cand_no_features, base_no_features, cand_no_features_se, base_no_features_se)} |",
         f"| whole log-density, no SED AGN features compile | {baseline['whole_log_density_no_sed_agn_features'].get('compile_seconds', 0.0):.3f} s | {candidate['whole_log_density_no_sed_agn_features'].get('compile_seconds', 0.0):.3f} s | {_percent_delta(candidate['whole_log_density_no_sed_agn_features'].get('compile_seconds', 0.0), baseline['whole_log_density_no_sed_agn_features'].get('compile_seconds', 0.0)):+.2f}% |",
+        f"| whole value+grad, no SED AGN features | {_fmt_ms_row(baseline['whole_value_and_grad_no_sed_agn_features'])} | {_fmt_ms_row(candidate['whole_value_and_grad_no_sed_agn_features'])} | {_fmt_percent_delta(cand_no_features_grad, base_no_features_grad, cand_no_features_grad_se, base_no_features_grad_se)} |",
+        f"| whole value+grad, no SED AGN features compile | {baseline['whole_value_and_grad_no_sed_agn_features'].get('compile_seconds', 0.0):.3f} s | {candidate['whole_value_and_grad_no_sed_agn_features'].get('compile_seconds', 0.0):.3f} s | {_percent_delta(candidate['whole_value_and_grad_no_sed_agn_features'].get('compile_seconds', 0.0), baseline['whole_value_and_grad_no_sed_agn_features'].get('compile_seconds', 0.0)):+.2f}% |",
         f"| total benchmark runtime | {base_phases.get('total_seconds', 0.0):.3f} s | {cand_phases.get('total_seconds', 0.0):.3f} s | {_percent_delta(cand_phases.get('total_seconds', 0.0), base_phases.get('total_seconds', 0.0)):+.2f}% |",
         "",
         "| phase | base | PR | delta |",
@@ -617,6 +885,19 @@ def render_comparison_markdown(baseline: dict[str, Any], candidate: dict[str, An
         base_se = _metric_stderr(base_components[name], "ms_per_eval")
         cand_se = _metric_stderr(cand_components[name], "ms_per_eval")
         lines.append(f"| `{name}` | {_fmt_ms_row(base_components[name])} | {_fmt_ms_row(cand_components[name])} | {_fmt_percent_delta(cand_ms, base_ms, cand_se, base_se)} |")
+    lines.extend([
+        "",
+        "| component gradient | base | PR | delta |",
+        "| --- | ---: | ---: | ---: |",
+    ])
+    base_component_gradients = {row["name"]: row for row in baseline.get("component_gradients", [])}
+    cand_component_gradients = {row["name"]: row for row in candidate.get("component_gradients", [])}
+    for name in sorted(set(base_component_gradients).intersection(cand_component_gradients), key=lambda key: _metric_mean(cand_component_gradients[key], "ms_per_eval"), reverse=True):
+        base_ms = _metric_mean(base_component_gradients[name], "ms_per_eval")
+        cand_ms = _metric_mean(cand_component_gradients[name], "ms_per_eval")
+        base_se = _metric_stderr(base_component_gradients[name], "ms_per_eval")
+        cand_se = _metric_stderr(cand_component_gradients[name], "ms_per_eval")
+        lines.append(f"| `{name}` | {_fmt_ms_row(base_component_gradients[name])} | {_fmt_ms_row(cand_component_gradients[name])} | {_fmt_percent_delta(cand_ms, base_ms, cand_se, base_se)} |")
     lines.extend(["", f"Run: {workflow_url}", ""])
     return "\n".join(lines)
 

@@ -395,7 +395,6 @@ def _reduced_chi2_for_fit(fitter: Any) -> float:
     pred = fitter.predict()
     pred_fluxes = np.median(np.asarray(pred["pred_fluxes"], dtype=float), axis=0)
     agn_fluxes = np.median(np.asarray(pred["agn_fluxes"], dtype=float), axis=0) if "agn_fluxes" in pred else np.zeros_like(pred_fluxes)
-    intrinsic_scatter = float(np.median(np.asarray(pred["intrinsic_scatter_fit"], dtype=float))) if "intrinsic_scatter_fit" in pred else 0.0
     agn_variability_nev = float(np.median(np.asarray(pred["agn_variability_nev"], dtype=float))) if "agn_variability_nev" in pred else 0.0
     transmitted_fraction = (
         np.median(np.asarray(pred["transmitted_fraction_fluxes"], dtype=float), axis=0)
@@ -422,8 +421,13 @@ def _reduced_chi2_for_fit(fitter: Any) -> float:
             lyman_break_uncertainty = False
 
         cfg = _FallbackLikelihood()
-    obs_variance = obs_errors**2 + np.maximum(intrinsic_scatter, 0.0) ** 2
-    sys_variance = (float(cfg.systematics_width) * pred_fluxes) ** 2
+    obs_variance = obs_errors**2
+    systematics_width = (
+        float(np.median(np.asarray(pred["systematics_width"], dtype=float)))
+        if "systematics_width" in pred
+        else float(cfg.systematics_width)
+    )
+    sys_variance = (systematics_width * pred_fluxes) ** 2
     var_variance = np.where(bool(cfg.variability_uncertainty), agn_variability_nev * agn_fluxes**2, 0.0)
     if cfg.attenuation_model_uncertainty:
         tf = np.clip(transmitted_fraction, 1e-4, 1.0)

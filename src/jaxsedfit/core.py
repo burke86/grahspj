@@ -222,8 +222,10 @@ class JAXSEDFit:
                 "spectroscopy_loglike",
                 "jqf_continuum_model",
                 "jqf_line_model",
+                "jqf_line_model_aperture",
                 "jqf_line_model_broad",
                 "jqf_line_model_narrow",
+                "jqf_line_model_narrow_aperture",
                 "jqf_line_amp_per_component",
                 "jqf_line_mu_per_component",
                 "jqf_line_sig_per_component",
@@ -304,12 +306,16 @@ class JAXSEDFit:
                 "nebular_corr_fit",
                 "nebular_n_ly_young_fit",
                 "nebular_n_ly_old_fit",
-                "intrinsic_scatter_fit",
                 "fracAGN_5100_fit",
                 "log_agn_bol_luminosity_fit",
                 "log_disk_luminosity_fit",
                 "agn_variability_nev",
                 "host_total_fluxes",
+                "host_capture_source_fluxes",
+                "agn_narrow_line_fluxes_total",
+                "captured_agn_narrow_line_fluxes",
+                "extended_capture_source_fluxes",
+                "captured_extended_source_fluxes",
                 "host_capture_fraction_fluxes",
                 "log_host_capture_scale_arcsec_fit",
                 "host_capture_slope_fit",
@@ -710,8 +716,6 @@ class JAXSEDFit:
                 out["log_agn_bol_luminosity_fit"] = float(np.median(np.asarray(state.predictive["log_agn_bol_luminosity_fit"], dtype=float)))
             if "log_disk_luminosity_fit" in state.predictive:
                 out["log_disk_luminosity_fit"] = float(np.median(np.asarray(state.predictive["log_disk_luminosity_fit"], dtype=float)))
-            if "intrinsic_scatter_fit" in state.predictive:
-                out["intrinsic_scatter_fit"] = float(np.median(np.asarray(state.predictive["intrinsic_scatter_fit"], dtype=float)))
             if "absolute_flux_scale_logprior" in state.predictive:
                 out["absolute_flux_scale_logprior"] = float(np.median(np.asarray(state.predictive["absolute_flux_scale_logprior"], dtype=float)))
         state.summary = out
@@ -1183,7 +1187,8 @@ class JAXSEDFit:
         plotter.f_fe_mgii_model = component("jqf_feii_model")
         plotter.f_fe_balmer_model = np.zeros_like(wave_rest)
         plotter.f_bc_model = component("jqf_balmer_model")
-        plotter.f_line_model = component("jqf_line_model")
+        jqf_line_site = "jqf_line_model_aperture" if "jqf_line_model_aperture" in pred else "jqf_line_model"
+        plotter.f_line_model = component(jqf_line_site)
         spec_torus_component = component("spec_torus_model_fluxes")
         custom_components = {
             "jaxsedfit_torus": spec_torus_component if keep_component(spec_torus_component) else obs_sed_component("torus_obs_sed"),
@@ -1225,7 +1230,7 @@ class JAXSEDFit:
         for key, site in (
             ("FeII", "jqf_feii_model"),
             ("Balmer_cont", "jqf_balmer_model"),
-            ("lines", "jqf_line_model"),
+            ("lines", jqf_line_site),
         ):
             band = band_from_draws(spectrum_draws(site))
             if band is not None:
