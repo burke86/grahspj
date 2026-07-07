@@ -20,6 +20,7 @@ from jaxsedfit.config import (
     SpectroscopyConfig,
     SpectroscopyData,
 )
+from jaxsedfit.core import JAXSEDFit
 from jaxsedfit.model import GRAHSP_PL_BEND_LOC_A, GRAHSP_PL_BEND_WIDTH, GRAHSP_PL_CUTOFF_A, _project_filters, _redshift_to_obs, evaluate_photometric_state, grahsp_photometric_model
 from jaxsedfit.preload import build_model_context
 
@@ -728,6 +729,84 @@ def test_fast_fixed_filter_projection_matches_legacy_photometry(monkeypatch):
     slow_tr = _deterministic_likelihood_trace(slow_context, _fixed_component_data())
 
     np.testing.assert_allclose(_site(fast_tr, "pred_fluxes"), _site(slow_tr, "pred_fluxes"), rtol=2.0e-12, atol=1.0e-30)
+
+
+def test_component_prediction_uses_fast_fixed_filter_projection(monkeypatch):
+    _patch_ssp(monkeypatch)
+    cfg = _cfg(n_wave=256)
+    cfg.likelihood.use_fast_photometry_projection = True
+    cfg.likelihood.use_local_line_photometry = False
+    context = build_model_context(cfg)
+    data = _fixed_component_data()
+
+    def _raise_project_filters(*args, **kwargs):
+        raise AssertionError("Component photometry should use fixed projection matrices.")
+
+    monkeypatch.setattr("jaxsedfit.model._project_filters", _raise_project_filters)
+    tr = _deterministic_trace(context, data)
+
+    assert np.all(np.isfinite(_site(tr, "pred_fluxes")))
+    assert np.all(np.isfinite(_site(tr, "agn_fluxes")))
+    assert np.all(np.isfinite(_site(tr, "host_fluxes")))
+
+
+def test_fixed_local_nebular_line_cache_matches_exact_projection(monkeypatch):
+    _patch_ssp(monkeypatch)
+
+    def _nebular_cfg(*, use_cache):
+        cfg = _cfg(fit_agn=False, n_wave=128, rest_wave_max=10000.0)
+        cfg.photometry = PhotometryData(filter_names=["ha"], fluxes=[1.0], errors=[0.1])
+        cfg.filters = FilterSet(
+            curves=[
+                FilterCurve(
+                    name="ha",
+                    wave=[620.0, 690.0, 760.0],
+                    transmission=[0.0, 1.0, 0.0],
+                )
+            ],
+        )
+        cfg.likelihood.use_fast_photometry_projection = True
+        cfg.likelihood.use_local_line_photometry = True
+        cfg.likelihood.use_fixed_local_line_cache = use_cache
+        cfg.likelihood.variability_uncertainty = False
+        cfg.nebular = NebularConfig(enabled=True, f_esc=0.0, f_dust=0.0, zgas=0.02, logU=-2.0, ne=100.0, lines_width=300.0)
+        return cfg
+
+    data = _fixed_component_data()
+    cached_context = build_model_context(_nebular_cfg(use_cache=True))
+    exact_context = build_model_context(_nebular_cfg(use_cache=False))
+    assert cached_context.fixed_local_nebular_line_projection_cache_jax is not None
+    assert exact_context.fixed_local_nebular_line_projection_cache_jax is None
+
+    cached = _site(_deterministic_likelihood_trace(cached_context, data), "pred_fluxes")
+    exact = _site(_deterministic_likelihood_trace(exact_context, data), "pred_fluxes")
+
+    np.testing.assert_allclose(cached, exact, rtol=5.0e-4, atol=1.0e-30)
+
+
+def test_predict_supports_lightweight_and_median_modes(monkeypatch):
+    _patch_ssp(monkeypatch)
+    cfg = _cfg(n_wave=64)
+    cfg.likelihood.use_fast_photometry_projection = True
+    cfg.likelihood.use_local_line_photometry = False
+    fitter = JAXSEDFit(cfg)
+    init_trace = trace(seed(lambda: grahsp_photometric_model(fitter.context, include_components=False), 0)).get_trace()
+    fitter.samples = {
+        name: np.repeat(np.asarray(site["value"])[None, ...], 3, axis=0)
+        for name, site in init_trace.items()
+        if site.get("type") == "sample" and not site.get("is_observed", False)
+    }
+
+    phot = fitter.predict(kind="photometry", max_draws=2)
+    full = fitter.predict(kind="plot", max_draws=1)
+    median = fitter.predict_median(kind="photometry")
+
+    assert "pred_fluxes" in phot
+    assert "total_obs_sed" not in phot
+    assert phot["pred_fluxes"].shape[0] == 2
+    assert "total_obs_sed" in full
+    assert full["pred_fluxes"].shape[0] == 1
+    assert median["pred_fluxes"].shape[0] == 1
 
 
 def test_local_line_photometry_improves_coarse_grid_line_projection(monkeypatch):

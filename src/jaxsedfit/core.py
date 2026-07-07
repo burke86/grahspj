@@ -92,7 +92,9 @@ class JAXSEDFit:
 
     @predictive.setter
     def predictive(self, value: dict[str, Any] | None) -> None:
-        self._ensure_fit_state().predictive = value
+        state = self._ensure_fit_state()
+        state.predictive = value
+        state.predictive_cache = None if value is None else {"plot:all": value}
 
     @property
     def _plot_cache(self) -> dict[str, Any] | None:
@@ -159,6 +161,156 @@ class JAXSEDFit:
         """Return the bound NumPyro model used for posterior predictive products."""
         return grahsp_photometric_model(self.context, include_components=True)
 
+    @staticmethod
+    def _prediction_kind(kind: str) -> str:
+        """Normalize the prediction product set name."""
+        normalized = str(kind).lower()
+        aliases = {"full": "plot", "all": "plot", "sed": "plot", "photo": "photometry"}
+        normalized = aliases.get(normalized, normalized)
+        if normalized not in {"plot", "photometry"}:
+            raise ValueError("predict(kind=...) must be either 'plot' or 'photometry'.")
+        return normalized
+
+    @staticmethod
+    def _subset_prediction_samples(samples: Mapping[str, Any], max_draws: int | None) -> dict[str, Any]:
+        """Return posterior samples optionally limited along the leading draw axis."""
+        out: dict[str, Any] = {}
+        n = None if max_draws is None else max(int(max_draws), 1)
+        for key, value in samples.items():
+            arr = np.asarray(value)
+            out[key] = arr if n is None or arr.ndim == 0 else arr[:n]
+        return out
+
+    @staticmethod
+    def _median_prediction_samples(samples: Mapping[str, Any]) -> dict[str, Any]:
+        """Return one posterior draw built from per-site medians."""
+        return {key: np.expand_dims(np.asarray(value), axis=0) for key, value in median_mapping(samples).items()}
+
+    @staticmethod
+    def _predictive_return_sites(kind: str) -> list[str]:
+        """Return deterministic sites needed for a prediction product set."""
+        photometry_sites = [
+            "pred_fluxes",
+            "pred_spectrum_fluxes",
+            "spec_continuum_model_fluxes",
+            "spec_host_model_fluxes",
+            "spec_disk_model_fluxes",
+            "spec_torus_model_fluxes",
+            "spec_wave_obs",
+            "spec_spectrum_index",
+            "spectrum_scale_fit",
+            "log_spectrum_scale_fit",
+            "spectrum_host_capture_fraction",
+            "spectroscopy_loglike",
+            "spectroscopy_likelihood_weight",
+            "jqf_continuum_model",
+            "jqf_line_model",
+            "jqf_line_model_aperture",
+            "jqf_line_model_broad",
+            "jqf_line_model_narrow",
+            "jqf_line_model_narrow_aperture",
+            "jqf_line_amp_per_component",
+            "jqf_line_mu_per_component",
+            "jqf_line_sig_per_component",
+            "jqf_line_narrow_fwhm_kms",
+            "jqf_line_narrow_amp_scale",
+            "jqf_feii_model",
+            "jqf_balmer_model",
+            "jqf_total_model",
+            "rest_wave",
+            "obs_wave",
+            "redshift_fit",
+            "nebular_line_scale_fit",
+            "log_dust_luminosity_fit",
+            "dust_alpha_fit",
+            "nebular_logU_fit",
+            "nebular_zgas_fit",
+            "nebular_ne_fit",
+            "nebular_f_esc_fit",
+            "nebular_f_dust_fit",
+            "nebular_f_dust_fraction_fit",
+            "nebular_lines_width_fit",
+            "nebular_corr_fit",
+            "nebular_n_ly_young_fit",
+            "nebular_n_ly_old_fit",
+            "fracAGN_5100_fit",
+            "log_agn_bol_luminosity_fit",
+            "log_disk_luminosity_fit",
+            "agn_variability_nev",
+            "host_total_fluxes",
+            "host_capture_source_fluxes",
+            "agn_narrow_line_fluxes_total",
+            "captured_agn_narrow_line_fluxes",
+            "extended_capture_source_fluxes",
+            "captured_extended_source_fluxes",
+            "host_capture_fraction_fluxes",
+            "log_host_capture_scale_arcsec_fit",
+            "host_capture_slope_fit",
+            "transmitted_fraction_fluxes",
+            "absolute_flux_scale_logprior",
+        ]
+        if kind == "photometry":
+            return photometry_sites
+        return photometry_sites + [
+            "agn_fluxes",
+            "host_fluxes",
+            "dust_fluxes",
+            "nebular_fluxes",
+            "nebular_lines_fluxes",
+            "nebular_continuum_fluxes",
+            "disk_fluxes",
+            "torus_fluxes",
+            "feii_fluxes",
+            "line_fluxes",
+            "line_bl_fluxes",
+            "line_nl_fluxes",
+            "line_liner_fluxes",
+            "balmer_fluxes",
+            "host_age_weights",
+            "host_lgmet_weights",
+            "host_ssp_weights",
+            "gal_sfr_table",
+            "gal_smh_table",
+            "total_rest_sed",
+            "agn_rest_sed",
+            "host_rest_sed",
+            "host_total_rest_sed",
+            "host_absorbed_rest_sed",
+            "dust_rest_sed",
+            "nebular_rest_sed",
+            "nebular_lines_rest_sed",
+            "nebular_continuum_rest_sed",
+            "nebular_absorption_rest_sed",
+            "disk_rest_sed",
+            "torus_rest_sed",
+            "feii_rest_sed",
+            "line_rest_sed",
+            "line_bl_rest_sed",
+            "line_nl_rest_sed",
+            "line_liner_rest_sed",
+            "balmer_rest_sed",
+            "total_obs_sed",
+            "total_local_lines_obs_wave",
+            "total_local_lines_obs_sed",
+            "agn_obs_sed",
+            "host_obs_sed",
+            "host_total_obs_sed",
+            "dust_obs_sed",
+            "nebular_obs_sed",
+            "nebular_lines_obs_sed",
+            "nebular_lines_local_obs_wave",
+            "nebular_lines_local_obs_sed",
+            "nebular_continuum_obs_sed",
+            "disk_obs_sed",
+            "torus_obs_sed",
+            "feii_obs_sed",
+            "line_obs_sed",
+            "line_bl_obs_sed",
+            "line_nl_obs_sed",
+            "line_liner_obs_sed",
+            "balmer_obs_sed",
+        ]
+
     def _make_result(
         self,
         *,
@@ -198,133 +350,40 @@ class JAXSEDFit:
             _state=state,
         )
 
-    def _compute_predictive(self, *, _state: _FitState | None = None) -> dict[str, Any]:
+    def _compute_predictive(
+        self,
+        *,
+        _state: _FitState | None = None,
+        kind: str = "plot",
+        max_draws: int | None = None,
+        posterior_samples: Mapping[str, Any] | None = None,
+        cache: bool = True,
+    ) -> dict[str, Any]:
         """Generate and cache predictive outputs from posterior samples."""
         state = self._ensure_fit_state() if _state is None else _state
-        if state.samples is None:
+        kind = self._prediction_kind(kind)
+        samples = state.samples if posterior_samples is None else posterior_samples
+        if samples is None:
             raise RuntimeError("No fitted posterior available. Run fit_map(), fit_nuts(), or fit_ns() first.")
+        cache_key = f"{kind}:{'all' if max_draws is None else int(max_draws)}"
+        if cache and posterior_samples is None and state.predictive_cache is not None and cache_key in state.predictive_cache:
+            return dict(state.predictive_cache[cache_key])
+        include_components = kind == "plot"
+        draw_samples = self._subset_prediction_samples(samples, max_draws)
         rng_key = jax.random.PRNGKey(self.config.inference.seed + 17)
         pred = Predictive(
-            self._predictive_model,
-            posterior_samples=state.samples,
-            return_sites=[
-                "pred_fluxes",
-                "pred_spectrum_fluxes",
-                "spec_continuum_model_fluxes",
-                "spec_host_model_fluxes",
-                "spec_disk_model_fluxes",
-                "spec_torus_model_fluxes",
-                "spec_wave_obs",
-                "spec_spectrum_index",
-                "spectrum_scale_fit",
-                "log_spectrum_scale_fit",
-                "spectrum_host_capture_fraction",
-                "spectroscopy_loglike",
-                "jqf_continuum_model",
-                "jqf_line_model",
-                "jqf_line_model_aperture",
-                "jqf_line_model_broad",
-                "jqf_line_model_narrow",
-                "jqf_line_model_narrow_aperture",
-                "jqf_line_amp_per_component",
-                "jqf_line_mu_per_component",
-                "jqf_line_sig_per_component",
-                "jqf_line_narrow_fwhm_kms",
-                "jqf_line_narrow_amp_scale",
-                "jqf_feii_model",
-                "jqf_balmer_model",
-                "jqf_total_model",
-                "agn_fluxes",
-                "host_fluxes",
-                "dust_fluxes",
-                "nebular_fluxes",
-                "nebular_lines_fluxes",
-                "nebular_continuum_fluxes",
-                "disk_fluxes",
-                "torus_fluxes",
-                "feii_fluxes",
-                "line_fluxes",
-                "line_bl_fluxes",
-                "line_nl_fluxes",
-                "line_liner_fluxes",
-                "balmer_fluxes",
-                "host_age_weights",
-                "host_lgmet_weights",
-                "host_ssp_weights",
-                "gal_sfr_table",
-                "gal_smh_table",
-                "rest_wave",
-                "obs_wave",
-                "redshift_fit",
-                "nebular_line_scale_fit",
-                "total_rest_sed",
-                "agn_rest_sed",
-                "host_rest_sed",
-                "host_total_rest_sed",
-                "host_absorbed_rest_sed",
-                "dust_rest_sed",
-                "nebular_rest_sed",
-                "nebular_lines_rest_sed",
-                "nebular_continuum_rest_sed",
-                "nebular_absorption_rest_sed",
-                "disk_rest_sed",
-                "torus_rest_sed",
-                "feii_rest_sed",
-                "line_rest_sed",
-                "line_bl_rest_sed",
-                "line_nl_rest_sed",
-                "line_liner_rest_sed",
-                "balmer_rest_sed",
-                "total_obs_sed",
-                "total_local_lines_obs_wave",
-                "total_local_lines_obs_sed",
-                "agn_obs_sed",
-                "host_obs_sed",
-                "host_total_obs_sed",
-                "dust_obs_sed",
-                "nebular_obs_sed",
-                "nebular_lines_obs_sed",
-                "nebular_lines_local_obs_wave",
-                "nebular_lines_local_obs_sed",
-                "nebular_continuum_obs_sed",
-                "disk_obs_sed",
-                "torus_obs_sed",
-                "feii_obs_sed",
-                "line_obs_sed",
-                "line_bl_obs_sed",
-                "line_nl_obs_sed",
-                "line_liner_obs_sed",
-                "balmer_obs_sed",
-                "log_dust_luminosity_fit",
-                "dust_alpha_fit",
-                "nebular_logU_fit",
-                "nebular_zgas_fit",
-                "nebular_ne_fit",
-                "nebular_f_esc_fit",
-                "nebular_f_dust_fit",
-                "nebular_lines_width_fit",
-                "nebular_corr_fit",
-                "nebular_n_ly_young_fit",
-                "nebular_n_ly_old_fit",
-                "fracAGN_5100_fit",
-                "log_agn_bol_luminosity_fit",
-                "log_disk_luminosity_fit",
-                "agn_variability_nev",
-                "host_total_fluxes",
-                "host_capture_source_fluxes",
-                "agn_narrow_line_fluxes_total",
-                "captured_agn_narrow_line_fluxes",
-                "extended_capture_source_fluxes",
-                "captured_extended_source_fluxes",
-                "host_capture_fraction_fluxes",
-                "log_host_capture_scale_arcsec_fit",
-                "host_capture_slope_fit",
-                "transmitted_fraction_fluxes",
-                "absolute_flux_scale_logprior",
-            ],
+            lambda: grahsp_photometric_model(self.context, include_components=include_components),
+            posterior_samples=draw_samples,
+            return_sites=self._predictive_return_sites(kind),
         )(rng_key)
-        state.predictive = {k: np.asarray(v) for k, v in pred.items()}
-        return state.predictive
+        predictive = {k: np.asarray(v) for k, v in pred.items()}
+        if cache and posterior_samples is None:
+            if state.predictive_cache is None:
+                state.predictive_cache = {}
+            state.predictive_cache[cache_key] = predictive
+            if kind == "plot" and max_draws is None:
+                state.predictive = predictive
+        return predictive
 
     def fit(
         self,
@@ -663,14 +722,45 @@ class JAXSEDFit:
         self.predictive = None
         return self._make_result(method="ns")
 
-    def predict(self, posterior: str = "latest", *, _state: _FitState | None = None) -> dict[str, Any]:
-        """Return cached predictive outputs or generate them on demand."""
+    def predict(
+        self,
+        posterior: str = "latest",
+        *,
+        kind: str = "plot",
+        max_draws: int | None = None,
+        _state: _FitState | None = None,
+    ) -> dict[str, Any]:
+        """Return cached predictive outputs or generate them on demand.
+
+        ``kind="photometry"`` returns lightweight photometry/spectrum products.
+        ``kind="plot"`` returns the full component SED products used by plotting.
+        """
         state = self._ensure_fit_state() if _state is None else _state
-        if state.predictive is None:
-            if state is self._ensure_fit_state():
-                return self._compute_predictive()
-            return self._compute_predictive(_state=state)
-        return state.predictive
+        kind = self._prediction_kind(kind)
+        if kind == "plot" and max_draws is None and state.predictive is not None:
+            return dict(state.predictive)
+        if kind == "plot" and max_draws is None and state is self._ensure_fit_state():
+            return self._compute_predictive()
+        return self._compute_predictive(_state=state, kind=kind, max_draws=max_draws)
+
+    def predict_median(
+        self,
+        posterior: str = "latest",
+        *,
+        kind: str = "plot",
+        _state: _FitState | None = None,
+    ) -> dict[str, Any]:
+        """Evaluate predictive products once at the posterior median parameters."""
+        state = self._ensure_fit_state() if _state is None else _state
+        if state.samples is None:
+            raise RuntimeError("No fitted posterior available. Run fit_map(), fit_nuts(), or fit_ns() first.")
+        median_samples = self._median_prediction_samples(state.samples)
+        return self._compute_predictive(
+            _state=state,
+            kind=kind,
+            posterior_samples=median_samples,
+            cache=False,
+        )
 
     def recovered_log_stellar_mass(self, *, _state: _FitState | None = None) -> float:
         """Return the median recovered stellar mass from the fitted posterior."""

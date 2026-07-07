@@ -33,7 +33,12 @@ class Observation:
 
 @dataclass
 class PhotometryData:
-    """Observed photometric measurements and associated metadata."""
+    """Observed photometric measurements and associated metadata.
+
+    ``photometry_method`` is provenance metadata only. Aperture/PSF corrections
+    are controlled by the explicit aperture/PSF fields and likelihood settings,
+    not by these labels.
+    """
     filter_names: Sequence[str]
     fluxes: Sequence[float]
     errors: Sequence[float]
@@ -55,6 +60,29 @@ class PhotometryData:
             raise ValueError("aperture_diameter_arcsec must match filter_names length.")
         if self.photometry_method is not None and len(self.photometry_method) != n:
             raise ValueError("photometry_method must match filter_names length.")
+        if self.photometry_method is not None:
+            allowed_methods = {
+                "aperture",
+                "auto",
+                "catalog",
+                "cmodel",
+                "fiber",
+                "model",
+                "petrosian",
+                "psf",
+                "unknown",
+            }
+            normalized_methods: list[str | None] = []
+            for method in self.photometry_method:
+                if method is None:
+                    normalized_methods.append(None)
+                    continue
+                normalized = str(method).strip().lower()
+                if normalized not in allowed_methods:
+                    allowed = ", ".join(sorted(allowed_methods))
+                    raise ValueError(f"Unknown photometry_method '{method}'. Allowed metadata labels: {allowed}.")
+                normalized_methods.append(normalized)
+            self.photometry_method = normalized_methods
 
 
 @dataclass
@@ -595,7 +623,12 @@ class AGNPriorConfig:
 
 @dataclass
 class NebularPriorConfig:
-    """Nebular-emission prior options."""
+    """Nebular-emission prior options.
+
+    ``f_dust`` controls the smooth fraction of non-escaping ionizing photons
+    absorbed by dust, so the physical dust fraction is
+    ``(1 - f_esc) * f_dust`` and always satisfies ``f_esc + f_dust_physical <= 1``.
+    """
     logU: Any | None = None
     zgas: Any | None = None
     ne: Any | None = None
@@ -613,7 +646,7 @@ class NebularPriorConfig:
                 "zgas": "nebular_zgas",
                 "ne": "nebular_ne",
                 "f_esc": "nebular_f_esc",
-                "f_dust": "nebular_f_dust",
+                "f_dust": "nebular_f_dust_fraction",
                 "lines_width": "nebular_lines_width",
                 "log_line_scale": "log_nebular_line_scale",
             },
