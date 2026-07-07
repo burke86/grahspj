@@ -18,6 +18,7 @@ from typing import Any, Callable
 import jax
 import jax.numpy as jnp
 import numpy as np
+import numpyro.distributions as dist
 from numpyro.infer.util import log_density
 
 from diffmah.diffmah_kernels import DEFAULT_MAH_PARAMS
@@ -135,9 +136,9 @@ def _benchmark_prior_config():
     if "host" not in inspect.signature(PriorConfig).parameters:
         return flat_prior
     return PriorConfig(
-        stellar_mass=flat_prior["log_stellar_mass"],
-        host={"ebv_gal": flat_prior["ebv_gal"]},
-        agn={"ebv_agn": flat_prior["ebv_agn"]},
+        stellar_mass=dist.Normal(10.5, 1.0),
+        host={"ebv_gal": dist.HalfNormal(0.15)},
+        agn={"ebv_agn": dist.HalfNormal(0.15)},
     )
 
 
@@ -368,24 +369,23 @@ def _build_component_functions(fitter: JAXSEDFit) -> dict[str, Callable[[], Any]
 
     def photometric_loglike_only():
         return photometric_loglike(
-            pred_fluxes,
-            jnp.asarray(ctx.fluxes, dtype=jnp.float64),
-            jnp.asarray(ctx.errors, dtype=jnp.float64),
-            jnp.asarray(ctx.upper_limits, dtype=bool),
-            jnp.asarray(ctx.data_mask, dtype=bool),
-            ctx.fit_config.likelihood.systematics_width,
-            1.0e-4,
-            ctx.fit_config.likelihood.likelihood_family,
-            ctx.fit_config.likelihood.student_t_df,
-            jnp.zeros_like(pred_fluxes),
-            agn_amp * AGN_BOLOMETRIC_CORRECTION_5100,
-            ctx.fit_config.likelihood.agn_nev,
-            False,
-            False,
-            jnp.ones_like(pred_fluxes),
-            False,
-            ctx.filter_effective_wavelength_jax,
-            ctx.fixed_redshift_jax,
+            pred_fluxes=pred_fluxes,
+            obs_fluxes=jnp.asarray(ctx.fluxes, dtype=jnp.float64),
+            obs_errors=jnp.asarray(ctx.errors, dtype=jnp.float64),
+            upper_limits=jnp.asarray(ctx.upper_limits, dtype=bool),
+            data_mask=jnp.asarray(ctx.data_mask, dtype=bool),
+            systematics_width=ctx.fit_config.likelihood.systematics_width,
+            likelihood_family=ctx.fit_config.likelihood.likelihood_family,
+            student_t_df=ctx.fit_config.likelihood.student_t_df,
+            agn_component=jnp.zeros_like(pred_fluxes),
+            agn_bol_lum_w=agn_amp * AGN_BOLOMETRIC_CORRECTION_5100,
+            agn_nev=ctx.fit_config.likelihood.agn_nev,
+            variability_uncertainty=False,
+            attenuation_model_uncertainty=False,
+            transmitted_fraction=jnp.ones_like(pred_fluxes),
+            lyman_break_uncertainty=False,
+            filter_wavelength=ctx.filter_effective_wavelength_jax,
+            redshift=ctx.fixed_redshift_jax,
         )
 
     return {
