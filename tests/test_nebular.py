@@ -1,4 +1,6 @@
 import numpy as np
+import jax
+import jax.numpy as jnp
 import numpyro.distributions as dist
 from numpyro.handlers import seed, substitute, trace
 from pathlib import Path
@@ -16,7 +18,7 @@ from jaxsedfit.config import (
     Observation,
     PhotometryData,
 )
-from jaxsedfit.model import _cigale_nebular_correction, grahsp_photometric_model
+from jaxsedfit.model import _cigale_nebular_correction, _trilinear_nebular_grid, grahsp_photometric_model
 from jaxsedfit.preload import _load_nebular_templates_jax, build_model_context
 
 
@@ -123,6 +125,35 @@ def test_nebular_template_loader_uses_v2025_1_grid():
     assert np.isclose(np.asarray(templates.ne_grid), 100.0).any()
     assert templates.line_lumin_per_photon.shape == (26, 31, 3, 129)
     assert templates.continuum_lumin_per_a_per_photon.shape == (26, 31, 3, 1600)
+
+
+def test_nebular_trilinear_interpolation_preserves_grid_points():
+    z_grid = jnp.asarray([0.004, 0.02, 0.05])
+    logu_grid = jnp.asarray([-3.0, -2.0, -1.0])
+    ne_grid = jnp.asarray([10.0, 100.0, 1000.0])
+    values = jnp.arange(3 * 3 * 3 * 2, dtype=jnp.float64).reshape(3, 3, 3, 2)
+
+    out = _trilinear_nebular_grid(values, z_grid, logu_grid, ne_grid, 0.02, -2.0, 100.0)
+
+    np.testing.assert_allclose(np.asarray(out), np.asarray(values[1, 1, 1]), rtol=0.0, atol=0.0)
+
+
+def test_nebular_trilinear_interpolation_has_parameter_gradients():
+    z_grid = jnp.asarray([0.004, 0.02, 0.05])
+    logu_grid = jnp.asarray([-3.0, -2.0, -1.0])
+    ne_grid = jnp.asarray([10.0, 100.0, 1000.0])
+    logz = jnp.log10(z_grid)[:, None, None]
+    logu = logu_grid[None, :, None]
+    logne = jnp.log10(ne_grid)[None, None, :]
+    values = logz + 2.0 * logu + 3.0 * logne
+
+    def interp_sum(zgas, nebular_logu, ne):
+        return jnp.sum(_trilinear_nebular_grid(values, z_grid, logu_grid, ne_grid, zgas, nebular_logu, ne))
+
+    grads = jax.grad(interp_sum, argnums=(0, 1, 2))(0.01, -2.5, 30.0)
+
+    assert all(np.isfinite(float(g)) for g in grads)
+    assert all(abs(float(g)) > 0.0 for g in grads)
 
 
 def test_host_basis_lyman_rates_are_finite(monkeypatch):

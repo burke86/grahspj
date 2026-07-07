@@ -487,9 +487,42 @@ def _flux_conserving_line_gaussians(wave, line_wave, line_lumin, width_kms):
     return jnp.sum(line_lumin[None, :] * profile, axis=1)
 
 
-def _nearest_index(grid, value):
-    """Return the index of the nearest tabulated grid value."""
-    return jnp.argmin(jnp.abs(grid - jnp.asarray(value, dtype=jnp.float64)))
+def _interp_grid_axis(grid, value, *, log_scale: bool = False):
+    """Return bracketing indices and interpolation weight for one template axis."""
+    grid = jnp.asarray(grid, dtype=jnp.float64)
+    x_grid = jnp.log10(jnp.maximum(grid, 1.0e-300)) if log_scale else grid
+    x = jnp.log10(jnp.maximum(value, 1.0e-300)) if log_scale else jnp.asarray(value, dtype=jnp.float64)
+    x = jnp.clip(x, x_grid[0], x_grid[-1])
+    upper = jnp.clip(jnp.searchsorted(x_grid, x, side="right"), 1, grid.shape[0] - 1)
+    lower = upper - 1
+    x0 = x_grid[lower]
+    x1 = x_grid[upper]
+    weight = jnp.clip((x - x0) / jnp.maximum(x1 - x0, 1.0e-300), 0.0, 1.0)
+    return lower, upper, weight
+
+
+def _trilinear_nebular_grid(values, z_grid, logu_grid, ne_grid, zgas, logu, ne):
+    """Interpolate a nebular template grid in log Z, log U, and log density."""
+    z0, z1, wz = _interp_grid_axis(z_grid, zgas, log_scale=True)
+    u0, u1, wu = _interp_grid_axis(logu_grid, logu, log_scale=False)
+    n0, n1, wn = _interp_grid_axis(ne_grid, ne, log_scale=True)
+
+    c000 = values[z0, u0, n0]
+    c001 = values[z0, u0, n1]
+    c010 = values[z0, u1, n0]
+    c011 = values[z0, u1, n1]
+    c100 = values[z1, u0, n0]
+    c101 = values[z1, u0, n1]
+    c110 = values[z1, u1, n0]
+    c111 = values[z1, u1, n1]
+
+    c00 = c000 * (1.0 - wn) + c001 * wn
+    c01 = c010 * (1.0 - wn) + c011 * wn
+    c10 = c100 * (1.0 - wn) + c101 * wn
+    c11 = c110 * (1.0 - wn) + c111 * wn
+    c0 = c00 * (1.0 - wu) + c01 * wu
+    c1 = c10 * (1.0 - wu) + c11 * wu
+    return c0 * (1.0 - wz) + c1 * wz
 
 
 def _cigale_nebular_correction(f_esc, f_dust):
@@ -1124,18 +1157,42 @@ def _build_nebular_components(context: ModelContext, host_state: dict[str, Any],
     n_ly_total = jnp.clip(n_ly_young + n_ly_old, 0.0, 1.0e300)
     ly_lum_total = jnp.clip(ly_lum_young + ly_lum_old, 0.0, 1.0e300)
 
-    templates = context.nebular_templates_jax
-    z_idx = _nearest_index(templates.z_grid, zgas)
-    u_idx = _nearest_index(templates.logu_grid, logu)
-    ne_idx = _nearest_index(templates.ne_grid, ne)
     corr = _cigale_nebular_correction(f_esc, f_dust)
+    templates = context.nebular_templates_jax
     rest_templates = context.nebular_rest_templates_jax
-    continuum_rest = rest_templates.continuum_lumin_per_a_per_photon[z_idx, u_idx, ne_idx] * n_ly_total * corr
-    line_lumin = templates.line_lumin_per_photon[z_idx, u_idx, ne_idx] * n_ly_total * corr
+    continuum_per_photon = _trilinear_nebular_grid(
+        rest_templates.continuum_lumin_per_a_per_photon,
+        templates.z_grid,
+        templates.logu_grid,
+        templates.ne_grid,
+        zgas,
+        logu,
+        ne,
+    )
+    line_lumin_per_photon = _trilinear_nebular_grid(
+        templates.line_lumin_per_photon,
+        templates.z_grid,
+        templates.logu_grid,
+        templates.ne_grid,
+        zgas,
+        logu,
+        ne,
+    )
+    continuum_rest = continuum_per_photon * n_ly_total * corr
+    line_lumin = line_lumin_per_photon * n_ly_total * corr
     if context.fixed_nebular_line_profile_jax is not None:
         lines_rest = context.fixed_nebular_line_profile_jax * n_ly_total * corr
     elif rest_templates.line_profile_per_photon is not None:
-        lines_rest = rest_templates.line_profile_per_photon[z_idx, u_idx, ne_idx] * n_ly_total * corr
+        line_profile_per_photon = _trilinear_nebular_grid(
+            rest_templates.line_profile_per_photon,
+            templates.z_grid,
+            templates.logu_grid,
+            templates.ne_grid,
+            zgas,
+            logu,
+            ne,
+        )
+        lines_rest = line_profile_per_photon * n_ly_total * corr
     else:
         lines_rest = _flux_conserving_line_gaussians(rest_wave, templates.line_wave_a, line_lumin, lines_width)
     emission_scale = jnp.asarray(1.0 if cfg.emission else 0.0, dtype=jnp.float64)
