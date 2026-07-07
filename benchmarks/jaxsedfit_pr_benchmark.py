@@ -106,6 +106,18 @@ def _preview_scalar(value: Any) -> float:
     return float(np.asarray(leaves[0]).ravel()[0])
 
 
+_PHOTOMETRIC_LOGLIKE_PARAMETERS = set(inspect.signature(photometric_loglike).parameters)
+
+
+def _photometric_loglike_compat(**kwargs):
+    """Call photometric_loglike across benchmark base/head API revisions."""
+    if "intrinsic_scatter" in _PHOTOMETRIC_LOGLIKE_PARAMETERS and "intrinsic_scatter" not in kwargs:
+        kwargs["intrinsic_scatter"] = jnp.asarray(1.0e-4, dtype=jnp.float64)
+    return photometric_loglike(
+        **{key: value for key, value in kwargs.items() if key in _PHOTOMETRIC_LOGLIKE_PARAMETERS}
+    )
+
+
 def _workflow_url() -> str:
     server = os.getenv("GITHUB_SERVER_URL", "https://github.com")
     repo = os.getenv("GITHUB_REPOSITORY", "")
@@ -380,7 +392,7 @@ def _build_component_functions(fitter: JAXSEDFit) -> dict[str, Callable[[], Any]
     pred_fluxes = _project_rest_luminosity_filters(ctx, total_rest)
 
     def photometric_loglike_only():
-        return photometric_loglike(
+        return _photometric_loglike_compat(
             pred_fluxes=pred_fluxes,
             obs_fluxes=jnp.asarray(ctx.fluxes, dtype=jnp.float64),
             obs_errors=jnp.asarray(ctx.errors, dtype=jnp.float64),
@@ -573,7 +585,7 @@ def _build_component_gradient_functions(fitter: JAXSEDFit) -> dict[str, Callable
 
     def photometric_loglike_grad(scale):
         scaled_pred = pred_fluxes * jnp.exp(scale)
-        return photometric_loglike(
+        return _photometric_loglike_compat(
             pred_fluxes=scaled_pred,
             obs_fluxes=jnp.asarray(ctx.fluxes, dtype=jnp.float64),
             obs_errors=jnp.asarray(ctx.errors, dtype=jnp.float64),
