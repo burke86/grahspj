@@ -51,6 +51,7 @@ from jaxsedfit.model import (
     _line_gaussians,
     _evaluate_jaxqsofit_backend,
     _powerlaw_jax,
+    _project_local_nebular_line_filters,
     _project_filters,
     _redshift_to_obs,
     _torus_component,
@@ -66,6 +67,7 @@ from jaxsedfit.preload import _build_fixed_igm_jax, _build_igm_cache_jax, build_
 from jaxsedfit.filters import load_filter_curve
 from jaxsedfit.preload import (
     ModelContext,
+    PackedFilterCurvesJax,
     PackedFilters,
     PackedFiltersJax,
     SSPData,
@@ -88,6 +90,136 @@ def test_likelihood_defaults_include_absolute_flux_scale_prior():
     assert cfg.absolute_flux_scale_prior_sigma_dex > 0.0
     assert cfg.use_local_line_photometry is True
     assert cfg.local_nebular_line_uncertainty_dex == pytest.approx(0.3)
+
+
+def test_photometry_method_is_normalized_metadata_only():
+    phot = PhotometryData(
+        filter_names=["u", "g", "r"],
+        fluxes=[1.0, 2.0, 3.0],
+        errors=[0.1, 0.1, 0.1],
+        photometry_method=["PSF", " catalog ", None],
+    )
+    phot.validate()
+
+    assert phot.photometry_method == ["psf", "catalog", None]
+
+    bad = PhotometryData(
+        filter_names=["u"],
+        fluxes=[1.0],
+        errors=[0.1],
+        photometry_method=["adaptive-secret-method"],
+    )
+    with pytest.raises(ValueError, match="Unknown photometry_method"):
+        bad.validate()
+
+
+def _local_projection_context(filter_wave, filter_trans):
+    filter_wave = np.asarray(filter_wave, dtype=float)
+    filter_trans = np.asarray(filter_trans, dtype=float)
+    denom = np.trapezoid(filter_trans, filter_wave)
+    eff_wave = np.trapezoid(filter_wave * filter_trans, filter_wave) / denom
+    return SimpleNamespace(
+        rest_wave_jax=jax.numpy.asarray(np.linspace(1000.0, 10000.0, 512), dtype=jax.numpy.float64),
+        packed_filter_curves_jax=PackedFilterCurvesJax(
+            wave=jax.numpy.asarray(filter_wave[None, :], dtype=jax.numpy.float64),
+            transmission=jax.numpy.asarray(filter_trans[None, :], dtype=jax.numpy.float64),
+            denom=jax.numpy.asarray([denom], dtype=jax.numpy.float64),
+            valid_mask=jax.numpy.asarray(np.ones((1, filter_wave.size), dtype=bool)),
+        ),
+        filter_effective_wavelength_jax=jax.numpy.asarray([eff_wave], dtype=jax.numpy.float64),
+    )
+
+
+def _dense_nebular_line_filter_flux(context, *, line_wave, line_lumin, width_kms, luminosity_distance_m=1.0e20):
+    line_wave = float(line_wave)
+    line_lumin = float(line_lumin)
+    width_kms = float(width_kms)
+    fwhm_wave = max(line_wave * width_kms / 299792.458, 1.0e-8)
+    sigma = fwhm_wave / (2.0 * np.sqrt(2.0 * np.log(2.0)))
+    rest_wave = line_wave + np.linspace(-8.0, 8.0, 20001) * fwhm_wave
+    z = (rest_wave - line_wave) / sigma
+    rest_lumin = line_lumin * np.exp(-0.5 * z * z) / (sigma * np.sqrt(2.0 * np.pi))
+    filt_wave = np.asarray(context.packed_filter_curves_jax.wave[0])
+    filt_trans = np.asarray(context.packed_filter_curves_jax.transmission[0])
+    trans = np.interp(rest_wave, filt_wave, filt_trans, left=0.0, right=0.0)
+    distance_scale = 4.0 * np.pi * luminosity_distance_m**2
+    numer = np.trapezoid(trans * rest_lumin / distance_scale, rest_wave)
+    f_lambda = numer / float(context.packed_filter_curves_jax.denom[0])
+    eff_wave = float(context.filter_effective_wavelength_jax[0])
+    return 1.0e-10 / 299792458.0 * 1.0e29 * eff_wave * eff_wave * f_lambda
+
+
+@pytest.mark.parametrize(
+    ("case", "filter_wave", "filter_trans", "line_wave", "line_lumin", "width_kms", "rtol"),
+    [
+        (
+            "very narrow filter",
+            np.linspace(4998.0, 5002.0, 401),
+            np.ones(401),
+            5000.0,
+            100.0,
+            500.0,
+            3.0e-2,
+        ),
+        (
+            "line near filter edge",
+            np.linspace(5000.0, 5100.0, 501),
+            np.ones(501),
+            5002.0,
+            100.0,
+            300.0,
+            3.0e-2,
+        ),
+        (
+            "high equivalent width scaling",
+            np.linspace(4900.0, 5100.0, 501),
+            np.maximum(1.0 - np.abs(np.linspace(4900.0, 5100.0, 501) - 5000.0) / 100.0, 0.0),
+            5000.0,
+            1.0e6,
+            1000.0,
+            3.0e-2,
+        ),
+        (
+            "very narrow line width",
+            np.linspace(4990.0, 5010.0, 1001),
+            np.ones(1001),
+            5000.0,
+            100.0,
+            20.0,
+            3.0e-2,
+        ),
+    ],
+)
+def test_local_nebular_line_projection_matches_dense_edge_cases(
+    case,
+    filter_wave,
+    filter_trans,
+    line_wave,
+    line_lumin,
+    width_kms,
+    rtol,
+):
+    context = _local_projection_context(filter_wave, filter_trans)
+    local = float(
+        _project_local_nebular_line_filters(
+            context,
+            jax.numpy.asarray([line_wave], dtype=jax.numpy.float64),
+            jax.numpy.asarray([line_lumin], dtype=jax.numpy.float64),
+            width_kms,
+            0.0,
+            0.0,
+            1.0e20,
+            jax.numpy.ones_like(context.rest_wave_jax),
+        )[0]
+    )
+    dense = _dense_nebular_line_filter_flux(
+        context,
+        line_wave=line_wave,
+        line_lumin=line_lumin,
+        width_kms=width_kms,
+    )
+
+    assert local == pytest.approx(dense, rel=rtol), case
 
 
 def test_jaxqsofit_config_broadening_convolution_default_and_validation():
@@ -1118,6 +1250,37 @@ def test_context_builds_spectrum_resolution_host_basis(monkeypatch):
     assert context.spec_host_basis_jax is not None
     assert np.asarray(context.spec_rest_wave_jax).tolist() == pytest.approx(np.asarray(cfg.spectroscopy.wave_obs) / 1.1)
     assert context.spec_host_basis_jax.rest_llambda.shape[-1] == len(cfg.spectroscopy.wave_obs)
+
+
+def test_context_skips_spectrum_resolution_host_basis_when_backend_does_not_need_it(monkeypatch):
+    class _SSPData:
+        ssp_lgmet = np.array([-1.0, 0.0])
+        ssp_lg_age_gyr = np.array([-1.0, 0.0])
+        ssp_wave = np.array([900.0, 2000.0, 5000.0, 10000.0])
+        ssp_flux = np.ones((2, 2, 4))
+
+    monkeypatch.setattr("jaxsedfit.preload._load_ssp_templates", lambda fn: _SSPData())
+
+    cfg = FitConfig(
+        observation=Observation(object_id="obj", redshift=0.1),
+        photometry=PhotometryData(filter_names=["f1"], fluxes=[1.0], errors=[0.1]),
+        filters=FilterSet(curves=[FilterCurve(name="f1", wave=[1000.0, 2000.0, 3000.0], transmission=[0.0, 1.0, 0.0])]),
+        galaxy=GalaxyConfig(dsps_ssp_fn="fake.h5", n_wave=16, fit_host=True),
+        agn=AGNConfig(),
+        spectroscopy=SpectroscopyData(
+            wave_obs=[5000.0, 5100.0, 5200.0],
+            fluxes=[2.0, 4.0, 5.0],
+            errors=[0.1, 0.1, 0.1],
+            instrument="sdss",
+        ),
+        spectroscopy_config=SpectroscopyConfig(enabled=True, backend="jaxsedfit"),
+        inference=InferenceConfig(map_steps=2),
+    )
+
+    context = build_model_context(cfg)
+
+    assert context.spec_host_basis_jax is None
+    assert np.asarray(context.spec_rest_wave_jax).size == 0
 
 
 def test_jaxqsofit_spectrum_resolution_host_basis_uses_host_kinematics(monkeypatch):

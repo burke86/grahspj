@@ -31,6 +31,7 @@ class _FitState:
     ns_result: dict[str, Any] | None = None
     samples: Mapping[str, Any] | None = None
     predictive: Mapping[str, Any] | None = None
+    predictive_cache: dict[str, Mapping[str, Any]] | None = None
     summary: Mapping[str, Any] | None = None
     path: Path | None = None
     figure: Any = None

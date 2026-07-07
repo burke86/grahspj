@@ -192,6 +192,25 @@ def test_nebular_enabled_adds_finite_component(monkeypatch):
     assert "nebular_logU_fit" in tr
 
 
+def test_nebular_dust_fraction_uses_smooth_remaining_budget(monkeypatch):
+    _patch_ssp(monkeypatch)
+    cfg = _mock_config()
+    cfg.nebular = NebularConfig(enabled=True, f_esc=0.6, f_dust=0.2, zgas=0.02)
+    cfg.prior_config.nebular.f_esc = dist.TruncatedNormal(0.6, 0.1, low=0.0, high=1.0)
+    cfg.prior_config.nebular.f_dust = dist.TruncatedNormal(0.5, 0.1, low=0.0, high=1.0)
+    context = build_model_context(cfg)
+    model = substitute(
+        lambda: grahsp_photometric_model(context, include_components=True),
+        data={"nebular_f_esc": np.array(0.7), "nebular_f_dust_fraction": np.array(0.5)},
+    )
+    tr = trace(seed(model, 5)).get_trace()
+
+    assert "nebular_f_dust_fraction" in tr
+    assert np.isclose(float(tr["nebular_f_dust_fit"]["value"]), 0.15)
+    assert np.isclose(float(tr["nebular_f_dust_fraction_fit"]["value"]), 0.5)
+    assert float(tr["nebular_f_esc_fit"]["value"]) + float(tr["nebular_f_dust_fit"]["value"]) <= 1.0
+
+
 def test_fixed_nebular_line_profile_cache_matches_dynamic_path(monkeypatch):
     _patch_ssp(monkeypatch)
     fixed_cfg = _mock_config()
