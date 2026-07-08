@@ -31,8 +31,8 @@ def _posterior_samples(fitter_or_samples: Any) -> Mapping[str, Any]:
 
     Parameters
     ----------
-    fitter_or_samples : object
-        fitter_or_samples value.
+    fitter_or_samples : JAXSEDFit or mapping
+        Fitter with a ``samples`` attribute, or a raw posterior sample mapping.
     """
     if isinstance(fitter_or_samples, Mapping):
         samples = fitter_or_samples
@@ -48,8 +48,9 @@ def _grouped_trace_samples(fitter_or_samples: Any) -> tuple[Mapping[str, Any], b
 
     Parameters
     ----------
-    fitter_or_samples : object
-        fitter_or_samples value.
+    fitter_or_samples : JAXSEDFit or mapping
+        Fitter with NUTS state, fitter with flattened samples, or a raw sample
+        mapping.
     """
     if not isinstance(fitter_or_samples, Mapping):
         nuts_result = getattr(fitter_or_samples, "nuts_result", None)
@@ -65,10 +66,11 @@ def _finite_scalar_sample_array(value: Any, *, grouped: bool) -> np.ndarray | No
 
     Parameters
     ----------
-    value : object
-        value value.
-    grouped : object
-        grouped value.
+    value : array-like
+        Candidate posterior sample array.
+    grouped : bool
+        If True, require ``(chain, draw)`` shape; otherwise require flattened
+        one-dimensional draws.
     """
     arr = np.asarray(value, dtype=float)
     if grouped:
@@ -86,10 +88,10 @@ def _has_dynamic_range(value: Any, *, grouped: bool) -> bool:
 
     Parameters
     ----------
-    value : object
-        value value.
-    grouped : object
-        grouped value.
+    value : array-like
+        Candidate posterior sample array.
+    grouped : bool
+        Whether ``value`` is expected to include an explicit chain axis.
     """
     arr = _finite_scalar_sample_array(value, grouped=grouped)
     if arr is None:
@@ -109,14 +111,15 @@ def _select_scalar_params(
 
     Parameters
     ----------
-    samples : object
-        samples value.
-    params : object
-        params value.
-    max_params : object
-        max_params value.
-    grouped : object
-        grouped value.
+    samples : mapping
+        Posterior samples keyed by sample-site name.
+    params : sequence of str or None
+        Explicit sample names to select. If omitted, finite scalar sites are
+        selected automatically.
+    max_params : int or None
+        Maximum number of automatically selected parameters.
+    grouped : bool
+        Whether samples include an explicit chain axis.
     """
     if params is not None:
         selected = [str(param) for param in params]
@@ -150,14 +153,15 @@ def _select_corner_params(
 
     Parameters
     ----------
-    samples : object
-        samples value.
-    params : object
-        params value.
-    max_params : object
-        max_params value.
-    grouped : object
-        grouped value.
+    samples : mapping
+        Posterior samples keyed by sample-site name.
+    params : sequence of str or None
+        Explicit sample names to select. If omitted, finite scalar sites with
+        nonzero dynamic range are selected automatically.
+    max_params : int or None
+        Maximum number of automatically selected parameters.
+    grouped : bool
+        Whether samples include an explicit chain axis.
     """
     if params is not None:
         selected = [str(param) for param in params]
@@ -187,10 +191,11 @@ def _labels_for_params(params: list[str], labels: Mapping[str, str] | list[str] 
 
     Parameters
     ----------
-    params : object
-        params value.
-    labels : object
-        labels value.
+    params : list of str
+        Selected posterior sample names.
+    labels : mapping, sequence, or None
+        Optional display labels keyed by parameter name, or labels in the same
+        order as ``params``.
     """
     if labels is None:
         return params
@@ -207,10 +212,11 @@ def _truths_for_params(params: list[str], truths: Mapping[str, float | None] | l
 
     Parameters
     ----------
-    params : object
-        params value.
-    truths : object
-        truths value.
+    params : list of str
+        Selected posterior sample names.
+    truths : mapping, sequence, or None
+        Optional truth/reference values keyed by parameter name, or values in
+        the same order as ``params``.
     """
     if truths is None:
         return None
@@ -227,12 +233,12 @@ def _sample_matrix(samples: Mapping[str, Any], params: list[str], *, grouped: bo
 
     Parameters
     ----------
-    samples : object
-        samples value.
-    params : object
-        params value.
-    grouped : object
-        grouped value.
+    samples : mapping
+        Posterior samples keyed by sample-site name.
+    params : list of str
+        Scalar posterior sample names to stack as matrix columns.
+    grouped : bool
+        Whether samples include an explicit chain axis.
     """
     columns = []
     draw_count = None
@@ -263,22 +269,24 @@ def plot_corner(
 
     Parameters
     ----------
-    fitter_or_samples : object
-        fitter_or_samples value.
-    output_path : object
-        output_path value.
-    params : object
-        params value.
-    max_params : object
-        max_params value.
-    labels : object
-        labels value.
-    truths : object
-        truths value.
-    show : object
-        show value.
+    fitter_or_samples : JAXSEDFit or mapping
+        Fitted object or raw posterior sample mapping to visualize.
+    output_path : str or pathlib.Path, optional
+        File path for saving the figure.
+    params : sequence of str, optional
+        Posterior sample names to include. If omitted, scalar sample sites with
+        dynamic range are selected automatically.
+    max_params : int, optional
+        Maximum number of automatically selected parameters to plot.
+    labels : mapping or sequence, optional
+        Axis labels keyed by parameter name, or labels in the same order as
+        ``params``.
+    truths : mapping or sequence, optional
+        Reference values to mark on the plot.
+    show : bool, optional
+        If True, display the figure interactively.
     **corner_kwargs : dict
-        Additional keyword arguments.
+        Additional keyword arguments forwarded to ``corner.corner``.
     """
     try:
         import corner as corner_lib
@@ -325,16 +333,17 @@ def plot_trace(
 
     Parameters
     ----------
-    fitter_or_samples : object
-        fitter_or_samples value.
-    output_path : object
-        output_path value.
-    params : object
-        params value.
-    max_params : object
-        max_params value.
-    show : object
-        show value.
+    fitter_or_samples : JAXSEDFit or mapping
+        Fitted object or raw posterior sample mapping to visualize.
+    output_path : str or pathlib.Path, optional
+        File path for saving the figure.
+    params : sequence of str, optional
+        Posterior sample names to include. If omitted, finite scalar sample
+        sites are selected automatically.
+    max_params : int, optional
+        Maximum number of automatically selected parameters to plot.
+    show : bool, optional
+        If True, display the figure interactively.
     """
     samples, grouped = _grouped_trace_samples(fitter_or_samples)
     selected = _select_scalar_params(samples, params, max_params=max_params, grouped=grouped)
@@ -381,10 +390,10 @@ def _median_site(pred: dict[str, Any], key: str) -> np.ndarray:
 
     Parameters
     ----------
-    pred : object
-        pred value.
-    key : object
-        key value.
+    pred : mapping
+        Predictive arrays keyed by deterministic site name.
+    key : str
+        Predictive site to reduce.
     """
     arr = np.asarray(pred[key], dtype=float)
     return np.median(arr, axis=0) if arr.ndim > 1 else arr
@@ -395,12 +404,12 @@ def _percentile_site(pred: dict[str, Any], key: str, q: float) -> np.ndarray:
 
     Parameters
     ----------
-    pred : object
-        pred value.
-    key : object
-        key value.
-    q : object
-        q value.
+    pred : mapping
+        Predictive arrays keyed by deterministic site name.
+    key : str
+        Predictive site to reduce.
+    q : float
+        Percentile between 0 and 100.
     """
     arr = np.asarray(pred[key], dtype=float)
     return np.percentile(arr, q, axis=0) if arr.ndim > 1 else arr
@@ -411,10 +420,10 @@ def _site_sum(pred: dict[str, Any], keys: tuple[str, ...]) -> np.ndarray:
 
     Parameters
     ----------
-    pred : object
-        pred value.
-    keys : object
-        keys value.
+    pred : mapping
+        Predictive arrays keyed by deterministic site name.
+    keys : tuple of str
+        Predictive sites to add when present.
     """
     arrays = [np.asarray(pred[key], dtype=float) for key in keys if key in pred]
     if not arrays:
@@ -427,10 +436,10 @@ def _median_site_sum(pred: dict[str, Any], keys: tuple[str, ...]) -> np.ndarray:
 
     Parameters
     ----------
-    pred : object
-        pred value.
-    keys : object
-        keys value.
+    pred : mapping
+        Predictive arrays keyed by deterministic site name.
+    keys : tuple of str
+        Predictive sites to add before taking the median.
     """
     arr = _site_sum(pred, keys)
     return np.median(arr, axis=0) if arr.ndim > 1 else arr
@@ -441,12 +450,12 @@ def _percentile_site_sum(pred: dict[str, Any], keys: tuple[str, ...], q: float) 
 
     Parameters
     ----------
-    pred : object
-        pred value.
-    keys : object
-        keys value.
-    q : object
-        q value.
+    pred : mapping
+        Predictive arrays keyed by deterministic site name.
+    keys : tuple of str
+        Predictive sites to add before taking the percentile.
+    q : float
+        Percentile between 0 and 100.
     """
     arr = _site_sum(pred, keys)
     return np.percentile(arr, q, axis=0) if arr.ndim > 1 else arr
@@ -457,10 +466,10 @@ def _to_display_flux_density(obs_wave: np.ndarray, sed: np.ndarray) -> np.ndarra
 
     Parameters
     ----------
-    obs_wave : object
-        obs_wave value.
-    sed : object
-        sed value.
+    obs_wave : array-like
+        Observed-frame wavelengths in Angstrom.
+    sed : array-like
+        Internal model spectral-density array on ``obs_wave``.
     """
     obs_wave = np.asarray(obs_wave, dtype=float)
     sed = np.asarray(sed, dtype=float)
@@ -472,10 +481,10 @@ def _median_effective_variance(fitter, pred: dict[str, Any]) -> np.ndarray:
 
     Parameters
     ----------
-    fitter : object
-        fitter value.
-    pred : object
-        pred value.
+    fitter : JAXSEDFit
+        Fitted object containing configuration and photometry context.
+    pred : mapping
+        Predictive arrays returned by :meth:`jaxsedfit.JAXSEDFit.predict`.
     """
     pred_fluxes = np.asarray(_median_site(pred, "pred_fluxes"), dtype=float)
     agn_fluxes = np.asarray(_median_site(pred, "agn_fluxes"), dtype=float) if "agn_fluxes" in pred else np.zeros_like(pred_fluxes)
@@ -531,16 +540,16 @@ def plot_fit_sed(
 
     Parameters
     ----------
-    fitter : object
-        fitter value.
-    output_path : object
-        output_path value.
-    posterior : object
-        posterior value.
-    show : object
-        show value.
-    annotate_band_names : object
-        annotate_band_names value.
+    fitter : JAXSEDFit
+        Fitted object with posterior samples and model context.
+    output_path : str or pathlib.Path, optional
+        File path for saving the figure.
+    posterior : {"latest"}, optional
+        Posterior selection passed to :meth:`jaxsedfit.JAXSEDFit.predict`.
+    show : bool, optional
+        If True, display the figure interactively.
+    annotate_band_names : bool, optional
+        If True, label observed photometric points by filter name.
     """
     pred = fitter.predict(posterior=posterior)
     obs_wave = _median_site(pred, "obs_wave")

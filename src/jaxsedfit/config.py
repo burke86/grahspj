@@ -343,7 +343,8 @@ def _scalar_or_list(value: Any) -> Any:
     Parameters
     ----------
     value : object
-        value value.
+        NumPyro distribution parameter, scalar, or array-like value to
+        serialize.
     """
     arr = np.asarray(value)
     if arr.shape == ():
@@ -357,7 +358,8 @@ def _numpyro_distribution_to_mapping(value: Any) -> dict[str, Any] | None:
     Parameters
     ----------
     value : object
-        value value.
+        Candidate NumPyro distribution instance. Unsupported non-distribution
+        objects return ``None``.
     """
     module = getattr(value.__class__, "__module__", "")
     if not module.startswith("numpyro.distributions"):
@@ -415,7 +417,8 @@ def _prior_to_mapping(value: Any) -> Any:
     Parameters
     ----------
     value : object
-        value value.
+        Public prior field value. Must be a supported
+        ``numpyro.distributions`` object.
     """
     prior = _numpyro_distribution_to_mapping(value)
     if prior is not None:
@@ -727,7 +730,27 @@ def _section_to_mapping(section: Any, fields_to_keys: Mapping[str, str]) -> dict
 
 @dataclass
 class PriorConfig:
-    """Object-oriented prior configuration."""
+    """Object-oriented prior configuration for a jaxsedfit model.
+
+    Parameters
+    ----------
+    redshift : RedshiftPriorConfig or mapping, optional
+        Optional tabulated redshift prior used when
+        ``Observation.redshift_mode='fit'``.
+    stellar_mass : numpyro.distributions.Distribution, optional
+        Prior for ``log_stellar_mass``.
+    mass_metallicity : MassMetallicityPriorConfig or mapping, optional
+        Soft stellar mass-metallicity relation prior.
+    host : HostPriorConfig or mapping, optional
+        Host-galaxy priors for dust, metallicity, SFH, and stellar kinematics.
+    agn : AGNPriorConfig or mapping, optional
+        AGN continuum, torus, line-strength, Balmer continuum, and Fe II priors.
+    nebular : NebularPriorConfig or mapping, optional
+        Nebular gas, escape/dust fraction, line-width, and line-scale priors.
+    likelihood : LikelihoodPriorConfig or mapping, optional
+        Priors for nuisance likelihood terms such as photometric systematics,
+        host capture, and spectrum scale.
+    """
     redshift: RedshiftPriorConfig = field(default_factory=RedshiftPriorConfig)
     stellar_mass: Any | None = None
     mass_metallicity: MassMetallicityPriorConfig = field(default_factory=MassMetallicityPriorConfig)
@@ -765,7 +788,41 @@ class PriorConfig:
 
 @dataclass
 class FitConfig:
-    """Top-level configuration bundle for a single jaxsedfit fit."""
+    """Top-level configuration bundle for a single jaxsedfit fit.
+
+    Parameters
+    ----------
+    observation : Observation or mapping
+        Source metadata including redshift, object identifier, sky coordinates,
+        and redshift-fitting mode.
+    photometry : PhotometryData or mapping
+        Broadband fluxes, uncertainties, upper-limit flags, and optional
+        aperture/PSF metadata.
+    filters : FilterSet or mapping, optional
+        Explicit filter curves used for synthetic photometry. If omitted,
+        filters are loaded from known filter names.
+    galaxy : GalaxyConfig or mapping, optional
+        Host-galaxy model, SSP grid, dust, cosmology, and wavelength-grid
+        settings.
+    nebular : NebularConfig or mapping, optional
+        Host nebular-emission switches and fixed gas defaults.
+    agn : AGNConfig or mapping, optional
+        AGN continuum, torus, Fe II, Balmer continuum, and native line settings.
+    likelihood : LikelihoodConfig or mapping, optional
+        Photometric likelihood family, systematics, variability, local line
+        projection, and aperture-capture options.
+    spectroscopy : SpectroscopyData, sequence of SpectroscopyData, mapping, or None, optional
+        Optional observed spectra for joint SED+spectrum fitting.
+    spectroscopy_config : SpectroscopyConfig or mapping, optional
+        Spectroscopic likelihood, scale, resolution weighting, and jaxqsofit
+        backend options.
+    inference : InferenceConfig or mapping, optional
+        MAP, NUTS, and nested-sampling controls.
+    output : OutputConfig or mapping, optional
+        Plotting and persistence behavior.
+    prior_config : PriorConfig or mapping, optional
+        Priors consumed by the NumPyro model.
+    """
     observation: Observation
     photometry: PhotometryData
     filters: FilterSet = field(default_factory=FilterSet)
@@ -813,8 +870,10 @@ def _coerce_dataclass(cls, value: Any):
 
     Parameters
     ----------
+    cls : type
+        Dataclass type to construct.
     value : object
-        value value.
+        Existing instance or mapping of dataclass field names to values.
     """
     if isinstance(value, cls):
         return value
@@ -841,7 +900,7 @@ def _coerce_jaxqsofit_config(value: Any) -> JaxQSOFitConfig:
     Parameters
     ----------
     value : object
-        value value.
+        Existing :class:`JaxQSOFitConfig` instance or mapping.
     """
     return _coerce_dataclass(JaxQSOFitConfig, value)
 
@@ -852,7 +911,7 @@ def _coerce_spectroscopy_config(value: Any) -> SpectroscopyConfig:
     Parameters
     ----------
     value : object
-        value value.
+        Existing :class:`SpectroscopyConfig` instance or mapping.
     """
     if isinstance(value, SpectroscopyConfig):
         return value
@@ -879,7 +938,7 @@ def _coerce_prior_config(value: Any) -> PriorConfig:
     Parameters
     ----------
     value : object
-        value value.
+        Existing :class:`PriorConfig`, mapping, or ``None``.
     """
     if isinstance(value, PriorConfig):
         return value
@@ -968,7 +1027,8 @@ def serialize_config(value: Any) -> Any:
     Parameters
     ----------
     value : object
-        value value.
+        Dataclass, mapping, sequence, NumPy array, NumPyro distribution, or
+        scalar value to convert into JSON-compatible containers.
     """
     prior = _numpyro_distribution_to_mapping(value)
     if prior is not None:

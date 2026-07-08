@@ -31,8 +31,9 @@ class JAXSEDFit:
 
         Parameters
         ----------
-        config : object
-            config value.
+        config : FitConfig
+            Complete model, data, prior, inference, and output configuration
+            for one fit.
         """
         self.config = config
         self.context: ModelContext = build_model_context(config)
@@ -57,8 +58,8 @@ class JAXSEDFit:
 
         Parameters
         ----------
-        value : object
-            value value.
+        value : mapping or None
+            MAP inference payload to mirror into the internal fit state.
         """
         state = self._ensure_fit_state()
         state.map_result = value
@@ -76,8 +77,8 @@ class JAXSEDFit:
 
         Parameters
         ----------
-        value : object
-            value value.
+        value : mapping or None
+            NUTS inference payload to mirror into the internal fit state.
         """
         state = self._ensure_fit_state()
         state.nuts_result = value
@@ -95,8 +96,8 @@ class JAXSEDFit:
 
         Parameters
         ----------
-        value : object
-            value value.
+        value : mapping or None
+            Nested-sampling payload to mirror into the internal fit state.
         """
         state = self._ensure_fit_state()
         state.ns_result = value
@@ -114,8 +115,8 @@ class JAXSEDFit:
 
         Parameters
         ----------
-        value : object
-            value value.
+        value : mapping or None
+            Posterior sample mapping keyed by sample-site name.
         """
         self._ensure_fit_state().samples = value
 
@@ -130,8 +131,8 @@ class JAXSEDFit:
 
         Parameters
         ----------
-        value : object
-            value value.
+        value : mapping or None
+            Posterior predictive arrays keyed by deterministic site name.
         """
         state = self._ensure_fit_state()
         state.predictive = value
@@ -148,8 +149,8 @@ class JAXSEDFit:
 
         Parameters
         ----------
-        value : object
-            value value.
+        value : mapping or None
+            Cached plotting payloads keyed by plot type.
         """
         self._ensure_fit_state().plot_cache = value
 
@@ -164,8 +165,8 @@ class JAXSEDFit:
 
         Parameters
         ----------
-        value : object
-            value value.
+        value : mapping or None
+            Summary statistics restored from a saved posterior bundle.
         """
         self._ensure_fit_state().summary = value
 
@@ -180,8 +181,8 @@ class JAXSEDFit:
 
         Parameters
         ----------
-        value : object
-            value value.
+        value : str, pathlib.Path, or None
+            Path to a restored posterior bundle.
         """
         self._ensure_fit_state().path = None if value is None else Path(value)
 
@@ -198,10 +199,11 @@ class JAXSEDFit:
 
         Parameters
         ----------
-        prior_config : object
-            prior_config value.
-        dsps_ssp_fn : object
-            dsps_ssp_fn value.
+        prior_config : mapping or PriorConfig, optional
+            Replacement prior configuration for this fit call.
+        dsps_ssp_fn : str, optional
+            Replacement SSP template path. Rebuilds the static model context
+            when it differs from the configured path.
         """
         rebuild_context = False
         if prior_config is not None:
@@ -515,8 +517,15 @@ class JAXSEDFit:
 
         Parameters
         ----------
-        progress_bar : object
-            progress_bar value.
+        progress_bar : bool, optional
+            If True, show progress bars for Optax, NUTS, or nested-sampling
+            backends when the backend supports them.
+
+        Returns
+        -------
+        FitResult
+            Result wrapper containing posterior samples or MAP values,
+            summaries, optional figure handles, and persistence helpers.
         """
         inference = self.config.inference
         output = self.config.output
@@ -955,14 +964,23 @@ class JAXSEDFit:
 
         Parameters
         ----------
-        posterior : object
-            posterior value.
-        kind : object
-            kind value.
-        max_draws : object
-            max_draws value.
-        _state : object
-            _state value.
+        posterior : {"latest"}, optional
+            Posterior selection. Currently ``"latest"`` uses the most recent
+            fit state attached to the fitter or result.
+        kind : {"plot", "photometry"}, optional
+            Prediction payload to compute. ``"photometry"`` skips expensive
+            full component SED arrays where possible; ``"plot"`` includes the
+            component arrays used by :meth:`plot_sed`.
+        max_draws : int, optional
+            Maximum number of posterior draws to evaluate. If omitted, all
+            available draws are used.
+        _state : _FitState, optional
+            Internal fit-state override used by :class:`FitResult`.
+
+        Returns
+        -------
+        dict
+            Posterior predictive arrays keyed by deterministic site name.
         """
         state = self._ensure_fit_state() if _state is None else _state
         kind = self._prediction_kind(kind)
@@ -983,12 +1001,18 @@ class JAXSEDFit:
 
         Parameters
         ----------
-        posterior : object
-            posterior value.
-        kind : object
-            kind value.
-        _state : object
-            _state value.
+        posterior : {"latest"}, optional
+            Posterior selection. Currently ``"latest"`` uses the most recent
+            fit state attached to the fitter or result.
+        kind : {"plot", "photometry"}, optional
+            Prediction payload to compute at the posterior median.
+        _state : _FitState, optional
+            Internal fit-state override used by :class:`FitResult`.
+
+        Returns
+        -------
+        dict
+            Predictive arrays evaluated once at posterior-median parameters.
         """
         state = self._ensure_fit_state() if _state is None else _state
         if state.samples is None:
@@ -1073,12 +1097,12 @@ class JAXSEDFit:
 
         Parameters
         ----------
-        parent : object
-            parent value.
-        name : object
-            name value.
+        parent : h5py.Group
+            Parent HDF5 group.
+        name : str
+            Child dataset or group name.
         value : object
-            value value.
+            Python scalar, array, mapping, sequence, or ``None`` to write.
         """
         if value is None:
             grp = parent.create_group(name)
@@ -1227,10 +1251,15 @@ class JAXSEDFit:
 
         Parameters
         ----------
-        output_dir : object
-            output_dir value.
-        _state : object
-            _state value.
+        output_dir : str or pathlib.Path, optional
+            Output directory or explicit ``*_samples.h5`` file path.
+        _state : _FitState, optional
+            Internal fit-state override used by :class:`FitResult`.
+
+        Returns
+        -------
+        pathlib.Path
+            Path to the written HDF5 posterior bundle.
         """
         state = self._ensure_fit_state() if _state is None else _state
         out = self._posterior_bundle_path(output_dir, self.config.observation.object_id)
@@ -1347,14 +1376,20 @@ class JAXSEDFit:
 
         Parameters
         ----------
-        output_path : object
-            output_path value.
-        posterior : object
-            posterior value.
-        show : object
-            show value.
-        annotate_band_names : object
-            annotate_band_names value.
+        output_path : str or pathlib.Path, optional
+            File path for saving the figure. If omitted, the figure is returned
+            without writing to disk.
+        posterior : {"latest"}, optional
+            Posterior selection passed to :meth:`predict`.
+        show : bool, optional
+            If True, display the Matplotlib figure interactively.
+        annotate_band_names : bool, optional
+            If True, label observed photometric points with their filter names.
+
+        Returns
+        -------
+        matplotlib.figure.Figure
+            The generated SED figure.
         """
         from .plotting import plot_fit_sed
 
@@ -1380,20 +1415,22 @@ class JAXSEDFit:
 
         Parameters
         ----------
-        output_path : object
-            output_path value.
-        params : object
-            params value.
-        max_params : object
-            max_params value.
-        labels : object
-            labels value.
-        truths : object
-            truths value.
-        show : object
-            show value.
+        output_path : str or pathlib.Path, optional
+            File path for saving the corner plot.
+        params : sequence of str, optional
+            Posterior sample names to include. If omitted, scalar sample sites
+            are selected automatically.
+        max_params : int, optional
+            Maximum number of automatically selected parameters to plot.
+        labels : mapping or sequence, optional
+            Axis labels keyed by parameter name, or labels in the same order as
+            ``params``.
+        truths : mapping or sequence, optional
+            Reference values to draw on the corner plot.
+        show : bool, optional
+            If True, display the figure interactively.
         **corner_kwargs : dict
-            Additional keyword arguments.
+            Additional keyword arguments forwarded to ``corner.corner``.
         """
         from .plotting import plot_corner
 
@@ -1419,14 +1456,15 @@ class JAXSEDFit:
 
         Parameters
         ----------
-        output_path : object
-            output_path value.
-        params : object
-            params value.
-        max_params : object
-            max_params value.
-        show : object
-            show value.
+        output_path : str or pathlib.Path, optional
+            File path for saving the trace plot.
+        params : sequence of str, optional
+            Posterior sample names to include. If omitted, scalar sample sites
+            are selected automatically.
+        max_params : int, optional
+            Maximum number of automatically selected parameters to plot.
+        show : bool, optional
+            If True, display the figure interactively.
         """
         from .plotting import plot_trace
 
@@ -1445,7 +1483,7 @@ class JAXSEDFit:
         Parameters
         ----------
         value : object
-            value value.
+            Scalar or array-like posterior predictive value.
         """
         arr = np.asarray(value, dtype=float)
         if arr.ndim == 0 or arr.size == 0:
@@ -1500,22 +1538,24 @@ class JAXSEDFit:
 
         Parameters
         ----------
-        spectrum_index : object
-            spectrum_index value.
-        posterior : object
-            posterior value.
-        show_nebular_lines : object
-            show_nebular_lines value.
-        show_plot : object
-            show_plot value.
-        plot_residual : object
-            plot_residual value.
-        plot_legend : object
-            plot_legend value.
-        ylims : object
-            ylims value.
+        spectrum_index : int, optional
+            Index of the spectrum to plot when multiple spectra are fitted.
+        posterior : {"latest"}, optional
+            Posterior selection passed to :meth:`predict`.
+        show_nebular_lines : bool, optional
+            If True, overlay the native jaxsedfit nebular-line diagnostic in
+            addition to the jaxqsofit spectral line model.
+        show_plot : bool, optional
+            If True, display the Matplotlib figure interactively.
+        plot_residual : bool, optional
+            If True, draw a residual panel below the spectrum.
+        plot_legend : bool, optional
+            If True, draw the component legend.
+        ylims : tuple of float, optional
+            Optional y-axis limits for the spectrum panel.
         **kwargs : dict
-            Additional keyword arguments.
+            Additional keyword arguments forwarded to jaxqsofit's spectrum
+            plotting function.
         """
         if str(self.config.spectroscopy_config.backend).lower() != "jaxqsofit":
             raise RuntimeError("plot_jaxqsofit_spectrum requires SpectroscopyConfig.backend='jaxqsofit'.")
