@@ -96,6 +96,102 @@ The photometry payload carries both fluxes and aperture metadata:
    ``"catalog"``. It is metadata for now, but it makes plots and downstream
    checks easier to interpret.
 
+Aperture-aware likelihood
+-------------------------
+
+When ``cfg.likelihood.use_host_capture_model = True``, ``jaxsedfit`` modifies
+the model prediction before evaluating the photometric and spectroscopic
+likelihoods. The intrinsic SED is built first, then each observation gets its
+own captured version of the extended components. Compact AGN continuum and
+broad-line-like components are treated as unresolved; stellar host light, host
+dust, nebular emission, and narrow-line-like components are treated as
+extended.
+
+For each photometric band :math:`b`, the effective angular scale is
+
+.. math::
+
+   \theta_b =
+   \begin{cases}
+   d_{{\rm ap},b}, & d_{{\rm ap},b}\ {\rm supplied}, \\
+   {\rm FWHM}_{{\rm PSF},b}, & {\rm otherwise\ if\ supplied}, \\
+   \infty, & {\rm otherwise}.
+   \end{cases}
+
+The captured extended-light fraction is a smooth logistic function,
+
+.. math::
+
+   \eta_b =
+   \left[
+   1 + \exp\left(
+   -\alpha_{\rm cap}
+   \left[\ln \theta_b - \ln \theta_{\rm cap}\right]
+   \right)
+   \right]^{-1},
+
+where :math:`\theta_{\rm cap}` and :math:`\alpha_{\rm cap}` are inferred from
+the priors ``log_host_capture_scale_arcsec`` and ``host_capture_slope``. Bands
+without aperture or PSF metadata are treated as full-capture measurements,
+:math:`\eta_b = 1`.
+
+The model flux density compared to photometric band :math:`b` is therefore
+
+.. math::
+
+   F_b^{\rm model}
+   =
+   F_b^{\rm compact}
+   + \eta_b F_b^{\rm extended}.
+
+``jaxsedfit`` then applies the configured broadband likelihood to
+:math:`F_b^{\rm model}`. For the default Gaussian family, detections are
+approximately
+
+.. math::
+
+   F_b^{\rm obs}
+   \sim
+   \mathcal{N}
+   \left(
+   F_b^{\rm model},
+   \sigma_{{\rm eff},b}
+   \right),
+
+with :math:`\sigma_{{\rm eff},b}` including the catalog flux-density error and
+the configured systematic/model-error terms. If
+``cfg.likelihood.likelihood_family = "student_t"``, the same captured model
+flux is used inside the Student-t likelihood. Upper limits use the configured
+one-sided photometric likelihood.
+
+For joint spectrum+SED fitting, the spectrum gets its own capture fraction
+from :class:`jaxsedfit.SpectroscopyData`:
+
+.. code-block:: python
+
+   cfg.spectroscopy_list[0].aperture_diameter_arcsec = 3.0  # SDSS fiber
+   cfg.spectroscopy_config.fit_scale = True
+   cfg.likelihood.use_host_capture_model = True
+
+At each spectral pixel,
+
+.. math::
+
+   f_{\lambda}^{\rm spec}
+   =
+   s_{\rm spec}
+   \left[
+   f_{\lambda}^{\rm compact}
+   + \eta_{\rm spec} f_{\lambda}^{\rm extended}
+   \right],
+
+where :math:`\eta_{\rm spec}` is computed from the fiber/slit aperture or PSF
+metadata and :math:`s_{\rm spec}` is the optional gray spectral scale inferred
+when ``cfg.spectroscopy_config.fit_scale = True``. This lets the broadband
+photometry and the spectrum be different aperture views of the same intrinsic
+source, rather than forcing PSF photometry, large-beam photometry, and fiber
+spectroscopy to contain the same host fraction.
+
 Custom filter curves can be supplied directly:
 
 .. code-block:: python
@@ -412,6 +508,106 @@ methods:
 
    result.plot_corner()
    fitter.plot_sed(output_path="sed_fit.png")
+
+Photometric apertures, PSFs, and spectra
+----------------------------------------
+
+SED photometry often mixes measurements with different effective apertures:
+SDSS PSF fluxes, 2MASS point-source photometry, AllWISE profile-fit
+photometry, fixed-aperture measurements, catalog ``AUTO``/total-like fluxes,
+and sometimes a spectrum from a fiber or slit. ``jaxsedfit`` handles this with
+an empirical extended-light capture model. The model is disabled by default;
+enable it when the photometry or spectroscopy does not all measure the same
+aperture.
+
+.. code-block:: python
+
+   cfg.likelihood.use_host_capture_model = True
+
+The capture model is driven by explicit angular-size metadata, not by the text
+label in ``photometry_method``. For each photometric point, ``jaxsedfit`` uses
+``aperture_diameter_arcsec`` when supplied; otherwise it uses
+``psf_fwhm_arcsec``. If neither is supplied for a band, that band is treated as
+total/full-capture photometry.
+
+Use ``photometry_method`` to record what kind of catalog measurement was used:
+``psf`` means point-source/PSF-like photometry, ``profile`` means profile-fit
+photometry such as AllWISE ``W?mag``, ``aperture`` means an explicit fixed
+aperture, ``auto`` means Kron/AUTO-like photometry, ``model``/``cmodel``/
+``petrosian`` mean extended-source model measurements, and ``catalog`` is a
+fallback for catalog fluxes whose aperture semantics are not known.
+
+.. code-block:: python
+
+   cfg.photometry = PhotometryData(
+       filter_names=[
+           "u_sdss", "g_sdss", "r_sdss", "i_sdss", "z_sdss",
+           "J_2mass", "H_2mass", "Ks_2mass", "W1", "W2",
+       ],
+       fluxes=[...],
+       errors=[...],
+       # Metadata labels are useful for provenance and plotting, but they do
+       # not by themselves change the aperture model.
+       photometry_method=[
+           "psf", "psf", "psf", "psf", "psf",
+           "psf", "psf", "psf", "profile", "profile",
+       ],
+       # SDSS and 2MASS point-source measurements use the PSF scale. AllWISE
+       # profile-fit measurements use the WISE beam/profile scale.
+       psf_fwhm_arcsec=[
+           1.4, 1.4, 1.4, 1.4, 1.4,
+           2.5, 2.5, 2.5, 6.08, 6.84,
+       ],
+       aperture_diameter_arcsec=[None] * 10,
+   )
+
+Internally, the model builds intrinsic total source components first. It then
+applies an aperture-dependent capture fraction only to extended components
+such as the stellar host, host dust, nebular emission, and narrow-line-like
+emission. Compact AGN continuum and broad-line-like components are not reduced
+by the host capture fraction. This is the intended behavior for SED-only fits:
+small-PSF optical points can see less host light than large-beam infrared
+points while still sharing one intrinsic physical source model.
+
+For joint spectrum+SED fitting, provide the same kind of aperture metadata for
+the spectrum. For example, an SDSS spectrum should usually use the 3 arcsec
+fiber diameter:
+
+.. code-block:: python
+
+   from jaxsedfit import SpectroscopyData
+
+   cfg.spectroscopy_list = [
+       SpectroscopyData(
+           wave_obs=wave_obs,
+           fluxes=spec_flux,
+           errors=spec_err,
+           instrument="sdss",
+           aperture_diameter_arcsec=3.0,
+       )
+   ]
+   cfg.spectroscopy_config.enabled = True
+   cfg.spectroscopy_config.fit_scale = True
+   cfg.likelihood.use_host_capture_model = True
+
+With this setup the photometry and spectrum are treated as different views of
+the same intrinsic source:
+
+* SDSS PSF photometry measures compact AGN light plus a PSF-captured fraction
+  of the extended host.
+* The SDSS spectrum measures compact AGN light plus a fiber-captured fraction
+  of the extended host.
+* 2MASS and AllWISE catalog photometry are finite-resolution measurements; they
+  use their PSF/profile scales rather than being automatically treated as total
+  host measurements.
+* Larger-aperture or total-like catalog photometry can approach the full host
+  contribution when supplied with large aperture metadata, or when no spatial
+  scale is supplied.
+
+``cfg.spectroscopy_config.fit_scale`` adds a gray spectral calibration/fiber
+scale parameter on top of the component capture model. This is useful because
+real spectra can have additional absolute calibration or slit-loss offsets
+relative to broadband photometry.
 
 When ``save_result=True`` or :meth:`jaxsedfit.FitResult.save` is used,
 ``jaxsedfit`` writes an HDF5 posterior bundle named
