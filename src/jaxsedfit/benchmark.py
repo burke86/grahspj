@@ -98,23 +98,49 @@ def _package_root() -> Path:
 
 
 def _package_resource_path(relpath: str) -> Path:
-    """Return an absolute path to a packaged benchmark resource."""
+    """Return an absolute path to a packaged benchmark resource.
+
+    Parameters
+    ----------
+    relpath : object
+        relpath value.
+    """
     return Path(str(resources.files("jaxsedfit").joinpath(relpath)))
 
 
 def chimera_data_dir(root: str | Path | None = None) -> Path:
-    """Return the Chimera benchmark data directory."""
+    """Return the Chimera benchmark data directory.
+
+    Parameters
+    ----------
+    root : object
+        root value.
+    """
     base = Path(root) if root is not None else _package_root()
     return base / "data" / "chimeras-2023-10-11"
 
 
 def subset_ids_path(root: str | Path | None = None) -> Path:
-    """Return the deterministic Chimera subset fixture path."""
+    """Return the deterministic Chimera subset fixture path.
+
+    Parameters
+    ----------
+    root : object
+        root value.
+    """
     return chimera_data_dir(root) / "benchmark_subset_ids.txt"
 
 
 def _load_filter_curve_from_text(path: Path, name: str) -> FilterCurve:
-    """Load a two-column transmission curve from plain text."""
+    """Load a two-column transmission curve from plain text.
+
+    Parameters
+    ----------
+    path : object
+        path value.
+    name : object
+        name value.
+    """
     data = np.loadtxt(path, comments="#")
     if data.ndim != 2 or data.shape[1] < 2:
         raise ValueError(f"Filter file {path} does not contain two-column transmission data.")
@@ -202,7 +228,15 @@ def _build_chimera_agn_config() -> AGNConfig:
 
 
 def _fits_rows_by_id(path: Path, columns: Iterable[str]) -> dict[str, dict[str, Any]]:
-    """Read selected FITS columns and index rows by object id."""
+    """Read selected FITS columns and index rows by object id.
+
+    Parameters
+    ----------
+    path : object
+        path value.
+    columns : object
+        columns value.
+    """
     with fits.open(path, memmap=True) as hdul:
         data = hdul[1].data
         out: dict[str, dict[str, Any]] = {}
@@ -219,7 +253,13 @@ def _fits_rows_by_id(path: Path, columns: Iterable[str]) -> dict[str, dict[str, 
 
 
 def load_chimera_benchmark_dataset(root: str | Path | None = None) -> ChimeraBenchmarkDataset:
-    """Load and join the Chimera photometry and truth tables."""
+    """Load and join the Chimera photometry and truth tables.
+
+    Parameters
+    ----------
+    root : object
+        root value.
+    """
     data_dir = chimera_data_dir(root)
     phot_path = data_dir / "chimeras-grahsp.fits"
     truth_path = data_dir / "chimeras-fullinfo.fits"
@@ -254,7 +294,15 @@ def load_chimera_benchmark_dataset(root: str | Path | None = None) -> ChimeraBen
 
 
 def select_chimera_subset(dataset: ChimeraBenchmarkDataset, root: str | Path | None = None) -> list[dict[str, Any]]:
-    """Select the deterministic benchmark subset from the full Chimera table."""
+    """Select the deterministic benchmark subset from the full Chimera table.
+
+    Parameters
+    ----------
+    dataset : object
+        dataset value.
+    root : object
+        root value.
+    """
     fixture = subset_ids_path(root)
     print(f"[benchmark] Loading deterministic subset from {fixture}")
     subset_ids = [line.strip() for line in fixture.read_text(encoding="utf-8").splitlines() if line.strip()]
@@ -268,7 +316,17 @@ def select_chimera_subset(dataset: ChimeraBenchmarkDataset, root: str | Path | N
 
 
 def build_chimera_fit_config(row: dict[str, Any], dsps_ssp_fn: str = "tempdata.h5", base_config: FitConfig | None = None) -> FitConfig:
-    """Build a jaxsedfit FitConfig for one Chimera benchmark row."""
+    """Build a jaxsedfit FitConfig for one Chimera benchmark row.
+
+    Parameters
+    ----------
+    row : object
+        row value.
+    dsps_ssp_fn : object
+        dsps_ssp_fn value.
+    base_config : object
+        base_config value.
+    """
     if base_config is None:
         cfg = FitConfig(
             observation=Observation(object_id=str(row["id"]), redshift=float(row["redshift"])),
@@ -326,12 +384,30 @@ def build_chimera_fit_config(row: dict[str, Any], dsps_ssp_fn: str = "tempdata.h
 
 
 def _estimate_chimera_stellar_mass_prior(row: dict[str, Any]):
-    """Seed a simple stellar-mass prior from one Chimera photometric row."""
+    """Seed a simple stellar-mass prior from one Chimera photometric row.
+
+
+    Parameters
+    ----------
+    row : object
+        row value.
+    """
     return dist.StudentT(df=5.0, loc=10.0, scale=2.0)
 
 
 def _weighted_quantile(values: np.ndarray, weights: np.ndarray, q: float) -> float:
-    """Compute one weighted quantile for finite values and weights."""
+    """Compute one weighted quantile for finite values and weights.
+
+
+    Parameters
+    ----------
+    values : object
+        values value.
+    weights : object
+        weights value.
+    q : object
+        q value.
+    """
     order = np.argsort(values)
     values = values[order]
     weights = weights[order]
@@ -340,7 +416,17 @@ def _weighted_quantile(values: np.ndarray, weights: np.ndarray, q: float) -> flo
 
 
 def compute_weighted_metrics(log_mass_fit: np.ndarray, log_mass_truth: np.ndarray, weights: np.ndarray) -> dict[str, float]:
-    """Compute weighted stellar-mass recovery metrics for benchmark reporting."""
+    """Compute weighted stellar-mass recovery metrics for benchmark reporting.
+
+    Parameters
+    ----------
+    log_mass_fit : object
+        log_mass_fit value.
+    log_mass_truth : object
+        log_mass_truth value.
+    weights : object
+        weights value.
+    """
     resid = log_mass_fit - log_mass_truth
     w = np.asarray(weights, dtype=float)
     w = w / np.sum(w)
@@ -364,7 +450,15 @@ def compute_weighted_metrics(log_mass_fit: np.ndarray, log_mass_truth: np.ndarra
 
 
 def _group_metrics(rows: list[dict[str, Any]], group_key: str) -> dict[str, dict[str, float]]:
-    """Compute weighted metrics separately for each value of a grouping key."""
+    """Compute weighted metrics separately for each value of a grouping key.
+
+    Parameters
+    ----------
+    rows : object
+        rows value.
+    group_key : object
+        group_key value.
+    """
     out: dict[str, dict[str, float]] = {}
     groups = sorted(set(row[group_key] for row in rows))
     for key in groups:
@@ -380,18 +474,38 @@ def _group_metrics(rows: list[dict[str, Any]], group_key: str) -> dict[str, dict
 
 
 def _redshift_bin_label(z: float, edges: np.ndarray) -> str:
-    """Return a readable redshift-bin label for one value and edge array."""
+    """Return a readable redshift-bin label for one value and edge array.
+
+    Parameters
+    ----------
+    z : object
+        z value.
+    edges : object
+        edges value.
+    """
     idx = min(len(edges) - 2, max(0, int(np.searchsorted(edges, z, side="right") - 1)))
     return f"{edges[idx]:.3f}-{edges[idx+1]:.3f}"
 
 
 def _stable_row_seed(row_id: str) -> int:
-    """Derive a stable per-row seed from the benchmark base seed and row id."""
+    """Derive a stable per-row seed from the benchmark base seed and row id.
+
+    Parameters
+    ----------
+    row_id : object
+        row_id value.
+    """
     return int((DEFAULT_RANDOM_SEED + zlib.crc32(str(row_id).encode("utf-8"))) % (2**31 - 1))
 
 
 def _reduced_chi2_for_fit(fitter: Any) -> float:
-    """Compute reduced chi-square using the model's effective median variance."""
+    """Compute reduced chi-square using the model's effective median variance.
+
+    Parameters
+    ----------
+    fitter : object
+        fitter value.
+    """
     pred = fitter.predict()
     pred_fluxes = np.median(np.asarray(pred["pred_fluxes"], dtype=float), axis=0)
     agn_fluxes = np.median(np.asarray(pred["agn_fluxes"], dtype=float), axis=0) if "agn_fluxes" in pred else np.zeros_like(pred_fluxes)
@@ -450,7 +564,15 @@ def _reduced_chi2_for_fit(fitter: Any) -> float:
 
 
 def _failed_benchmark_row(task: _BenchmarkWorkerTask, exc: Exception) -> dict[str, Any]:
-    """Build a NaN-filled benchmark row for one failed fit."""
+    """Build a NaN-filled benchmark row for one failed fit.
+
+    Parameters
+    ----------
+    task : object
+        task value.
+    exc : object
+        exc value.
+    """
     enriched = dict(task.row)
     enriched["log_stellar_mass_fit"] = float("nan")
     enriched["log_stellar_mass_fit_p16"] = float("nan")
@@ -466,7 +588,15 @@ def _failed_benchmark_row(task: _BenchmarkWorkerTask, exc: Exception) -> dict[st
 
 
 def _run_single_chimera_fit(task: _BenchmarkWorkerTask, fitter_cls=None) -> tuple[int, dict[str, Any]]:
-    """Run one Chimera benchmark fit and return an ordered row payload."""
+    """Run one Chimera benchmark fit and return an ordered row payload.
+
+    Parameters
+    ----------
+    task : object
+        task value.
+    fitter_cls : object
+        fitter_cls value.
+    """
     if fitter_cls is None:
         from .core import JAXSEDFit
 
@@ -515,7 +645,15 @@ def _run_single_chimera_fit(task: _BenchmarkWorkerTask, fitter_cls=None) -> tupl
 
 
 def _write_artifact_table(path: Path, rows: list[dict[str, Any]]) -> None:
-    """Write per-object benchmark results to a CSV artifact table."""
+    """Write per-object benchmark results to a CSV artifact table.
+
+    Parameters
+    ----------
+    path : object
+        path value.
+    rows : object
+        rows value.
+    """
     fieldnames = [
         "id",
         "ID_COSMOS",
@@ -541,7 +679,15 @@ def _write_artifact_table(path: Path, rows: list[dict[str, Any]]) -> None:
 
 
 def _write_plots(output_dir: Path, rows: list[dict[str, Any]]) -> None:
-    """Write the benchmark scatter and residual diagnostic plots."""
+    """Write the benchmark scatter and residual diagnostic plots.
+
+    Parameters
+    ----------
+    output_dir : object
+        output_dir value.
+    rows : object
+        rows value.
+    """
     import matplotlib.pyplot as plt
 
     truth = np.array([row["log_stellar_mass_truth"] for row in rows], dtype=float)
@@ -630,7 +776,45 @@ def run_chimera_mass_benchmark(
     nuts_chains: int = DEFAULT_BENCHMARK_NUTS_CHAINS,
     target_accept_prob: float = 0.85,
 ) -> dict[str, Any]:
-    """Run the Chimera stellar-mass recovery benchmark end to end."""
+    """Run the Chimera stellar-mass recovery benchmark end to end.
+
+    Parameters
+    ----------
+    root : object
+        root value.
+    output_dir : object
+        output_dir value.
+    dsps_ssp_fn : object
+        dsps_ssp_fn value.
+    fitter_cls : object
+        fitter_cls value.
+    base_config : object
+        base_config value.
+    max_weighted_mae : object
+        max_weighted_mae value.
+    max_abs_weighted_bias : object
+        max_abs_weighted_bias value.
+    min_finite_fraction : object
+        min_finite_fraction value.
+    limit : object
+        limit value.
+    num_workers : object
+        num_workers value.
+    method : object
+        method value.
+    optax_steps : object
+        optax_steps value.
+    optax_lr : object
+        optax_lr value.
+    nuts_warmup : object
+        nuts_warmup value.
+    nuts_samples : object
+        nuts_samples value.
+    nuts_chains : object
+        nuts_chains value.
+    target_accept_prob : object
+        target_accept_prob value.
+    """
     if fitter_cls is None:
         from .core import JAXSEDFit
 
@@ -804,7 +988,13 @@ def run_chimera_mass_benchmark(
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Run the Chimera benchmark CLI entrypoint."""
+    """Run the Chimera benchmark CLI entrypoint.
+
+    Parameters
+    ----------
+    argv : object
+        argv value.
+    """
     parser = argparse.ArgumentParser(description="Run the Chimera stellar-mass recovery benchmark.")
     parser.add_argument("--output-dir", default="benchmark_outputs", help="Directory for benchmark artifacts.")
     parser.add_argument("--dsps-ssp-fn", default="tempdata.h5", help="Path to the DSPS SSP HDF5 file.")

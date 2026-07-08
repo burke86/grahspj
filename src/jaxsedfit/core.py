@@ -27,7 +27,13 @@ class JAXSEDFit:
     _POSTERIOR_BUNDLE_SUFFIX = ".h5"
 
     def __init__(self, config: FitConfig):
-        """Initialize the fitter and build its static model context."""
+        """Initialize the fitter and build its static model context.
+
+        Parameters
+        ----------
+        config : object
+            config value.
+        """
         self.config = config
         self.context: ModelContext = build_model_context(config)
         self._fit_state = _FitState()
@@ -47,6 +53,13 @@ class JAXSEDFit:
 
     @map_result.setter
     def map_result(self, value: dict[str, Any] | None) -> None:
+        """map_result helper.
+
+        Parameters
+        ----------
+        value : object
+            value value.
+        """
         state = self._ensure_fit_state()
         state.map_result = value
         if value is not None:
@@ -59,6 +72,13 @@ class JAXSEDFit:
 
     @nuts_result.setter
     def nuts_result(self, value: dict[str, Any] | None) -> None:
+        """nuts_result helper.
+
+        Parameters
+        ----------
+        value : object
+            value value.
+        """
         state = self._ensure_fit_state()
         state.nuts_result = value
         if value is not None:
@@ -71,6 +91,13 @@ class JAXSEDFit:
 
     @ns_result.setter
     def ns_result(self, value: dict[str, Any] | None) -> None:
+        """ns_result helper.
+
+        Parameters
+        ----------
+        value : object
+            value value.
+        """
         state = self._ensure_fit_state()
         state.ns_result = value
         if value is not None:
@@ -83,6 +110,13 @@ class JAXSEDFit:
 
     @samples.setter
     def samples(self, value: dict[str, Any] | None) -> None:
+        """samples helper.
+
+        Parameters
+        ----------
+        value : object
+            value value.
+        """
         self._ensure_fit_state().samples = value
 
     @property
@@ -92,6 +126,13 @@ class JAXSEDFit:
 
     @predictive.setter
     def predictive(self, value: dict[str, Any] | None) -> None:
+        """predictive helper.
+
+        Parameters
+        ----------
+        value : object
+            value value.
+        """
         state = self._ensure_fit_state()
         state.predictive = value
         state.predictive_cache = None if value is None else {"plot:all": value}
@@ -103,6 +144,13 @@ class JAXSEDFit:
 
     @_plot_cache.setter
     def _plot_cache(self, value: dict[str, Any] | None) -> None:
+        """_plot_cache helper.
+
+        Parameters
+        ----------
+        value : object
+            value value.
+        """
         self._ensure_fit_state().plot_cache = value
 
     @property
@@ -112,6 +160,13 @@ class JAXSEDFit:
 
     @_saved_summary.setter
     def _saved_summary(self, value: Mapping[str, Any] | None) -> None:
+        """_saved_summary helper.
+
+        Parameters
+        ----------
+        value : object
+            value value.
+        """
         self._ensure_fit_state().summary = value
 
     @property
@@ -121,6 +176,13 @@ class JAXSEDFit:
 
     @_loaded_posterior_path.setter
     def _loaded_posterior_path(self, value: str | Path | None) -> None:
+        """_loaded_posterior_path helper.
+
+        Parameters
+        ----------
+        value : object
+            value value.
+        """
         self._ensure_fit_state().path = None if value is None else Path(value)
 
     def _reset_fit_state(self) -> None:
@@ -132,7 +194,15 @@ class JAXSEDFit:
         prior_config: dict[str, Any] | None = None,
         dsps_ssp_fn: str | None = None,
     ) -> None:
-        """Apply one-off fit-time overrides and rebuild context if required."""
+        """Apply one-off fit-time overrides and rebuild context if required.
+
+        Parameters
+        ----------
+        prior_config : object
+            prior_config value.
+        dsps_ssp_fn : object
+            dsps_ssp_fn value.
+        """
         rebuild_context = False
         if prior_config is not None:
             self.config.prior_config = _coerce_prior_config(prior_config)
@@ -163,7 +233,13 @@ class JAXSEDFit:
 
     @staticmethod
     def _prediction_kind(kind: str) -> str:
-        """Normalize the prediction product set name."""
+        """Normalize the prediction product set name.
+
+        Parameters
+        ----------
+        kind : object
+            kind value.
+        """
         normalized = str(kind).lower()
         aliases = {"full": "plot", "all": "plot", "sed": "plot", "photo": "photometry"}
         normalized = aliases.get(normalized, normalized)
@@ -173,7 +249,15 @@ class JAXSEDFit:
 
     @staticmethod
     def _subset_prediction_samples(samples: Mapping[str, Any], max_draws: int | None) -> dict[str, Any]:
-        """Return posterior samples optionally limited along the leading draw axis."""
+        """Return posterior samples optionally limited along the leading draw axis.
+
+        Parameters
+        ----------
+        samples : object
+            samples value.
+        max_draws : object
+            max_draws value.
+        """
         out: dict[str, Any] = {}
         n = None if max_draws is None else max(int(max_draws), 1)
         for key, value in samples.items():
@@ -183,12 +267,24 @@ class JAXSEDFit:
 
     @staticmethod
     def _median_prediction_samples(samples: Mapping[str, Any]) -> dict[str, Any]:
-        """Return one posterior draw built from per-site medians."""
+        """Return one posterior draw built from per-site medians.
+
+        Parameters
+        ----------
+        samples : object
+            samples value.
+        """
         return {key: np.expand_dims(np.asarray(value), axis=0) for key, value in median_mapping(samples).items()}
 
     @staticmethod
     def _predictive_return_sites(kind: str) -> list[str]:
-        """Return deterministic sites needed for a prediction product set."""
+        """Return deterministic sites needed for a prediction product set.
+
+        Parameters
+        ----------
+        kind : object
+            kind value.
+        """
         photometry_sites = [
             "pred_fluxes",
             "pred_spectrum_fluxes",
@@ -319,7 +415,19 @@ class JAXSEDFit:
         figure: Any = None,
         summary: dict[str, Any] | None = None,
     ) -> FitResult:
-        """Build a public result object from the current mirrored fit state."""
+        """Build a public result object from the current mirrored fit state.
+
+        Parameters
+        ----------
+        method : object
+            method value.
+        path : object
+            path value.
+        figure : object
+            figure value.
+        summary : object
+            summary value.
+        """
         state = self._ensure_fit_state()
         state.method = method
         if path is not None:
@@ -359,7 +467,21 @@ class JAXSEDFit:
         posterior_samples: Mapping[str, Any] | None = None,
         cache: bool = True,
     ) -> dict[str, Any]:
-        """Generate and cache predictive outputs from posterior samples."""
+        """Generate and cache predictive outputs from posterior samples.
+
+        Parameters
+        ----------
+        _state : object
+            _state value.
+        kind : object
+            kind value.
+        max_draws : object
+            max_draws value.
+        posterior_samples : object
+            posterior_samples value.
+        cache : object
+            cache value.
+        """
         state = self._ensure_fit_state() if _state is None else _state
         kind = self._prediction_kind(kind)
         samples = state.samples if posterior_samples is None else posterior_samples
@@ -389,7 +511,13 @@ class JAXSEDFit:
         self,
         progress_bar: bool = True,
     ):
-        """Run the requested inference path and optional plotting/saving helpers."""
+        """Run the requested inference path and optional plotting/saving helpers.
+
+        Parameters
+        ----------
+        progress_bar : object
+            progress_bar value.
+        """
         inference = self.config.inference
         output = self.config.output
         method = str(inference.method).lower()
@@ -507,7 +635,23 @@ class JAXSEDFit:
         rng_seed: int,
         init_values: dict[str, Any] | None = None,
     ) -> tuple[Any, dict[str, Any]]:
-        """Run one Optax/NumPyro AutoDelta MAP stage."""
+        """Run one Optax/NumPyro AutoDelta MAP stage.
+
+        Parameters
+        ----------
+        model_fn : object
+            model_fn value.
+        steps : object
+            steps value.
+        learning_rate : object
+            learning_rate value.
+        progress_bar : object
+            progress_bar value.
+        rng_seed : object
+            rng_seed value.
+        init_values : object
+            init_values value.
+        """
         import optax
         from numpyro.optim import optax_to_numpyro
 
@@ -530,7 +674,21 @@ class JAXSEDFit:
         staged: bool | None = None,
         staged_steps: int | None = None,
     ):
-        """Run the Optax/NumPyro MAP optimization path."""
+        """Run the Optax/NumPyro MAP optimization path.
+
+        Parameters
+        ----------
+        steps : object
+            steps value.
+        learning_rate : object
+            learning_rate value.
+        progress_bar : object
+            progress_bar value.
+        staged : object
+            staged value.
+        staged_steps : object
+            staged_steps value.
+        """
         self._reset_fit_state()
         steps = int(self.config.inference.map_steps if steps is None else steps)
         learning_rate = float(self.config.inference.learning_rate if learning_rate is None else learning_rate)
@@ -586,7 +744,27 @@ class JAXSEDFit:
         use_map_init: bool = True,
         progress_bar: bool = True,
     ):
-        """Run NUTS sampling, optionally initializing from the MAP solution."""
+        """Run NUTS sampling, optionally initializing from the MAP solution.
+
+        Parameters
+        ----------
+        num_warmup : object
+            num_warmup value.
+        num_samples : object
+            num_samples value.
+        num_chains : object
+            num_chains value.
+        target_accept_prob : object
+            target_accept_prob value.
+        dense_mass : object
+            dense_mass value.
+        max_tree_depth : object
+            max_tree_depth value.
+        use_map_init : object
+            use_map_init value.
+        progress_bar : object
+            progress_bar value.
+        """
         if use_map_init and self.map_result is None:
             self.fit_map(progress_bar=progress_bar)
         map_result = self.map_result
@@ -637,7 +815,47 @@ class JAXSEDFit:
         ns_resamples: int | None = None,
         progress_bar: bool = True,
     ):
-        """Run full-model nested sampling and resample equal-weight posterior draws."""
+        """Run full-model nested sampling and resample equal-weight posterior draws.
+
+        Parameters
+        ----------
+        num_live_points : object
+            num_live_points value.
+        max_samples : object
+            max_samples value.
+        dlogz : object
+            dlogz value.
+        num_resamples : object
+            num_resamples value.
+        difficult_model : object
+            difficult_model value.
+        parameter_estimation : object
+            parameter_estimation value.
+        num_parallel_workers : object
+            num_parallel_workers value.
+        init_efficiency_threshold : object
+            init_efficiency_threshold value.
+        max_likelihood_evals : object
+            max_likelihood_evals value.
+        efficiency_threshold : object
+            efficiency_threshold value.
+        ns_difficult_model : object
+            ns_difficult_model value.
+        ns_parameter_estimation : object
+            ns_parameter_estimation value.
+        ns_num_parallel_workers : object
+            ns_num_parallel_workers value.
+        ns_init_efficiency_threshold : object
+            ns_init_efficiency_threshold value.
+        ns_max_likelihood_evals : object
+            ns_max_likelihood_evals value.
+        ns_efficiency_threshold : object
+            ns_efficiency_threshold value.
+        ns_resamples : object
+            ns_resamples value.
+        progress_bar : object
+            progress_bar value.
+        """
         self._reset_fit_state()
         NestedSampler = _get_nested_sampler_cls()
 
@@ -734,6 +952,17 @@ class JAXSEDFit:
 
         ``kind="photometry"`` returns lightweight photometry/spectrum products.
         ``kind="plot"`` returns the full component SED products used by plotting.
+
+        Parameters
+        ----------
+        posterior : object
+            posterior value.
+        kind : object
+            kind value.
+        max_draws : object
+            max_draws value.
+        _state : object
+            _state value.
         """
         state = self._ensure_fit_state() if _state is None else _state
         kind = self._prediction_kind(kind)
@@ -750,7 +979,17 @@ class JAXSEDFit:
         kind: str = "plot",
         _state: _FitState | None = None,
     ) -> dict[str, Any]:
-        """Evaluate predictive products once at the posterior median parameters."""
+        """Evaluate predictive products once at the posterior median parameters.
+
+        Parameters
+        ----------
+        posterior : object
+            posterior value.
+        kind : object
+            kind value.
+        _state : object
+            _state value.
+        """
         state = self._ensure_fit_state() if _state is None else _state
         if state.samples is None:
             raise RuntimeError("No fitted posterior available. Run fit_map(), fit_nuts(), or fit_ns() first.")
@@ -763,7 +1002,13 @@ class JAXSEDFit:
         )
 
     def recovered_log_stellar_mass(self, *, _state: _FitState | None = None) -> float:
-        """Return the median recovered stellar mass from the fitted posterior."""
+        """Return the median recovered stellar mass from the fitted posterior.
+
+        Parameters
+        ----------
+        _state : object
+            _state value.
+        """
         state = self._ensure_fit_state() if _state is None else _state
         if state.samples is not None and "log_stellar_mass" in state.samples:
             return float(np.median(np.asarray(state.samples["log_stellar_mass"], dtype=float)))
@@ -772,7 +1017,13 @@ class JAXSEDFit:
         raise RuntimeError("No recovered stellar mass available. Run fit_map(), fit_nuts(), or fit_ns() first.")
 
     def summary(self, *, _state: _FitState | None = None) -> dict[str, Any]:
-        """Summarize posterior medians and selected derived quantities."""
+        """Summarize posterior medians and selected derived quantities.
+
+        Parameters
+        ----------
+        _state : object
+            _state value.
+        """
         state = self._ensure_fit_state() if _state is None else _state
         if state.samples is None:
             raise RuntimeError("No fitted posterior available.")
@@ -818,7 +1069,17 @@ class JAXSEDFit:
 
     @classmethod
     def _write_hdf5_node(cls, parent, name, value):
-        """Write one recursively serialized Python value into an HDF5 group."""
+        """Write one recursively serialized Python value into an HDF5 group.
+
+        Parameters
+        ----------
+        parent : object
+            parent value.
+        name : object
+            name value.
+        value : object
+            value value.
+        """
         if value is None:
             grp = parent.create_group(name)
             grp.attrs["node_type"] = "none"
@@ -881,7 +1142,15 @@ class JAXSEDFit:
 
     @classmethod
     def _read_hdf5_node(cls, parent, name):
-        """Read one recursively serialized Python value from an HDF5 group."""
+        """Read one recursively serialized Python value from an HDF5 group.
+
+        Parameters
+        ----------
+        parent : object
+            parent value.
+        name : object
+            name value.
+        """
         node = parent[name]
         if isinstance(node, h5py.Dataset):
             node_type = node.attrs.get("node_type", "ndarray")
@@ -918,7 +1187,15 @@ class JAXSEDFit:
 
     @staticmethod
     def _write_array_group(parent, values: dict[str, Any]) -> None:
-        """Write an array mapping as compressed HDF5 datasets."""
+        """Write an array mapping as compressed HDF5 datasets.
+
+        Parameters
+        ----------
+        parent : object
+            parent value.
+        values : object
+            values value.
+        """
         for name, value in values.items():
             arr = np.asarray(value)
             ds_kwargs = {}
@@ -929,7 +1206,15 @@ class JAXSEDFit:
 
     @classmethod
     def _posterior_bundle_path(cls, path: str | Path | None, object_id: str) -> Path:
-        """Resolve an output directory or explicit HDF5 path."""
+        """Resolve an output directory or explicit HDF5 path.
+
+        Parameters
+        ----------
+        path : object
+            path value.
+        object_id : object
+            object_id value.
+        """
         resolved = Path("." if path is None else path)
         if resolved.suffix == cls._POSTERIOR_BUNDLE_SUFFIX:
             resolved.parent.mkdir(parents=True, exist_ok=True)
@@ -938,7 +1223,15 @@ class JAXSEDFit:
         return resolved / f"{object_id}_samples{cls._POSTERIOR_BUNDLE_SUFFIX}"
 
     def save(self, output_dir: str | Path | None = None, *, _state: _FitState | None = None) -> Path:
-        """Serialize config, posterior samples, and predictive outputs to HDF5."""
+        """Serialize config, posterior samples, and predictive outputs to HDF5.
+
+        Parameters
+        ----------
+        output_dir : object
+            output_dir value.
+        _state : object
+            _state value.
+        """
         state = self._ensure_fit_state() if _state is None else _state
         out = self._posterior_bundle_path(output_dir, self.config.observation.object_id)
         samples = {k: np.asarray(v) for k, v in (state.samples or {}).items()}
@@ -958,7 +1251,14 @@ class JAXSEDFit:
 
     @staticmethod
     def _resolve_posterior_path(path: str | Path | None = None) -> Path:
-        """Resolve a saved HDF5 posterior path or unique posterior in a directory."""
+        """Resolve a saved HDF5 posterior path or unique posterior in a directory.
+
+
+        Parameters
+        ----------
+        path : object
+            path value.
+        """
         if path is None:
             path = "."
         resolved = Path(path)
@@ -1022,7 +1322,13 @@ class JAXSEDFit:
 
     @classmethod
     def load_result(cls, path: str | Path | None = None) -> FitResult:
-        """Load a posterior bundle and wrap it in a :class:`FitResult`."""
+        """Load a posterior bundle and wrap it in a :class:`FitResult`.
+
+        Parameters
+        ----------
+        path : object
+            path value.
+        """
         fitter = cls.load(path)
         return fitter._make_result(
             method="loaded",
@@ -1037,7 +1343,19 @@ class JAXSEDFit:
         show: bool = False,
         annotate_band_names: bool = True,
     ):
-        """Plot the fitted SED using the package plotting helper."""
+        """Plot the fitted SED using the package plotting helper.
+
+        Parameters
+        ----------
+        output_path : object
+            output_path value.
+        posterior : object
+            posterior value.
+        show : object
+            show value.
+        annotate_band_names : object
+            annotate_band_names value.
+        """
         from .plotting import plot_fit_sed
 
         return plot_fit_sed(
@@ -1058,7 +1376,25 @@ class JAXSEDFit:
         show: bool = False,
         **corner_kwargs,
     ):
-        """Plot scalar posterior samples with the corner package."""
+        """Plot scalar posterior samples with the corner package.
+
+        Parameters
+        ----------
+        output_path : object
+            output_path value.
+        params : object
+            params value.
+        max_params : object
+            max_params value.
+        labels : object
+            labels value.
+        truths : object
+            truths value.
+        show : object
+            show value.
+        **corner_kwargs : dict
+            Additional keyword arguments.
+        """
         from .plotting import plot_corner
 
         return plot_corner(
@@ -1079,7 +1415,19 @@ class JAXSEDFit:
         max_params: int | None = 12,
         show: bool = False,
     ):
-        """Plot scalar posterior sample traces, preserving chains when available."""
+        """Plot scalar posterior sample traces, preserving chains when available.
+
+        Parameters
+        ----------
+        output_path : object
+            output_path value.
+        params : object
+            params value.
+        max_params : object
+            max_params value.
+        show : object
+            show value.
+        """
         from .plotting import plot_trace
 
         return plot_trace(
@@ -1092,7 +1440,13 @@ class JAXSEDFit:
 
     @staticmethod
     def _posterior_median_array(value: Any) -> np.ndarray:
-        """Return a median predictive array over the leading sample axis."""
+        """Return a median predictive array over the leading sample axis.
+
+        Parameters
+        ----------
+        value : object
+            value value.
+        """
         arr = np.asarray(value, dtype=float)
         if arr.ndim == 0 or arr.size == 0:
             return arr
@@ -1100,7 +1454,17 @@ class JAXSEDFit:
 
     @staticmethod
     def _mjy_to_rest_flambda_1e17(wave_obs: np.ndarray, flux_mjy: np.ndarray, redshift: float) -> np.ndarray:
-        """Convert observed-frame mJy to jaxqsofit rest-frame f_lambda units."""
+        """Convert observed-frame mJy to jaxqsofit rest-frame f_lambda units.
+
+        Parameters
+        ----------
+        wave_obs : object
+            wave_obs value.
+        flux_mjy : object
+            flux_mjy value.
+        redshift : object
+            redshift value.
+        """
         wave_obs = np.asarray(wave_obs, dtype=float)
         flux_mjy = np.asarray(flux_mjy, dtype=float)
         c_ang_s = 2.99792458e18
@@ -1109,7 +1473,15 @@ class JAXSEDFit:
 
     @staticmethod
     def _obs_flambda_to_rest_flambda_1e17(flux_lambda_obs: np.ndarray, redshift: float) -> np.ndarray:
-        """Convert observed-frame W/m^2/Angstrom to jaxqsofit rest-frame units."""
+        """Convert observed-frame W/m^2/Angstrom to jaxqsofit rest-frame units.
+
+        Parameters
+        ----------
+        flux_lambda_obs : object
+            flux_lambda_obs value.
+        redshift : object
+            redshift value.
+        """
         flux_lambda_obs = np.asarray(flux_lambda_obs, dtype=float)
         return flux_lambda_obs * 1.0e3 * (1.0 + float(redshift)) / 1.0e-17
 
@@ -1124,7 +1496,27 @@ class JAXSEDFit:
         ylims: tuple[float, float] | None = None,
         **kwargs,
     ):
-        """Plot the joint spectral fit with jaxqsofit's spectrum plotter."""
+        """Plot the joint spectral fit with jaxqsofit's spectrum plotter.
+
+        Parameters
+        ----------
+        spectrum_index : object
+            spectrum_index value.
+        posterior : object
+            posterior value.
+        show_nebular_lines : object
+            show_nebular_lines value.
+        show_plot : object
+            show_plot value.
+        plot_residual : object
+            plot_residual value.
+        plot_legend : object
+            plot_legend value.
+        ylims : object
+            ylims value.
+        **kwargs : dict
+            Additional keyword arguments.
+        """
         if str(self.config.spectroscopy_config.backend).lower() != "jaxqsofit":
             raise RuntimeError("plot_jaxqsofit_spectrum requires SpectroscopyConfig.backend='jaxqsofit'.")
         if self.context.spec_wave_obs.size == 0:
@@ -1165,7 +1557,15 @@ class JAXSEDFit:
             host_capture = float(np.asarray(capture_fraction, dtype=float))
 
         def component(name: str, apply_scale: bool = True) -> np.ndarray:
-            """Return one posterior-median spectral component on the rest grid."""
+            """Return one posterior-median spectral component on the rest grid.
+
+            Parameters
+            ----------
+            name : object
+                name value.
+            apply_scale : object
+                apply_scale value.
+            """
             if name not in pred:
                 return np.zeros_like(wave_rest)
             comp_mjy = self._posterior_median_array(pred[name])[selected]
@@ -1174,7 +1574,15 @@ class JAXSEDFit:
             return self._mjy_to_rest_flambda_1e17(wave_obs, comp_mjy, z)
 
         def obs_sed_component(name: str, multiplier: float = 1.0) -> np.ndarray:
-            """Return one posterior-median observed SED component on the spectrum grid."""
+            """Return one posterior-median observed SED component on the spectrum grid.
+
+            Parameters
+            ----------
+            name : object
+                name value.
+            multiplier : object
+                multiplier value.
+            """
             if name not in pred or "obs_wave" not in pred:
                 return np.zeros_like(wave_rest)
             source_wave = np.asarray(self._posterior_median_array(pred["obs_wave"]), dtype=float)
@@ -1185,13 +1593,26 @@ class JAXSEDFit:
             return self._obs_flambda_to_rest_flambda_1e17(scale_factor * multiplier * flux_lambda, z)
 
         def keep_component(arr: np.ndarray) -> bool:
-            """Return True for finite, nonzero component arrays worth plotting."""
+            """Return True for finite, nonzero component arrays worth plotting.
+
+
+            Parameters
+            ----------
+            arr : object
+                arr value.
+            """
             finite = np.asarray(arr, dtype=float)
             finite = finite[np.isfinite(finite)]
             return finite.size > 0 and float(np.nanmax(np.abs(finite))) > 0.0
 
         def draw_scale(n_draws: int) -> np.ndarray:
-            """Return one spectrum-scale factor per posterior draw."""
+            """Return one spectrum-scale factor per posterior draw.
+
+            Parameters
+            ----------
+            n_draws : object
+                n_draws value.
+            """
             raw = np.asarray(pred.get("spectrum_scale_fit", scale_factor), dtype=float)
             if raw.ndim == 0:
                 return np.full(n_draws, float(raw), dtype=float)
@@ -1202,7 +1623,14 @@ class JAXSEDFit:
             return np.full(n_draws, scale_factor, dtype=float)
 
         def band_from_draws(draws: np.ndarray | None) -> tuple[np.ndarray, np.ndarray] | None:
-            """Return 16-84% bands for posterior draws on the plot wavelength grid."""
+            """Return 16-84% bands for posterior draws on the plot wavelength grid.
+
+
+            Parameters
+            ----------
+            draws : object
+                draws value.
+            """
             if draws is None:
                 return None
             arr = np.asarray(draws, dtype=float)
@@ -1211,7 +1639,15 @@ class JAXSEDFit:
             return tuple(np.nanpercentile(arr, [16.0, 84.0], axis=0))
 
         def spectrum_draws(name: str, apply_scale: bool = True) -> np.ndarray | None:
-            """Return spectral-component posterior draws in qsofit rest-frame units."""
+            """Return spectral-component posterior draws in qsofit rest-frame units.
+
+            Parameters
+            ----------
+            name : object
+                name value.
+            apply_scale : object
+                apply_scale value.
+            """
             if name not in pred:
                 return None
             arr = np.asarray(pred[name], dtype=float)
@@ -1233,7 +1669,15 @@ class JAXSEDFit:
             return self._mjy_to_rest_flambda_1e17(wave_obs[None, :], draws, z)
 
         def obs_sed_draws(name: str, multiplier: float = 1.0) -> np.ndarray | None:
-            """Return observed-SED posterior draws interpolated to the spectrum grid."""
+            """Return observed-SED posterior draws interpolated to the spectrum grid.
+
+            Parameters
+            ----------
+            name : object
+                name value.
+            multiplier : object
+                multiplier value.
+            """
             if name not in pred or "obs_wave" not in pred:
                 return None
             source_wave = np.asarray(self._posterior_median_array(pred["obs_wave"]), dtype=float)

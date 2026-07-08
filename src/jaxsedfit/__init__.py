@@ -72,7 +72,13 @@ __all__ = [
 
 
 def __getattr__(name):
-    """Lazily expose heavier public objects and helpers on first access."""
+    """Lazily expose heavier public objects and helpers on first access.
+
+    Parameters
+    ----------
+    name : object
+        name value.
+    """
     if name == "JAXSEDFit":
         from .core import JAXSEDFit
 

@@ -27,7 +27,13 @@ _CORNER_ONE_SIGMA_QUANTILES = (0.16, 0.5, 0.84)
 
 
 def _posterior_samples(fitter_or_samples: Any) -> Mapping[str, Any]:
-    """Return posterior samples from either a fitter object or sample mapping."""
+    """Return posterior samples from either a fitter object or sample mapping.
+
+    Parameters
+    ----------
+    fitter_or_samples : object
+        fitter_or_samples value.
+    """
     if isinstance(fitter_or_samples, Mapping):
         samples = fitter_or_samples
     else:
@@ -38,7 +44,13 @@ def _posterior_samples(fitter_or_samples: Any) -> Mapping[str, Any]:
 
 
 def _grouped_trace_samples(fitter_or_samples: Any) -> tuple[Mapping[str, Any], bool]:
-    """Return trace samples and whether they are grouped by MCMC chain."""
+    """Return trace samples and whether they are grouped by MCMC chain.
+
+    Parameters
+    ----------
+    fitter_or_samples : object
+        fitter_or_samples value.
+    """
     if not isinstance(fitter_or_samples, Mapping):
         nuts_result = getattr(fitter_or_samples, "nuts_result", None)
         if isinstance(nuts_result, Mapping):
@@ -49,7 +61,15 @@ def _grouped_trace_samples(fitter_or_samples: Any) -> tuple[Mapping[str, Any], b
 
 
 def _finite_scalar_sample_array(value: Any, *, grouped: bool) -> np.ndarray | None:
-    """Return a finite scalar sample array with the expected trace shape."""
+    """Return a finite scalar sample array with the expected trace shape.
+
+    Parameters
+    ----------
+    value : object
+        value value.
+    grouped : object
+        grouped value.
+    """
     arr = np.asarray(value, dtype=float)
     if grouped:
         if arr.ndim != 2:
@@ -62,7 +82,15 @@ def _finite_scalar_sample_array(value: Any, *, grouped: bool) -> np.ndarray | No
 
 
 def _has_dynamic_range(value: Any, *, grouped: bool) -> bool:
-    """Return whether a scalar sample site spans more than one value."""
+    """Return whether a scalar sample site spans more than one value.
+
+    Parameters
+    ----------
+    value : object
+        value value.
+    grouped : object
+        grouped value.
+    """
     arr = _finite_scalar_sample_array(value, grouped=grouped)
     if arr is None:
         return False
@@ -77,7 +105,19 @@ def _select_scalar_params(
     max_params: int | None,
     grouped: bool,
 ) -> list[str]:
-    """Select finite scalar sample sites for trace plotting."""
+    """Select finite scalar sample sites for trace plotting.
+
+    Parameters
+    ----------
+    samples : object
+        samples value.
+    params : object
+        params value.
+    max_params : object
+        max_params value.
+    grouped : object
+        grouped value.
+    """
     if params is not None:
         selected = [str(param) for param in params]
         for param in selected:
@@ -106,7 +146,19 @@ def _select_corner_params(
     max_params: int | None,
     grouped: bool,
 ) -> list[str]:
-    """Select finite scalar sample sites with dynamic range for corner plots."""
+    """Select finite scalar sample sites with dynamic range for corner plots.
+
+    Parameters
+    ----------
+    samples : object
+        samples value.
+    params : object
+        params value.
+    max_params : object
+        max_params value.
+    grouped : object
+        grouped value.
+    """
     if params is not None:
         selected = [str(param) for param in params]
         for param in selected:
@@ -131,7 +183,15 @@ def _select_corner_params(
 
 
 def _labels_for_params(params: list[str], labels: Mapping[str, str] | list[str] | tuple[str, ...] | None) -> list[str]:
-    """Return display labels aligned with the selected parameter names."""
+    """Return display labels aligned with the selected parameter names.
+
+    Parameters
+    ----------
+    params : object
+        params value.
+    labels : object
+        labels value.
+    """
     if labels is None:
         return params
     if isinstance(labels, Mapping):
@@ -143,7 +203,15 @@ def _labels_for_params(params: list[str], labels: Mapping[str, str] | list[str] 
 
 
 def _truths_for_params(params: list[str], truths: Mapping[str, float | None] | list[float | None] | tuple[float | None, ...] | None):
-    """Return optional truth markers aligned with the selected parameter names."""
+    """Return optional truth markers aligned with the selected parameter names.
+
+    Parameters
+    ----------
+    params : object
+        params value.
+    truths : object
+        truths value.
+    """
     if truths is None:
         return None
     if isinstance(truths, Mapping):
@@ -155,7 +223,17 @@ def _truths_for_params(params: list[str], truths: Mapping[str, float | None] | l
 
 
 def _sample_matrix(samples: Mapping[str, Any], params: list[str], *, grouped: bool) -> np.ndarray:
-    """Stack selected scalar posterior sample sites into a two-dimensional matrix."""
+    """Stack selected scalar posterior sample sites into a two-dimensional matrix.
+
+    Parameters
+    ----------
+    samples : object
+        samples value.
+    params : object
+        params value.
+    grouped : object
+        grouped value.
+    """
     columns = []
     draw_count = None
     for param in params:
@@ -181,7 +259,27 @@ def plot_corner(
     show: bool = False,
     **corner_kwargs,
 ):
-    """Render a corner plot for scalar posterior sample sites."""
+    """Render a corner plot for scalar posterior sample sites.
+
+    Parameters
+    ----------
+    fitter_or_samples : object
+        fitter_or_samples value.
+    output_path : object
+        output_path value.
+    params : object
+        params value.
+    max_params : object
+        max_params value.
+    labels : object
+        labels value.
+    truths : object
+        truths value.
+    show : object
+        show value.
+    **corner_kwargs : dict
+        Additional keyword arguments.
+    """
     try:
         import corner as corner_lib
     except ModuleNotFoundError as exc:  # pragma: no cover - depends on optional runtime install state
@@ -223,7 +321,21 @@ def plot_trace(
     max_params: int | None = 12,
     show: bool = False,
 ):
-    """Render per-parameter trace plots, preserving NUTS chains when available."""
+    """Render per-parameter trace plots, preserving NUTS chains when available.
+
+    Parameters
+    ----------
+    fitter_or_samples : object
+        fitter_or_samples value.
+    output_path : object
+        output_path value.
+    params : object
+        params value.
+    max_params : object
+        max_params value.
+    show : object
+        show value.
+    """
     samples, grouped = _grouped_trace_samples(fitter_or_samples)
     selected = _select_scalar_params(samples, params, max_params=max_params, grouped=grouped)
     chain_values = []
@@ -265,19 +377,45 @@ def plot_trace(
 
 
 def _median_site(pred: dict[str, Any], key: str) -> np.ndarray:
-    """Return the median draw for one predictive site."""
+    """Return the median draw for one predictive site.
+
+    Parameters
+    ----------
+    pred : object
+        pred value.
+    key : object
+        key value.
+    """
     arr = np.asarray(pred[key], dtype=float)
     return np.median(arr, axis=0) if arr.ndim > 1 else arr
 
 
 def _percentile_site(pred: dict[str, Any], key: str, q: float) -> np.ndarray:
-    """Return one percentile across predictive draws for a site."""
+    """Return one percentile across predictive draws for a site.
+
+    Parameters
+    ----------
+    pred : object
+        pred value.
+    key : object
+        key value.
+    q : object
+        q value.
+    """
     arr = np.asarray(pred[key], dtype=float)
     return np.percentile(arr, q, axis=0) if arr.ndim > 1 else arr
 
 
 def _site_sum(pred: dict[str, Any], keys: tuple[str, ...]) -> np.ndarray:
-    """Return the per-draw sum of available predictive sites."""
+    """Return the per-draw sum of available predictive sites.
+
+    Parameters
+    ----------
+    pred : object
+        pred value.
+    keys : object
+        keys value.
+    """
     arrays = [np.asarray(pred[key], dtype=float) for key in keys if key in pred]
     if not arrays:
         return np.asarray([])
@@ -285,26 +423,60 @@ def _site_sum(pred: dict[str, Any], keys: tuple[str, ...]) -> np.ndarray:
 
 
 def _median_site_sum(pred: dict[str, Any], keys: tuple[str, ...]) -> np.ndarray:
-    """Return the median draw of a summed component group."""
+    """Return the median draw of a summed component group.
+
+    Parameters
+    ----------
+    pred : object
+        pred value.
+    keys : object
+        keys value.
+    """
     arr = _site_sum(pred, keys)
     return np.median(arr, axis=0) if arr.ndim > 1 else arr
 
 
 def _percentile_site_sum(pred: dict[str, Any], keys: tuple[str, ...], q: float) -> np.ndarray:
-    """Return one percentile across predictive draws for a summed component group."""
+    """Return one percentile across predictive draws for a summed component group.
+
+    Parameters
+    ----------
+    pred : object
+        pred value.
+    keys : object
+        keys value.
+    q : object
+        q value.
+    """
     arr = _site_sum(pred, keys)
     return np.percentile(arr, q, axis=0) if arr.ndim > 1 else arr
 
 
 def _to_display_flux_density(obs_wave: np.ndarray, sed: np.ndarray) -> np.ndarray:
-    """Convert internal model spectra into displayed mJy values."""
+    """Convert internal model spectra into displayed mJy values.
+
+    Parameters
+    ----------
+    obs_wave : object
+        obs_wave value.
+    sed : object
+        sed value.
+    """
     obs_wave = np.asarray(obs_wave, dtype=float)
     sed = np.asarray(sed, dtype=float)
     return 1.0e-10 / 299792458.0 * 1.0e29 * obs_wave * obs_wave * sed
 
 
 def _median_effective_variance(fitter, pred: dict[str, Any]) -> np.ndarray:
-    """Rebuild the model's effective variance from predictive median sites."""
+    """Rebuild the model's effective variance from predictive median sites.
+
+    Parameters
+    ----------
+    fitter : object
+        fitter value.
+    pred : object
+        pred value.
+    """
     pred_fluxes = np.asarray(_median_site(pred, "pred_fluxes"), dtype=float)
     agn_fluxes = np.asarray(_median_site(pred, "agn_fluxes"), dtype=float) if "agn_fluxes" in pred else np.zeros_like(pred_fluxes)
     agn_variability_nev = float(np.median(np.asarray(pred["agn_variability_nev"], dtype=float))) if "agn_variability_nev" in pred else 0.0
@@ -355,7 +527,21 @@ def plot_fit_sed(
     show: bool = False,
     annotate_band_names: bool = True,
 ):
-    """Render a component SED plot for a fitted jaxsedfit object."""
+    """Render a component SED plot for a fitted jaxsedfit object.
+
+    Parameters
+    ----------
+    fitter : object
+        fitter value.
+    output_path : object
+        output_path value.
+    posterior : object
+        posterior value.
+    show : object
+        show value.
+    annotate_band_names : object
+        annotate_band_names value.
+    """
     pred = fitter.predict(posterior=posterior)
     obs_wave = _median_site(pred, "obs_wave")
     x_min = min(1.0e2, float(np.nanmin(obs_wave)))

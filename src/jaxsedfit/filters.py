@@ -30,7 +30,13 @@ FILTER_NAME_ALIASES = {
 
 
 def _package_resource_path(relpath: str) -> Path:
-    """Return an absolute path to a packaged jaxsedfit resource."""
+    """Return an absolute path to a packaged jaxsedfit resource.
+
+    Parameters
+    ----------
+    relpath : object
+        relpath value.
+    """
     return Path(str(resources.files("jaxsedfit").joinpath(relpath)))
 
 
@@ -45,12 +51,26 @@ def vendored_filter_registry() -> dict[str, str]:
 
 
 def resolve_filter_name(filter_name: str) -> str:
-    """Return the canonical vendored filter name for a public alias."""
+    """Return the canonical vendored filter name for a public alias.
+
+    Parameters
+    ----------
+    filter_name : object
+        filter_name value.
+    """
     return FILTER_NAME_ALIASES.get(str(filter_name), str(filter_name))
 
 
 def filter_effective_wavelength(wave: Sequence[float], transmission: Sequence[float]) -> float:
-    """Compute the effective wavelength convention used by jaxsedfit filters."""
+    """Compute the effective wavelength convention used by jaxsedfit filters.
+
+    Parameters
+    ----------
+    wave : object
+        wave value.
+    transmission : object
+        transmission value.
+    """
     wave_arr = np.asarray(wave, dtype=float)
     trans_arr = np.asarray(transmission, dtype=float)
     denom = float(np.trapezoid(trans_arr, wave_arr))
@@ -60,7 +80,15 @@ def filter_effective_wavelength(wave: Sequence[float], transmission: Sequence[fl
 
 
 def normalize_filter_curve(curve: FilterCurve, name: str | None = None) -> FilterCurve:
-    """Return a sorted, unique, non-negative filter curve."""
+    """Return a sorted, unique, non-negative filter curve.
+
+    Parameters
+    ----------
+    curve : object
+        curve value.
+    name : object
+        name value.
+    """
     wave = np.asarray(curve.wave, dtype=float)
     trans = np.clip(np.asarray(curve.transmission, dtype=float), 0.0, None)
     if wave.ndim != 1 or trans.ndim != 1 or wave.size != trans.size:
@@ -91,7 +119,13 @@ def normalize_filter_curve(curve: FilterCurve, name: str | None = None) -> Filte
 
 
 def load_filter_curve(filter_name: str) -> FilterCurve:
-    """Load one packaged jaxsedfit filter curve by canonical name or alias."""
+    """Load one packaged jaxsedfit filter curve by canonical name or alias.
+
+    Parameters
+    ----------
+    filter_name : object
+        filter_name value.
+    """
     resolved_name = resolve_filter_name(filter_name)
     relpath = vendored_filter_registry().get(resolved_name)
     if relpath is None:
@@ -110,12 +144,24 @@ def load_filter_curve(filter_name: str) -> FilterCurve:
 
 
 def load_filter_curves(filter_names: Sequence[str]) -> list[FilterCurve]:
-    """Load multiple packaged jaxsedfit filter curves in order."""
+    """Load multiple packaged jaxsedfit filter curves in order.
+
+    Parameters
+    ----------
+    filter_names : object
+        filter_names value.
+    """
     return [load_filter_curve(name) for name in filter_names]
 
 
 def _load_filter_type(path: Path) -> str:
-    """Read the # photon / # energy header line from a .dat filter file."""
+    """Read the # photon / # energy header line from a .dat filter file.
+
+    Parameters
+    ----------
+    path : object
+        path value.
+    """
     with open(path) as f:
         for line in f:
             if line.startswith("#"):
