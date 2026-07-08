@@ -12,8 +12,9 @@ def median_mapping(values: Mapping[str, Any] | None) -> dict[str, Any]:
 
     Parameters
     ----------
-    values : object
-        values value.
+    values : mapping or None
+        Posterior sample mapping keyed by sample-site name. Each value is
+        reduced over its leading sample axis when possible.
     """
     out: dict[str, Any] = {}
     for key, value in (values or {}).items():
@@ -64,8 +65,8 @@ class PredictionResult:
 
         Parameters
         ----------
-        key : object
-            key value.
+        key : str
+            Predictive site name to retrieve.
         """
         return self.data[key]
 
@@ -80,10 +81,10 @@ class PredictionResult:
 
         Parameters
         ----------
-        key : object
-            key value.
-        default : object
-            default value.
+        key : str
+            Predictive site name to retrieve.
+        default : object, optional
+            Value returned when ``key`` is absent.
         """
         return self.data.get(key, default)
 
@@ -107,7 +108,8 @@ class FitResult:
         Parameters
         ----------
         **kwargs : dict
-            Additional keyword arguments.
+            Keyword arguments forwarded to :meth:`jaxsedfit.JAXSEDFit.predict`,
+            such as ``kind`` or ``max_draws``.
         """
         if self._state is not None:
             kwargs.setdefault("_state", self._state)
@@ -118,10 +120,11 @@ class FitResult:
 
         Parameters
         ----------
-        path : object
-            path value.
+        path : str or pathlib.Path, optional
+            Output directory or explicit HDF5 file path.
         **kwargs : dict
-            Additional keyword arguments.
+            Additional keyword arguments forwarded to
+            :meth:`jaxsedfit.JAXSEDFit.save`.
         """
         output_path = Path("." if path is None else path)
         if self._state is not None:
@@ -137,7 +140,8 @@ class FitResult:
         Parameters
         ----------
         **kwargs : dict
-            Additional keyword arguments.
+            Keyword arguments forwarded to
+            :meth:`jaxsedfit.JAXSEDFit.plot_corner`.
         """
         return self.fitter.plot_corner(**kwargs)
 
@@ -147,6 +151,7 @@ class FitResult:
         Parameters
         ----------
         **kwargs : dict
-            Additional keyword arguments.
+            Keyword arguments forwarded to
+            :meth:`jaxsedfit.JAXSEDFit.plot_trace`.
         """
         return self.fitter.plot_trace(**kwargs)
