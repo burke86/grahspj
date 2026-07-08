@@ -229,6 +229,27 @@ def test_jaxqsofit_config_broadening_convolution_default_and_validation():
         JaxQSOFitConfig(broadening_convolution="scipy")
 
 
+def test_photometry_method_is_normalized_metadata_only():
+    phot = PhotometryData(
+        filter_names=["u", "g", "r", "i"],
+        fluxes=[1.0, 2.0, 3.0, 4.0],
+        errors=[0.1, 0.1, 0.1, 0.1],
+        photometry_method=["PSF", " profile ", " catalog ", None],
+    )
+    phot.validate()
+
+    assert phot.photometry_method == ["psf", "profile", "catalog", None]
+
+    bad = PhotometryData(
+        filter_names=["u"],
+        fluxes=[1.0],
+        errors=[0.1],
+        photometry_method=["adaptive-secret-method"],
+    )
+    with pytest.raises(ValueError, match="Unknown photometry_method"):
+        bad.validate()
+
+
 def test_public_model_names_delegate_to_legacy_implementations(monkeypatch):
     import jaxsedfit.model as modelmod
 

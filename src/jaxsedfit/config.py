@@ -35,9 +35,14 @@ class Observation:
 class PhotometryData:
     """Observed photometric measurements and associated metadata.
 
-    ``photometry_method`` is provenance metadata only. Aperture/PSF corrections
-    are controlled by the explicit aperture/PSF fields and likelihood settings,
-    not by these labels.
+    ``photometry_method`` records the measurement semantics for provenance and
+    downstream diagnostics. Aperture/PSF corrections are controlled by
+    ``psf_fwhm_arcsec``, ``aperture_diameter_arcsec``, and likelihood settings,
+    not by this label alone. Use ``psf`` for point-source/PSF-like
+    measurements, ``profile`` for profile-fit photometry, ``aperture`` for
+    explicit fixed apertures, ``auto`` for Kron/AUTO-like photometry,
+    ``model``/``cmodel``/``petrosian`` for extended-source model measurements,
+    and ``catalog`` only when the catalog flux semantics are not known.
     """
     filter_names: Sequence[str]
     fluxes: Sequence[float]
@@ -69,6 +74,7 @@ class PhotometryData:
                 "fiber",
                 "model",
                 "petrosian",
+                "profile",
                 "psf",
                 "unknown",
             }
