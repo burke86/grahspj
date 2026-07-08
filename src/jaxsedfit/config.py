@@ -337,7 +337,14 @@ class OutputConfig:
 
 
 def _scalar_or_list(value: Any) -> Any:
-    """Convert scalar array-like distribution parameters into plain Python values."""
+    """Convert scalar array-like distribution parameters into plain Python values.
+
+
+    Parameters
+    ----------
+    value : object
+        value value.
+    """
     arr = np.asarray(value)
     if arr.shape == ():
         return float(arr)
@@ -345,7 +352,13 @@ def _scalar_or_list(value: Any) -> Any:
 
 
 def _numpyro_distribution_to_mapping(value: Any) -> dict[str, Any] | None:
-    """Convert supported NumPyro distributions into the model prior schema."""
+    """Convert supported NumPyro distributions into the model prior schema.
+
+    Parameters
+    ----------
+    value : object
+        value value.
+    """
     module = getattr(value.__class__, "__module__", "")
     if not module.startswith("numpyro.distributions"):
         return None
@@ -397,7 +410,13 @@ def _numpyro_distribution_to_mapping(value: Any) -> dict[str, Any] | None:
 
 
 def _prior_to_mapping(value: Any) -> Any:
-    """Convert public prior specs to low-level mappings."""
+    """Convert public prior specs to low-level mappings.
+
+    Parameters
+    ----------
+    value : object
+        value value.
+    """
     prior = _numpyro_distribution_to_mapping(value)
     if prior is not None:
         return prior
@@ -689,7 +708,15 @@ class LikelihoodPriorConfig:
 
 
 def _section_to_mapping(section: Any, fields_to_keys: Mapping[str, str]) -> dict[str, Any]:
-    """Convert non-None section fields into model prior mappings."""
+    """Convert non-None section fields into model prior mappings.
+
+    Parameters
+    ----------
+    section : object
+        section value.
+    fields_to_keys : object
+        fields_to_keys value.
+    """
     out: dict[str, Any] = {}
     for field_name, key in fields_to_keys.items():
         value = getattr(section, field_name)
@@ -782,7 +809,13 @@ class FitConfig:
 
 
 def _coerce_dataclass(cls, value: Any):
-    """Convert a mapping or existing instance into the requested dataclass."""
+    """Convert a mapping or existing instance into the requested dataclass.
+
+    Parameters
+    ----------
+    value : object
+        value value.
+    """
     if isinstance(value, cls):
         return value
     if isinstance(value, Mapping):
@@ -803,12 +836,24 @@ def _coerce_dataclass(cls, value: Any):
 
 
 def _coerce_jaxqsofit_config(value: Any) -> JaxQSOFitConfig:
-    """Coerce jaxqsofit config into the structured config object."""
+    """Coerce jaxqsofit config into the structured config object.
+
+    Parameters
+    ----------
+    value : object
+        value value.
+    """
     return _coerce_dataclass(JaxQSOFitConfig, value)
 
 
 def _coerce_spectroscopy_config(value: Any) -> SpectroscopyConfig:
-    """Coerce spectroscopy config while preserving the nested jaxqsofit config."""
+    """Coerce spectroscopy config while preserving the nested jaxqsofit config.
+
+    Parameters
+    ----------
+    value : object
+        value value.
+    """
     if isinstance(value, SpectroscopyConfig):
         return value
     if not isinstance(value, Mapping):
@@ -829,7 +874,13 @@ def _coerce_spectroscopy_config(value: Any) -> SpectroscopyConfig:
 
 
 def _coerce_prior_config(value: Any) -> PriorConfig:
-    """Coerce structured prior mappings into :class:`PriorConfig`."""
+    """Coerce structured prior mappings into :class:`PriorConfig`.
+
+    Parameters
+    ----------
+    value : object
+        value value.
+    """
     if isinstance(value, PriorConfig):
         return value
     if value is None:
@@ -857,7 +908,13 @@ def _coerce_prior_config(value: Any) -> PriorConfig:
 
 
 def fit_config_from_mapping(data: Mapping[str, Any]) -> FitConfig:
-    """Build a validated FitConfig from a nested mapping."""
+    """Build a validated FitConfig from a nested mapping.
+
+    Parameters
+    ----------
+    data : object
+        data value.
+    """
     valid_top_level = set(FitConfig.__dataclass_fields__)
     unknown = set(data) - valid_top_level
     if unknown:
@@ -905,7 +962,14 @@ def fit_config_from_mapping(data: Mapping[str, Any]) -> FitConfig:
 
 
 def serialize_config(value: Any) -> Any:
-    """Convert config-like objects into JSON-serializable Python values."""
+    """Convert config-like objects into JSON-serializable Python values.
+
+
+    Parameters
+    ----------
+    value : object
+        value value.
+    """
     prior = _numpyro_distribution_to_mapping(value)
     if prior is not None:
         return serialize_config(prior)

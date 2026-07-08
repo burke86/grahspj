@@ -57,18 +57,38 @@ GRAHSP_SI_ABS_WIDTH_A = 11635.0
 
 
 def _np_to_jnp(x):
-    """Convert an array-like object to a float64 JAX array."""
+    """Convert an array-like object to a float64 JAX array.
+
+    Parameters
+    ----------
+    x : object
+        x value.
+    """
     return jnp.asarray(np.asarray(x, dtype=np.float64))
 
 
 def _bool_to_jnp(x):
-    """Convert an array-like object to a boolean JAX array."""
+    """Convert an array-like object to a boolean JAX array.
+
+    Parameters
+    ----------
+    x : object
+        x value.
+    """
     return jnp.asarray(np.asarray(x, dtype=bool))
 
 
 @lru_cache(maxsize=16)
 def _get_jax_cosmo_backend(h0: float, om0: float):
-    """Return cached jax_cosmo helpers for a flat LCDM luminosity distance."""
+    """Return cached jax_cosmo helpers for a flat LCDM luminosity distance.
+
+    Parameters
+    ----------
+    h0 : object
+        h0 value.
+    om0 : object
+        om0 value.
+    """
     import jax_cosmo.background as bg
     from jax_cosmo.core import Cosmology
 
@@ -88,7 +108,17 @@ def _get_jax_cosmo_backend(h0: float, om0: float):
 
 
 def _flat_lcdm_luminosity_distance_m_jax(redshift, h0: float, om0: float):
-    """Fallback flat-LCDM luminosity distance when jax_cosmo is unavailable."""
+    """Fallback flat-LCDM luminosity distance when jax_cosmo is unavailable.
+
+    Parameters
+    ----------
+    redshift : object
+        redshift value.
+    h0 : object
+        h0 value.
+    om0 : object
+        om0 value.
+    """
     z = jnp.maximum(jnp.asarray(redshift, dtype=jnp.float64), 0.0)
     grid = jnp.linspace(0.0, 1.0, 256, dtype=jnp.float64)
     z_grid = z[..., None] * grid
@@ -103,7 +133,17 @@ def _flat_lcdm_luminosity_distance_m_jax(redshift, h0: float, om0: float):
 
 
 def _luminosity_distance_m_jax(redshift, h0: float, om0: float):
-    """Return luminosity distance in meters using a JAX-native flat LCDM path."""
+    """Return luminosity distance in meters using a JAX-native flat LCDM path.
+
+    Parameters
+    ----------
+    redshift : object
+        redshift value.
+    h0 : object
+        h0 value.
+    om0 : object
+        om0 value.
+    """
     redshift = jnp.asarray(redshift, dtype=jnp.float64)
     scalar_input = redshift.ndim == 0
     try:
@@ -121,7 +161,17 @@ def _luminosity_distance_m_jax(redshift, h0: float, om0: float):
 
 
 def _prior_distribution(prior_config: dict[str, Any], key: str, default_distribution):
-    """Read a NumPyro distribution-like prior from the flat prior mapping."""
+    """Read a NumPyro distribution-like prior from the flat prior mapping.
+
+    Parameters
+    ----------
+    prior_config : object
+        prior_config value.
+    key : object
+        key value.
+    default_distribution : object
+        default_distribution value.
+    """
     cfg = prior_config.get(key, None)
     if cfg is None:
         return default_distribution
@@ -167,7 +217,17 @@ def _prior_distribution(prior_config: dict[str, Any], key: str, default_distribu
 
 
 def _sample_prior(prior_config: dict[str, Any], key: str, default_distribution):
-    """Sample a scalar site from a configured distribution or a default."""
+    """Sample a scalar site from a configured distribution or a default.
+
+    Parameters
+    ----------
+    prior_config : object
+        prior_config value.
+    key : object
+        key value.
+    default_distribution : object
+        default_distribution value.
+    """
     return numpyro.sample(key, _prior_distribution(prior_config, key, default_distribution))
 
 
@@ -178,7 +238,19 @@ def _sample_log_positive_from_distribution(
     log_key: str,
     default_distribution,
 ):
-    """Sample a log-parameter from a distribution and expose its physical value."""
+    """Sample a log-parameter from a distribution and expose its physical value.
+
+    Parameters
+    ----------
+    prior_config : object
+        prior_config value.
+    value_key : object
+        value_key value.
+    log_key : object
+        log_key value.
+    default_distribution : object
+        default_distribution value.
+    """
     log_value = numpyro.sample(log_key, _prior_distribution(prior_config, log_key, default_distribution))
     value = jnp.exp(log_value)
     numpyro.deterministic(value_key, value)
@@ -194,7 +266,23 @@ def _sample_positive_distribution(
     default_log_distribution,
     default_to_log: bool = False,
 ):
-    """Sample a positive parameter, honoring either physical or log prior keys."""
+    """Sample a positive parameter, honoring either physical or log prior keys.
+
+    Parameters
+    ----------
+    prior_config : object
+        prior_config value.
+    value_key : object
+        value_key value.
+    log_key : object
+        log_key value.
+    default_value_distribution : object
+        default_value_distribution value.
+    default_log_distribution : object
+        default_log_distribution value.
+    default_to_log : object
+        default_to_log value.
+    """
     if log_key in prior_config:
         return _sample_log_positive_from_distribution(
             prior_config,
@@ -226,6 +314,21 @@ def _sample_positive(
     ``prior_config[value_key]["family"]`` or ``["dist"]`` may be one of
     ``"exponential"`` or ``"lognormal"``. A direct ``prior_config[log_key]``
     override always selects the log-normal parameterization.
+
+    Parameters
+    ----------
+    prior_config : object
+        prior_config value.
+    value_key : object
+        value_key value.
+    log_key : object
+        log_key value.
+    default_value : object
+        default_value value.
+    default_log_scale : object
+        default_log_scale value.
+    default_family : object
+        default_family value.
     """
     cfg = prior_config.get(value_key, None)
     family = default_family
@@ -255,21 +358,55 @@ def _sample_positive(
     )
 
 def _sample_optional_normal(prior_config: dict[str, Any], key: str, default: float, scale: float):
-    """Return a fixed default unless a Normal-like prior is explicitly configured."""
+    """Return a fixed default unless a Normal-like prior is explicitly configured.
+
+    Parameters
+    ----------
+    prior_config : object
+        prior_config value.
+    key : object
+        key value.
+    default : object
+        default value.
+    scale : object
+        scale value.
+    """
     if key not in prior_config:
         return jnp.asarray(default, dtype=jnp.float64)
     return _sample_prior(prior_config, key, dist.Normal(default, scale))
 
 
 def _sample_optional_truncnorm(prior_config: dict[str, Any], key: str, default: float, scale: float, low: float, high: float):
-    """Return a fixed default unless a truncated Normal-like prior is explicitly configured."""
+    """Return a fixed default unless a truncated Normal-like prior is explicitly configured.
+
+    Parameters
+    ----------
+    prior_config : object
+        prior_config value.
+    key : object
+        key value.
+    default : object
+        default value.
+    scale : object
+        scale value.
+    low : object
+        low value.
+    high : object
+        high value.
+    """
     if key not in prior_config:
         return jnp.asarray(default, dtype=jnp.float64)
     return _sample_prior(prior_config, key, dist.TruncatedNormal(default, scale, low=low, high=high))
 
 
 def _safe_log10(x):
-    """Take log10 after clipping to a tiny positive floor."""
+    """Take log10 after clipping to a tiny positive floor.
+
+    Parameters
+    ----------
+    x : object
+        x value.
+    """
     return jnp.log10(jnp.clip(jnp.asarray(x, dtype=jnp.float64), 1.0e-30, 1.0e300))
 
 
@@ -279,12 +416,23 @@ def _sample_log_stellar_mass(prior_config: dict[str, Any]):
     By default this uses a heavy-tailed Student-t prior centered lower than the
     original Normal(10.5, 2.5) benchmark default. Existing Normal-like
     overrides with only ``loc`` and ``scale`` are still supported.
+
+    Parameters
+    ----------
+    prior_config : object
+        prior_config value.
     """
     return _sample_prior(prior_config, "log_stellar_mass", dist.StudentT(df=5.0, loc=10.0, scale=2.0))
 
 
 def _ssp_lgmet_solar_offset(ssp_lgmet):
-    """Return the solar-metallicity offset for the SSP metallicity convention."""
+    """Return the solar-metallicity offset for the SSP metallicity convention.
+
+    Parameters
+    ----------
+    ssp_lgmet : object
+        ssp_lgmet value.
+    """
     ssp_lgmet = jnp.asarray(ssp_lgmet, dtype=jnp.float64)
     # DSPS SSP grids use absolute log10(Z). Older/simple test grids may use
     # log10(Z/Zsun). A max below -1 is a robust signature of absolute log10(Z).
@@ -292,7 +440,15 @@ def _ssp_lgmet_solar_offset(ssp_lgmet):
 
 
 def _gal_lgmet_to_absolute_z(gal_lgmet, ssp_lgmet):
-    """Convert galaxy metallicity from the SSP-grid convention to absolute Z."""
+    """Convert galaxy metallicity from the SSP-grid convention to absolute Z.
+
+    Parameters
+    ----------
+    gal_lgmet : object
+        gal_lgmet value.
+    ssp_lgmet : object
+        ssp_lgmet value.
+    """
     gal_lgmet = jnp.asarray(gal_lgmet, dtype=jnp.float64)
     ssp_lgmet = jnp.asarray(ssp_lgmet, dtype=jnp.float64)
     absolute_logz = jnp.where(
@@ -304,7 +460,13 @@ def _gal_lgmet_to_absolute_z(gal_lgmet, ssp_lgmet):
 
 
 def _default_gal_lgmet_loc(ssp_lgmet):
-    """Default galaxy metallicity center in the SSP grid's metallicity convention."""
+    """Default galaxy metallicity center in the SSP grid's metallicity convention.
+
+    Parameters
+    ----------
+    ssp_lgmet : object
+        ssp_lgmet value.
+    """
     ssp_lgmet = jnp.asarray(ssp_lgmet, dtype=jnp.float64)
     loc = _ssp_lgmet_solar_offset(ssp_lgmet) - 0.3
     return jnp.clip(loc, jnp.nanmin(ssp_lgmet), jnp.nanmax(ssp_lgmet))
@@ -318,14 +480,36 @@ def _cfg_lgmet_value(
     *,
     absolute_key: str | None = None,
 ):
-    """Read metallicity config values and convert log(Z/Zsun) defaults to log10(Z)."""
+    """Read metallicity config values and convert log(Z/Zsun) defaults to log10(Z).
+
+    Parameters
+    ----------
+    cfg : object
+        cfg value.
+    solar_relative_key : object
+        solar_relative_key value.
+    default_logzsol : object
+        default_logzsol value.
+    solar_offset : object
+        solar_offset value.
+    absolute_key : object
+        absolute_key value.
+    """
     if absolute_key is not None and absolute_key in cfg:
         return jnp.asarray(cfg[absolute_key], dtype=jnp.float64)
     return jnp.asarray(cfg.get(solar_relative_key, default_logzsol), dtype=jnp.float64) + solar_offset
 
 
 def _cumulative_trapezoid(y, x):
-    """Return cumulative trapezoidal integral with an initial zero element."""
+    """Return cumulative trapezoidal integral with an initial zero element.
+
+    Parameters
+    ----------
+    y : object
+        y value.
+    x : object
+        x value.
+    """
     dx = jnp.diff(x)
     area = 0.5 * (y[1:] + y[:-1]) * dx
     return jnp.concatenate([jnp.zeros((1,), dtype=jnp.result_type(y, x)), jnp.cumsum(area)])
@@ -363,6 +547,19 @@ def _mass_metallicity_relation_logprior(
       location, clipped to the SSP grid range.
     - ``min_lgmet`` and ``max_lgmet``: bounds in the SSP grid convention,
       overriding ``min`` and ``max``.
+
+    Parameters
+    ----------
+    log_stellar_mass : object
+        log_stellar_mass value.
+    gal_lgmet : object
+        gal_lgmet value.
+    prior_config : object
+        prior_config value.
+    ssp_lgmet : object
+        ssp_lgmet value.
+    redshift : object
+        redshift value.
     """
     cfg = prior_config.get("mass_metallicity_relation", None)
     if cfg is None:
@@ -391,7 +588,17 @@ def _mass_metallicity_relation_logprior(
 
 
 def _gaussian_kernel1d(sigma_pix, radius_mult=5.0, max_half=256):
-    """Build a normalized 1D Gaussian convolution kernel."""
+    """Build a normalized 1D Gaussian convolution kernel.
+
+    Parameters
+    ----------
+    sigma_pix : object
+        sigma_pix value.
+    radius_mult : object
+        radius_mult value.
+    max_half : object
+        max_half value.
+    """
     sigma_pix = jnp.maximum(sigma_pix, 1e-3)
     x = jnp.arange(-max_half, max_half + 1, dtype=jnp.float64)
     half_dyn = jnp.maximum(3.0, jnp.ceil(radius_mult * sigma_pix))
@@ -402,7 +609,15 @@ def _gaussian_kernel1d(sigma_pix, radius_mult=5.0, max_half=256):
 
 
 def _convolve_same_length(signal, kernel):
-    """Convolve a signal and return an output with the original length."""
+    """Convolve a signal and return an output with the original length.
+
+    Parameters
+    ----------
+    signal : object
+        signal value.
+    kernel : object
+        kernel value.
+    """
     full = jnp.convolve(signal, kernel, mode="same")
     n = signal.shape[0]
     m = full.shape[0]
@@ -411,7 +626,19 @@ def _convolve_same_length(signal, kernel):
 
 
 def _shift_and_broaden_single_spectrum_lnlam(lnwave, spectrum, v_kms, sigma_kms):
-    """Apply a velocity shift and Gaussian broadening in log-wavelength space."""
+    """Apply a velocity shift and Gaussian broadening in log-wavelength space.
+
+    Parameters
+    ----------
+    lnwave : object
+        lnwave value.
+    spectrum : object
+        spectrum value.
+    v_kms : object
+        v_kms value.
+    sigma_kms : object
+        sigma_kms value.
+    """
     dln = jnp.mean(jnp.diff(lnwave))
     sigma_ln = jnp.maximum(sigma_kms / C_KMS, 1e-5)
     sigma_pix = sigma_ln / jnp.maximum(dln, 1e-8)
@@ -424,7 +651,27 @@ def _shift_and_broaden_single_spectrum_lnlam(lnwave, spectrum, v_kms, sigma_kms)
 
 
 def _powerlaw_jax(wave, norm, lam1, lam2, x0, xbrk, bend_width, cutoff):
-    """Evaluate the bent AGN disk power-law continuum."""
+    """Evaluate the bent AGN disk power-law continuum.
+
+    Parameters
+    ----------
+    wave : object
+        wave value.
+    norm : object
+        norm value.
+    lam1 : object
+        lam1 value.
+    lam2 : object
+        lam2 value.
+    x0 : object
+        x0 value.
+    xbrk : object
+        xbrk value.
+    bend_width : object
+        bend_width value.
+    cutoff : object
+        cutoff value.
+    """
     expo = 1.0 / jnp.maximum(bend_width, 1e-6)
     lamaddexpo = (lam1 + lam2 + 2.0) / 2.0
     lamsubexpo = (lam2 - lam1) / 2.0 * jnp.maximum(bend_width, 1e-6)
@@ -442,6 +689,37 @@ def _torus_component(wave, fcov, si, cool_lam, cool_width, hot_lam, hot_width, h
     The torus luminosity follows the GRAHSP-style empirical normalization from
     the AGN luminosity and covering factor proxy. It is not computed from the
     luminosity absorbed by the AGN attenuation curve.
+
+    Parameters
+    ----------
+    wave : object
+        wave value.
+    fcov : object
+        fcov value.
+    si : object
+        si value.
+    cool_lam : object
+        cool_lam value.
+    cool_width : object
+        cool_width value.
+    hot_lam : object
+        hot_lam value.
+    hot_width : object
+        hot_width value.
+    hot_fcov : object
+        hot_fcov value.
+    si_ratio : object
+        si_ratio value.
+    si_em_lam : object
+        si_em_lam value.
+    si_abs_lam : object
+        si_abs_lam value.
+    si_em_width : object
+        si_em_width value.
+    si_abs_width : object
+        si_abs_width value.
+    l_agn : object
+        l_agn value.
     """
     log_wave_um = jnp.log10(wave / 10000.0)
     log_cool = jnp.log10(cool_lam)
@@ -463,13 +741,39 @@ def _torus_component(wave, fcov, si, cool_lam, cool_width, hot_lam, hot_width, h
 
 
 def _feii_component(wave, template_flux_on_wave, norm, fwhm_kms, shift_frac):
-    """Broaden, shift, and normalize the Fe II template contribution."""
+    """Broaden, shift, and normalize the Fe II template contribution.
+
+    Parameters
+    ----------
+    wave : object
+        wave value.
+    template_flux_on_wave : object
+        template_flux_on_wave value.
+    norm : object
+        norm value.
+    fwhm_kms : object
+        fwhm_kms value.
+    shift_frac : object
+        shift_frac value.
+    """
     sigma_kms = jnp.maximum(fwhm_kms / (2.0 * jnp.sqrt(2.0 * jnp.log(2.0))), 10.0)
     return norm * _shift_and_broaden_single_spectrum_lnlam(jnp.log(wave), jnp.maximum(template_flux_on_wave, 0.0), C_KMS * shift_frac, sigma_kms)
 
 
 def _line_gaussians(wave, line_wave, line_lumin, width_kms):
-    """Evaluate a summed Gaussian emission-line template with one shared width."""
+    """Evaluate a summed Gaussian emission-line template with one shared width.
+
+    Parameters
+    ----------
+    wave : object
+        wave value.
+    line_wave : object
+        line_wave value.
+    line_lumin : object
+        line_lumin value.
+    width_kms : object
+        width_kms value.
+    """
     fwhm_to_sigma_conversion = 1 / (2 * jnp.sqrt(2 * jnp.log(2)))
     width_wave = line_wave * (width_kms * 1000.0) / 299792458.0
     sigma = width_wave * fwhm_to_sigma_conversion
@@ -479,7 +783,19 @@ def _line_gaussians(wave, line_wave, line_lumin, width_kms):
 
 
 def _flux_conserving_line_gaussians(wave, line_wave, line_lumin, width_kms):
-    """Evaluate CIGALE-style nebular lines preserving integrated luminosity."""
+    """Evaluate CIGALE-style nebular lines preserving integrated luminosity.
+
+    Parameters
+    ----------
+    wave : object
+        wave value.
+    line_wave : object
+        line_wave value.
+    line_lumin : object
+        line_lumin value.
+    width_kms : object
+        width_kms value.
+    """
     fwhm_wave = jnp.maximum(line_wave * width_kms / C_KMS, 1.0e-8)
     sigma = fwhm_wave / (2.0 * jnp.sqrt(2.0 * jnp.log(2.0)))
     z = (wave[:, None] - line_wave[None, :]) / jnp.maximum(sigma[None, :], 1.0e-12)
@@ -488,7 +804,17 @@ def _flux_conserving_line_gaussians(wave, line_wave, line_lumin, width_kms):
 
 
 def _interp_grid_axis(grid, value, *, log_scale: bool = False):
-    """Return bracketing indices and interpolation weight for one template axis."""
+    """Return bracketing indices and interpolation weight for one template axis.
+
+    Parameters
+    ----------
+    grid : object
+        grid value.
+    value : object
+        value value.
+    log_scale : object
+        log_scale value.
+    """
     grid = jnp.asarray(grid, dtype=jnp.float64)
     x_grid = jnp.log10(jnp.maximum(grid, 1.0e-300)) if log_scale else grid
     x = jnp.log10(jnp.maximum(value, 1.0e-300)) if log_scale else jnp.asarray(value, dtype=jnp.float64)
@@ -502,7 +828,25 @@ def _interp_grid_axis(grid, value, *, log_scale: bool = False):
 
 
 def _trilinear_nebular_grid(values, z_grid, logu_grid, ne_grid, zgas, logu, ne):
-    """Interpolate a nebular template grid in log Z, log U, and log density."""
+    """Interpolate a nebular template grid in log Z, log U, and log density.
+
+    Parameters
+    ----------
+    values : object
+        values value.
+    z_grid : object
+        z_grid value.
+    logu_grid : object
+        logu_grid value.
+    ne_grid : object
+        ne_grid value.
+    zgas : object
+        zgas value.
+    logu : object
+        logu value.
+    ne : object
+        ne value.
+    """
     z0, z1, wz = _interp_grid_axis(z_grid, zgas, log_scale=True)
     u0, u1, wu = _interp_grid_axis(logu_grid, logu, log_scale=False)
     n0, n1, wn = _interp_grid_axis(ne_grid, ne, log_scale=True)
@@ -526,7 +870,15 @@ def _trilinear_nebular_grid(values, z_grid, logu_grid, ne_grid, zgas, logu, ne):
 
 
 def _cigale_nebular_correction(f_esc, f_dust):
-    """CIGALE nebular escape/dust correction factor."""
+    """CIGALE nebular escape/dust correction factor.
+
+    Parameters
+    ----------
+    f_esc : object
+        f_esc value.
+    f_dust : object
+        f_dust value.
+    """
     alpha_b = jnp.asarray(2.58e-19, dtype=jnp.float64)
     alpha_1 = jnp.asarray(1.54e-19, dtype=jnp.float64)
     escaped_or_dust = f_esc + f_dust
@@ -534,7 +886,21 @@ def _cigale_nebular_correction(f_esc, f_dust):
 
 
 def _balmer_continuum_jax(wave, balmer_norm, balmer_te, balmer_tau, balmer_vel):
-    """Evaluate the broadened Balmer continuum template."""
+    """Evaluate the broadened Balmer continuum template.
+
+    Parameters
+    ----------
+    wave : object
+        wave value.
+    balmer_norm : object
+        balmer_norm value.
+    balmer_te : object
+        balmer_te value.
+    balmer_tau : object
+        balmer_tau value.
+    balmer_vel : object
+        balmer_vel value.
+    """
     lam_be = 3646.0
     h_c_per_k_B = 1.4388e8
     bb = (wave**-5) / jnp.expm1(jnp.clip(h_c_per_k_B / (balmer_te * wave), 1e-9, 700.0))
@@ -546,7 +912,21 @@ def _balmer_continuum_jax(wave, balmer_norm, balmer_te, balmer_tau, balmer_vel):
 
 
 def _attenuation_curve(wave_rest, opt_index, nir_index, norm, lam_break):
-    """Return the broken power-law attenuation curve in magnitudes."""
+    """Return the broken power-law attenuation curve in magnitudes.
+
+    Parameters
+    ----------
+    wave_rest : object
+        wave_rest value.
+    opt_index : object
+        opt_index value.
+    nir_index : object
+        nir_index value.
+    norm : object
+        norm value.
+    lam_break : object
+        lam_break value.
+    """
     return norm * (wave_rest / lam_break) ** jnp.where(wave_rest < lam_break, opt_index, nir_index)
 
 
@@ -556,6 +936,27 @@ def _apply_biattenuation(wave_rest, gal_spec, agn_spec, ebv_gal, ebv_agn, opt_in
     The returned ``dust_luminosity`` is the host-galaxy luminosity absorbed by
     the galaxy attenuation curve. AGN light is attenuated separately, but its
     absorbed luminosity is not added to the host dust energy-balance budget.
+
+    Parameters
+    ----------
+    wave_rest : object
+        wave_rest value.
+    gal_spec : object
+        gal_spec value.
+    agn_spec : object
+        agn_spec value.
+    ebv_gal : object
+        ebv_gal value.
+    ebv_agn : object
+        ebv_agn value.
+    opt_index : object
+        opt_index value.
+    nir_index : object
+        nir_index value.
+    norm : object
+        norm value.
+    lam_break : object
+        lam_break value.
     """
     curve = _attenuation_curve(wave_rest, opt_index, nir_index, norm, lam_break)
     gal_att = gal_spec * 10 ** (ebv_gal * curve / -2.5)
@@ -571,6 +972,13 @@ def _attenuation_transmitted_fraction(direct_attenuated, direct_intrinsic):
     This excludes re-emitted host dust and empirical torus emission so the
     attenuation model uncertainty is controlled only by components that pass
     through the attenuation curve.
+
+    Parameters
+    ----------
+    direct_attenuated : object
+        direct_attenuated value.
+    direct_intrinsic : object
+        direct_intrinsic value.
     """
     return jnp.clip(
         direct_attenuated / jnp.maximum(direct_intrinsic, 1.0e-30),
@@ -580,7 +988,17 @@ def _attenuation_transmitted_fraction(direct_attenuated, direct_intrinsic):
 
 
 def _apply_extended_capture(total_flux, extended_flux, capture_fraction):
-    """Return total flux after aperture capture of extended components only."""
+    """Return total flux after aperture capture of extended components only.
+
+    Parameters
+    ----------
+    total_flux : object
+        total_flux value.
+    extended_flux : object
+        extended_flux value.
+    capture_fraction : object
+        capture_fraction value.
+    """
     total_flux = jnp.asarray(total_flux, dtype=jnp.float64)
     extended_flux = jnp.asarray(extended_flux, dtype=jnp.float64)
     capture_fraction = jnp.asarray(capture_fraction, dtype=jnp.float64)
@@ -588,14 +1006,40 @@ def _apply_extended_capture(total_flux, extended_flux, capture_fraction):
 
 
 def _redshift_to_obs(rest_wave, rest_lum, obs_wave, redshift, luminosity_distance_m):
-    """Project a rest-frame luminosity density to the observed frame."""
+    """Project a rest-frame luminosity density to the observed frame.
+
+    Parameters
+    ----------
+    rest_wave : object
+        rest_wave value.
+    rest_lum : object
+        rest_lum value.
+    obs_wave : object
+        obs_wave value.
+    redshift : object
+        redshift value.
+    luminosity_distance_m : object
+        luminosity_distance_m value.
+    """
     wave_obs = rest_wave * (1.0 + redshift)
     flux_obs = rest_lum / (4.0 * jnp.pi * jnp.maximum(luminosity_distance_m, 1e-12) ** 2 * jnp.maximum(1.0 + redshift, 1e-8))
     return jnp.interp(obs_wave, wave_obs, flux_obs, left=0.0, right=0.0)
 
 
 def _redshift_scalar_to_obs(rest_wave, rest_value, obs_wave, redshift):
-    """Interpolate a scalar rest-frame quantity onto the observed wavelength grid."""
+    """Interpolate a scalar rest-frame quantity onto the observed wavelength grid.
+
+    Parameters
+    ----------
+    rest_wave : object
+        rest_wave value.
+    rest_value : object
+        rest_value value.
+    obs_wave : object
+        obs_wave value.
+    redshift : object
+        redshift value.
+    """
     wave_obs = rest_wave * (1.0 + redshift)
     return jnp.interp(obs_wave, wave_obs, rest_value, left=0.0, right=0.0)
 
@@ -607,6 +1051,13 @@ def _project_filters(obs_flux, packed_filters):
     GRAHSP/pcigale convention of using each filter's effective wavelength
     squared. This is not an exact pivot-wavelength conversion, so very broad
     filters can retain small convention-level systematics.
+
+    Parameters
+    ----------
+    obs_flux : object
+        obs_flux value.
+    packed_filters : object
+        packed_filters value.
     """
     interp_indices = packed_filters.interp_indices
     interp_weight = packed_filters.interp_weight
@@ -628,7 +1079,15 @@ def _project_filters(obs_flux, packed_filters):
 
 
 def _can_use_fixed_filter_projection(context: ModelContext, cfg) -> bool:
-    """Return whether cached fixed-z photometric projection matrices are valid."""
+    """Return whether cached fixed-z photometric projection matrices are valid.
+
+    Parameters
+    ----------
+    context : object
+        context value.
+    cfg : object
+        cfg value.
+    """
     return bool(
         cfg.likelihood.use_fast_photometry_projection
         and not cfg.observation.fits_redshift
@@ -638,17 +1097,43 @@ def _can_use_fixed_filter_projection(context: ModelContext, cfg) -> bool:
 
 
 def _project_rest_luminosity_filters(context: ModelContext, rest_lum):
-    """Project fixed-redshift rest luminosity density directly into filter mJy."""
+    """Project fixed-redshift rest luminosity density directly into filter mJy.
+
+    Parameters
+    ----------
+    context : object
+        context value.
+    rest_lum : object
+        rest_lum value.
+    """
     return context.fixed_filter_projection_jax @ rest_lum
 
 
 def _project_rest_scalar_filters(context: ModelContext, rest_value):
-    """Project fixed-redshift scalar rest quantity through filters like legacy code."""
+    """Project fixed-redshift scalar rest quantity through filters like legacy code.
+
+    Parameters
+    ----------
+    context : object
+        context value.
+    rest_value : object
+        rest_value value.
+    """
     return context.fixed_scalar_filter_projection_jax @ rest_value
 
 
 def _interp_redshift_projection_matrix(redshift, grid, matrices):
-    """Linearly interpolate a redshift-tabulated projection matrix."""
+    """Linearly interpolate a redshift-tabulated projection matrix.
+
+    Parameters
+    ----------
+    redshift : object
+        redshift value.
+    grid : object
+        grid value.
+    matrices : object
+        matrices value.
+    """
     z = jnp.asarray(redshift, dtype=jnp.float64)
     idx_hi = jnp.searchsorted(grid, z, side="right")
     idx_hi = jnp.clip(idx_hi, 1, grid.shape[0] - 1)
@@ -660,7 +1145,15 @@ def _interp_redshift_projection_matrix(redshift, grid, matrices):
 
 
 def _can_use_redshift_filter_projection(context: ModelContext, cfg) -> bool:
-    """Return whether cached variable-redshift photometric matrices are valid."""
+    """Return whether cached variable-redshift photometric matrices are valid.
+
+    Parameters
+    ----------
+    context : object
+        context value.
+    cfg : object
+        cfg value.
+    """
     return bool(
         cfg.likelihood.use_redshift_projection_cache
         and cfg.observation.fits_redshift
@@ -669,21 +1162,53 @@ def _can_use_redshift_filter_projection(context: ModelContext, cfg) -> bool:
 
 
 def _project_redshift_luminosity_filters(context: ModelContext, rest_lum, redshift):
-    """Project rest luminosity density through redshift-interpolated matrices."""
+    """Project rest luminosity density through redshift-interpolated matrices.
+
+    Parameters
+    ----------
+    context : object
+        context value.
+    rest_lum : object
+        rest_lum value.
+    redshift : object
+        redshift value.
+    """
     cache = context.redshift_projection_cache_jax
     matrix = _interp_redshift_projection_matrix(redshift, cache.redshift_grid, cache.filter_projection)
     return matrix @ rest_lum
 
 
 def _project_redshift_scalar_filters(context: ModelContext, rest_value, redshift):
-    """Project rest-frame scalar values through redshift-interpolated matrices."""
+    """Project rest-frame scalar values through redshift-interpolated matrices.
+
+    Parameters
+    ----------
+    context : object
+        context value.
+    rest_value : object
+        rest_value value.
+    redshift : object
+        redshift value.
+    """
     cache = context.redshift_projection_cache_jax
     matrix = _interp_redshift_projection_matrix(redshift, cache.redshift_grid, cache.scalar_projection)
     return matrix @ rest_value
 
 
 def _local_line_gaussian_grid(line_wave, line_lumin, width_kms, *, n_local: int = 9):
-    """Evaluate CIGALE-style line profiles on per-line local grids."""
+    """Evaluate CIGALE-style line profiles on per-line local grids.
+
+    Parameters
+    ----------
+    line_wave : object
+        line_wave value.
+    line_lumin : object
+        line_lumin value.
+    width_kms : object
+        width_kms value.
+    n_local : object
+        n_local value.
+    """
     line_wave = jnp.asarray(line_wave, dtype=jnp.float64)
     line_lumin = jnp.asarray(line_lumin, dtype=jnp.float64)
     offsets = jnp.linspace(-3.0, 3.0, int(n_local), dtype=jnp.float64)
@@ -697,7 +1222,19 @@ def _local_line_gaussian_grid(line_wave, line_lumin, width_kms, *, n_local: int 
 
 
 def _local_flux_conserving_line_grid(line_wave, line_lumin, width_kms, *, n_local: int = 9):
-    """Evaluate integrated-luminosity line profiles on per-line local grids."""
+    """Evaluate integrated-luminosity line profiles on per-line local grids.
+
+    Parameters
+    ----------
+    line_wave : object
+        line_wave value.
+    line_lumin : object
+        line_lumin value.
+    width_kms : object
+        width_kms value.
+    n_local : object
+        n_local value.
+    """
     line_wave = jnp.asarray(line_wave, dtype=jnp.float64)
     line_lumin = jnp.asarray(line_lumin, dtype=jnp.float64)
     offsets = jnp.linspace(-3.0, 3.0, int(n_local), dtype=jnp.float64)
@@ -720,7 +1257,27 @@ def _project_local_line_filters(
     luminosity_distance_m,
     igm,
 ):
-    """Project Gaussian line emission through filters using local line grids."""
+    """Project Gaussian line emission through filters using local line grids.
+
+    Parameters
+    ----------
+    context : object
+        context value.
+    line_wave : object
+        line_wave value.
+    line_lumin : object
+        line_lumin value.
+    width_kms : object
+        width_kms value.
+    ebv_total : object
+        ebv_total value.
+    redshift : object
+        redshift value.
+    luminosity_distance_m : object
+        luminosity_distance_m value.
+    igm : object
+        igm value.
+    """
     line_lumin = jnp.asarray(line_lumin, dtype=jnp.float64)
     rest_line_wave, rest_lumin = _local_line_gaussian_grid(line_wave, line_lumin, width_kms)
     rest_line_wave = jnp.maximum(rest_line_wave, 1.0e-6)
@@ -735,7 +1292,19 @@ def _project_local_line_filters(
     curves = context.packed_filter_curves_jax
 
     def _one_filter(filt_wave, filt_trans, denom, eff_wave):
-        """Project the local AGN line grid through one packed filter curve."""
+        """Project the local AGN line grid through one packed filter curve.
+
+        Parameters
+        ----------
+        filt_wave : object
+            filt_wave value.
+        filt_trans : object
+            filt_trans value.
+        denom : object
+            denom value.
+        eff_wave : object
+            eff_wave value.
+        """
         trans = jnp.interp(obs_line_wave, filt_wave, filt_trans, left=0.0, right=0.0)
         numer = jnp.sum(jnp.trapezoid(trans * flux_lambda, obs_line_wave, axis=1))
         f_lambda = numer / jnp.maximum(denom, 1.0e-30)
@@ -759,7 +1328,27 @@ def _project_local_nebular_line_filters(
     luminosity_distance_m,
     igm,
 ):
-    """Project flux-conserving nebular line emission through filters using local line grids."""
+    """Project flux-conserving nebular line emission through filters using local line grids.
+
+    Parameters
+    ----------
+    context : object
+        context value.
+    line_wave : object
+        line_wave value.
+    line_lumin : object
+        line_lumin value.
+    width_kms : object
+        width_kms value.
+    ebv_total : object
+        ebv_total value.
+    redshift : object
+        redshift value.
+    luminosity_distance_m : object
+        luminosity_distance_m value.
+    igm : object
+        igm value.
+    """
     rest_line_wave, rest_lumin = _local_flux_conserving_line_grid(line_wave, line_lumin, width_kms)
     redshift = jnp.asarray(redshift, dtype=jnp.float64)
     luminosity_distance_m = jnp.asarray(luminosity_distance_m, dtype=jnp.float64)
@@ -772,7 +1361,19 @@ def _project_local_nebular_line_filters(
     curves = context.packed_filter_curves_jax
 
     def _one_filter(filt_wave, filt_trans, denom, eff_wave):
-        """Project the local nebular line grid through one packed filter curve."""
+        """Project the local nebular line grid through one packed filter curve.
+
+        Parameters
+        ----------
+        filt_wave : object
+            filt_wave value.
+        filt_trans : object
+            filt_trans value.
+        denom : object
+            denom value.
+        eff_wave : object
+            eff_wave value.
+        """
         trans = jnp.interp(obs_line_wave, filt_wave, filt_trans, left=0.0, right=0.0)
         numer = jnp.sum(jnp.trapezoid(trans * flux_lambda, obs_line_wave, axis=1))
         f_lambda = numer / jnp.maximum(denom, 1.0e-30)
@@ -787,7 +1388,27 @@ def _project_local_nebular_line_filters(
 
 
 def _local_nebular_line_obs_sed(context: ModelContext, line_wave, line_lumin, width_kms, ebv_total, redshift, luminosity_distance_m, igm):
-    """Return observed-frame local-grid wavelengths and F_lambda for nebular lines."""
+    """Return observed-frame local-grid wavelengths and F_lambda for nebular lines.
+
+    Parameters
+    ----------
+    context : object
+        context value.
+    line_wave : object
+        line_wave value.
+    line_lumin : object
+        line_lumin value.
+    width_kms : object
+        width_kms value.
+    ebv_total : object
+        ebv_total value.
+    redshift : object
+        redshift value.
+    luminosity_distance_m : object
+        luminosity_distance_m value.
+    igm : object
+        igm value.
+    """
     rest_line_wave, rest_lumin = _local_flux_conserving_line_grid(line_wave, line_lumin, width_kms)
     redshift = jnp.asarray(redshift, dtype=jnp.float64)
     luminosity_distance_m = jnp.asarray(luminosity_distance_m, dtype=jnp.float64)
@@ -804,7 +1425,15 @@ def _local_nebular_line_obs_sed(context: ModelContext, line_wave, line_lumin, wi
 
 
 def _interp_fixed_local_line_terms(width_kms, cache):
-    """Interpolate cached fixed-z local line projection terms in log width."""
+    """Interpolate cached fixed-z local line projection terms in log width.
+
+    Parameters
+    ----------
+    width_kms : object
+        width_kms value.
+    cache : object
+        cache value.
+    """
     log_width = jnp.log(jnp.maximum(jnp.asarray(width_kms, dtype=jnp.float64), 1.0e-12))
     grid = cache.log_width_grid
     idx_hi = jnp.searchsorted(grid, log_width, side="right")
@@ -818,7 +1447,19 @@ def _interp_fixed_local_line_terms(width_kms, cache):
 
 
 def _project_fixed_cached_local_line_filters(context: ModelContext, line_lumin, width_kms, ebv_total):
-    """Project local AGN lines with fixed-z cached filter overlap terms."""
+    """Project local AGN lines with fixed-z cached filter overlap terms.
+
+    Parameters
+    ----------
+    context : object
+        context value.
+    line_lumin : object
+        line_lumin value.
+    width_kms : object
+        width_kms value.
+    ebv_total : object
+        ebv_total value.
+    """
     cache = context.fixed_local_line_projection_cache_jax
     profile_norm, attenuation_curve, projection_weight = _interp_fixed_local_line_terms(width_kms, cache)
     attenuation_factor = 10 ** (jnp.asarray(ebv_total, dtype=jnp.float64) * attenuation_curve / -2.5)
@@ -827,7 +1468,19 @@ def _project_fixed_cached_local_line_filters(context: ModelContext, line_lumin, 
 
 
 def _project_fixed_cached_local_nebular_line_filters(context: ModelContext, line_lumin, width_kms, ebv_total):
-    """Project local nebular lines with fixed-z cached filter overlap terms."""
+    """Project local nebular lines with fixed-z cached filter overlap terms.
+
+    Parameters
+    ----------
+    context : object
+        context value.
+    line_lumin : object
+        line_lumin value.
+    width_kms : object
+        width_kms value.
+    ebv_total : object
+        ebv_total value.
+    """
     cache = context.fixed_local_nebular_line_projection_cache_jax
     profile_norm, attenuation_curve, projection_weight = _interp_fixed_local_line_terms(width_kms, cache)
     attenuation_factor = 10 ** (jnp.asarray(ebv_total, dtype=jnp.float64) * attenuation_curve / -2.5)
@@ -836,32 +1489,80 @@ def _project_fixed_cached_local_nebular_line_filters(context: ModelContext, line
 
 
 def _interp_rest_sed(target_wave, source_wave, source_sed):
-    """Interpolate one rest-frame SED onto a new wavelength grid."""
+    """Interpolate one rest-frame SED onto a new wavelength grid.
+
+    Parameters
+    ----------
+    target_wave : object
+        target_wave value.
+    source_wave : object
+        source_wave value.
+    source_sed : object
+        source_sed value.
+    """
     return jnp.interp(target_wave, source_wave, source_sed, left=0.0, right=0.0)
 
 
 def _interp_dale_template(alpha, alpha_grid, dust_lumin_grid):
-    """Interpolate the Dale 2014 host-dust grid in alpha."""
+    """Interpolate the Dale 2014 host-dust grid in alpha.
+
+    Parameters
+    ----------
+    alpha : object
+        alpha value.
+    alpha_grid : object
+        alpha_grid value.
+    dust_lumin_grid : object
+        dust_lumin_grid value.
+    """
     alpha = jnp.clip(alpha, jnp.min(alpha_grid), jnp.max(alpha_grid))
     return jax.vmap(lambda row: jnp.interp(alpha, alpha_grid, row))(dust_lumin_grid.T)
 
 
 def _host_dust_emission(context: ModelContext, dust_luminosity, dust_alpha):
-    """Convert absorbed host luminosity into a Dale-template dust SED."""
+    """Convert absorbed host luminosity into a Dale-template dust SED.
+
+    Parameters
+    ----------
+    context : object
+        context value.
+    dust_luminosity : object
+        dust_luminosity value.
+    dust_alpha : object
+        dust_alpha value.
+    """
     dust_template = _interp_dale_template(dust_alpha, context.dust_alpha_grid_jax, context.dust_lumin_rest_jax)
     dust_rest_native = jnp.clip(dust_luminosity, 0.0, None) * jnp.clip(dust_template, 0.0, None)
     return dust_rest_native
 
 
 def _lnu_lsun_per_hz_to_llambda_w_per_a(wave_a, lnu_lsun_per_hz):
-    """Convert DSPS `Lnu` in Lsun/Hz to `Llambda` in W/Angstrom."""
+    """Convert DSPS `Lnu` in Lsun/Hz to `Llambda` in W/Angstrom.
+
+    Parameters
+    ----------
+    wave_a : object
+        wave_a value.
+    lnu_lsun_per_hz : object
+        lnu_lsun_per_hz value.
+    """
     wave_m = jnp.maximum(wave_a, 1e-12) * 1.0e-10
     lnu_w_per_hz = lnu_lsun_per_hz * L_SUN_W
     return lnu_w_per_hz * C_MS / (wave_m * wave_m) * 1.0e-10
 
 
 def _build_diffstar_host(context: ModelContext, prior_config: dict[str, Any], *, full_output: bool = True):
-    """Build the host-galaxy SED from Diffstar SFH and a precomputed SSP basis."""
+    """Build the host-galaxy SED from Diffstar SFH and a precomputed SSP basis.
+
+    Parameters
+    ----------
+    context : object
+        context value.
+    prior_config : object
+        prior_config value.
+    full_output : object
+        full_output value.
+    """
     ssp_lgmet = context.host_basis_jax.ssp_lgmet
     ssp_lg_age_gyr = context.host_basis_jax.ssp_lg_age_gyr
     host_basis_rest = context.host_basis_jax.rest_llambda
@@ -956,7 +1657,17 @@ def _build_diffstar_host(context: ModelContext, prior_config: dict[str, Any], *,
 
 
 def _build_delayed_host(context: ModelContext, prior_config: dict[str, Any], *, full_output: bool = True):
-    """Build the host-galaxy SED from a CIGALE-like delayed-tau SFH."""
+    """Build the host-galaxy SED from a CIGALE-like delayed-tau SFH.
+
+    Parameters
+    ----------
+    context : object
+        context value.
+    prior_config : object
+        prior_config value.
+    full_output : object
+        full_output value.
+    """
     ssp_lgmet = context.host_basis_jax.ssp_lgmet
     ssp_lg_age_gyr = context.host_basis_jax.ssp_lg_age_gyr
     host_basis_rest = context.host_basis_jax.rest_llambda
@@ -1060,7 +1771,17 @@ def _build_delayed_host(context: ModelContext, prior_config: dict[str, Any], *, 
 
 
 def _build_host_state(context: ModelContext, prior_config: dict[str, Any], *, full_output: bool = True):
-    """Dispatch to the configured host SFH model."""
+    """Dispatch to the configured host SFH model.
+
+    Parameters
+    ----------
+    context : object
+        context value.
+    prior_config : object
+        prior_config value.
+    full_output : object
+        full_output value.
+    """
     model_name = str(context.fit_config.galaxy.host_sfh_model).lower()
     if model_name in {"delayed", "sfhdelayed", "delayed_tau", "delayed-tau"}:
         return _build_delayed_host(context, prior_config, full_output=full_output)
@@ -1070,7 +1791,15 @@ def _build_host_state(context: ModelContext, prior_config: dict[str, Any], *, fu
 
 
 def _host_rest_on_basis(host_state: dict[str, Any], host_basis_jax):
-    """Evaluate the sampled SSP mixture on an alternate wavelength basis."""
+    """Evaluate the sampled SSP mixture on an alternate wavelength basis.
+
+    Parameters
+    ----------
+    host_state : object
+        host_state value.
+    host_basis_jax : object
+        host_basis_jax value.
+    """
     return host_state["formed_mass"] * jnp.tensordot(
         host_state["host_ssp_weights"],
         host_basis_jax.rest_llambda,
@@ -1079,7 +1808,13 @@ def _host_rest_on_basis(host_state: dict[str, Any], host_basis_jax):
 
 
 def _empty_host_state(context: ModelContext):
-    """Return zero-valued host placeholders for AGN-only fits."""
+    """Return zero-valued host placeholders for AGN-only fits.
+
+    Parameters
+    ----------
+    context : object
+        context value.
+    """
     rest_wave = _np_to_jnp(context.rest_wave)
     ssp_lgmet = _np_to_jnp(context.ssp_data.ssp_lgmet)
     ssp_lg_age_gyr = _np_to_jnp(context.ssp_data.ssp_lg_age_gyr)
@@ -1106,7 +1841,19 @@ def _empty_host_state(context: ModelContext):
 
 
 def _build_nebular_components(context: ModelContext, host_state: dict[str, Any], host_rest, prior_config: dict[str, Any]):
-    """Build CIGALE/GRAHSP-style host nebular absorption, lines, and continuum."""
+    """Build CIGALE/GRAHSP-style host nebular absorption, lines, and continuum.
+
+    Parameters
+    ----------
+    context : object
+        context value.
+    host_state : object
+        host_state value.
+    host_rest : object
+        host_rest value.
+    prior_config : object
+        prior_config value.
+    """
     rest_wave = context.rest_wave_jax
     cfg = context.fit_config.nebular
     zeros = jnp.zeros_like(rest_wave)
@@ -1242,7 +1989,15 @@ def _build_nebular_components(context: ModelContext, host_state: dict[str, Any],
 
 
 def _estimate_log_agn_amp_prior_loc(context: ModelContext, redshift: float) -> float:
-    """Estimate a rough log(lambda L_lambda, 5100 A) prior center from the photometry."""
+    """Estimate a rough log(lambda L_lambda, 5100 A) prior center from the photometry.
+
+    Parameters
+    ----------
+    context : object
+        context value.
+    redshift : object
+        redshift value.
+    """
     obs_fluxes_mjy = np.asarray(context.fluxes, dtype=float)
     mask = np.asarray(context.positive_detected_mask, dtype=bool) & np.isfinite(obs_fluxes_mjy) & (obs_fluxes_mjy > 0.0)
     if not np.any(mask):
@@ -1258,7 +2013,17 @@ def _estimate_log_agn_amp_prior_loc(context: ModelContext, redshift: float) -> f
 
 
 def _sample_redshift(context: ModelContext, prior_config: dict[str, Any], cfg) -> jnp.ndarray:
-    """Sample redshift from either the legacy Gaussian prior or a tabulated p(z)."""
+    """Sample redshift from either the legacy Gaussian prior or a tabulated p(z).
+
+    Parameters
+    ----------
+    context : object
+        context value.
+    prior_config : object
+        prior_config value.
+    cfg : object
+        cfg value.
+    """
     redshift_pdf = prior_config.get("redshift_pdf")
     if redshift_pdf is None:
         return numpyro.sample(
@@ -1288,13 +2053,31 @@ def _sample_redshift(context: ModelContext, prior_config: dict[str, Any], cfg) -
 
 
 def _chi2_upper_limit(obs_fluxes, model_fluxes, total_variance):
-    """Return the one-sided chi-square contribution for upper limits."""
+    """Return the one-sided chi-square contribution for upper limits.
+
+    Parameters
+    ----------
+    obs_fluxes : object
+        obs_fluxes value.
+    model_fluxes : object
+        model_fluxes value.
+    total_variance : object
+        total_variance value.
+    """
     z = (obs_fluxes - model_fluxes) / jnp.sqrt(2.0 * jnp.maximum(total_variance, 1e-60))
     return -2.0 * jnp.log(0.5 * (1.0 + jax.scipy.special.erf(z)) + 1e-300)
 
 
 def _robust_flux_scale(fluxes, valid_mask):
-    """Estimate a robust characteristic flux scale from valid photometric points."""
+    """Estimate a robust characteristic flux scale from valid photometric points.
+
+    Parameters
+    ----------
+    fluxes : object
+        fluxes value.
+    valid_mask : object
+        valid_mask value.
+    """
     fluxes = jnp.asarray(fluxes, dtype=jnp.float64)
     valid_mask = jnp.asarray(valid_mask, dtype=bool)
     safe_flux = jnp.where(valid_mask, jnp.abs(fluxes), jnp.nan)
@@ -1305,7 +2088,19 @@ def _robust_flux_scale(fluxes, valid_mask):
 
 
 def _absolute_flux_scale_logprior(pred_fluxes, obs_fluxes, valid_mask, sigma_dex):
-    """Penalize solutions whose overall flux scale is far from the data."""
+    """Penalize solutions whose overall flux scale is far from the data.
+
+    Parameters
+    ----------
+    pred_fluxes : object
+        pred_fluxes value.
+    obs_fluxes : object
+        obs_fluxes value.
+    valid_mask : object
+        valid_mask value.
+    sigma_dex : object
+        sigma_dex value.
+    """
     n_valid = jnp.sum(valid_mask.astype(jnp.int32))
 
     def _compute():
@@ -1319,7 +2114,15 @@ def _absolute_flux_scale_logprior(pred_fluxes, obs_fluxes, valid_mask, sigma_dex
 
 
 def _agn_variability_nev(agn_bol_lum_w, max_nev):
-    """Return the Simm+2016-inspired fractional variability variance cap."""
+    """Return the Simm+2016-inspired fractional variability variance cap.
+
+    Parameters
+    ----------
+    agn_bol_lum_w : object
+        agn_bol_lum_w value.
+    max_nev : object
+        max_nev value.
+    """
     agn_bol_lum_w = jnp.maximum(jnp.asarray(agn_bol_lum_w, dtype=jnp.float64), 1.0e-30)
     max_nev = jnp.maximum(jnp.asarray(max_nev, dtype=jnp.float64), 1.0e-6)
     log_lbol_erg_s = jnp.log10(agn_bol_lum_w * ERG_PER_WATT)
@@ -1329,7 +2132,17 @@ def _agn_variability_nev(agn_bol_lum_w, max_nev):
 
 
 def _host_capture_fraction(spatial_scale_arcsec, turnover_arcsec, slope):
-    """Map a band's effective spatial scale to the captured host-light fraction."""
+    """Map a band's effective spatial scale to the captured host-light fraction.
+
+    Parameters
+    ----------
+    spatial_scale_arcsec : object
+        spatial_scale_arcsec value.
+    turnover_arcsec : object
+        turnover_arcsec value.
+    slope : object
+        slope value.
+    """
     spatial_scale_arcsec = jnp.asarray(spatial_scale_arcsec, dtype=jnp.float64)
     valid = jnp.isfinite(spatial_scale_arcsec) & (spatial_scale_arcsec > 0.0)
     turnover_arcsec = jnp.maximum(jnp.asarray(turnover_arcsec, dtype=jnp.float64), 1.0e-3)
@@ -1360,7 +2173,49 @@ def photometric_loglike(
     nebular_line_component=None,
     local_nebular_line_uncertainty_dex=0.0,
 ):
-    """Evaluate the broadband photometric log-likelihood for one model state."""
+    """Evaluate the broadband photometric log-likelihood for one model state.
+
+    Parameters
+    ----------
+    pred_fluxes : object
+        pred_fluxes value.
+    obs_fluxes : object
+        obs_fluxes value.
+    obs_errors : object
+        obs_errors value.
+    upper_limits : object
+        upper_limits value.
+    data_mask : object
+        data_mask value.
+    systematics_width : object
+        systematics_width value.
+    likelihood_family : object
+        likelihood_family value.
+    student_t_df : object
+        student_t_df value.
+    agn_component : object
+        agn_component value.
+    agn_bol_lum_w : object
+        agn_bol_lum_w value.
+    agn_nev : object
+        agn_nev value.
+    variability_uncertainty : object
+        variability_uncertainty value.
+    attenuation_model_uncertainty : object
+        attenuation_model_uncertainty value.
+    transmitted_fraction : object
+        transmitted_fraction value.
+    lyman_break_uncertainty : object
+        lyman_break_uncertainty value.
+    filter_wavelength : object
+        filter_wavelength value.
+    redshift : object
+        redshift value.
+    nebular_line_component : object
+        nebular_line_component value.
+    local_nebular_line_uncertainty_dex : object
+        local_nebular_line_uncertainty_dex value.
+    """
     pred_fluxes = jnp.nan_to_num(pred_fluxes, nan=0.0, posinf=1.0e30, neginf=-1.0e30)
     agn_component = jnp.nan_to_num(agn_component, nan=0.0, posinf=1.0e30, neginf=-1.0e30)
     transmitted_fraction = jnp.nan_to_num(transmitted_fraction, nan=1.0e-4, posinf=1.0, neginf=1.0e-4)
@@ -1400,7 +2255,23 @@ def photometric_loglike(
 
 
 def spectroscopic_loglike(pred_fluxes, obs_fluxes, obs_errors, mask, systematics_width, student_t_df):
-    """Evaluate the observed-frame spectral log-likelihood."""
+    """Evaluate the observed-frame spectral log-likelihood.
+
+    Parameters
+    ----------
+    pred_fluxes : object
+        pred_fluxes value.
+    obs_fluxes : object
+        obs_fluxes value.
+    obs_errors : object
+        obs_errors value.
+    mask : object
+        mask value.
+    systematics_width : object
+        systematics_width value.
+    student_t_df : object
+        student_t_df value.
+    """
     pred_fluxes = jnp.nan_to_num(pred_fluxes, nan=0.0, posinf=1.0e30, neginf=-1.0e30)
     obs_fluxes = jnp.nan_to_num(obs_fluxes, nan=0.0, posinf=1.0e30, neginf=-1.0e30)
     obs_errors = jnp.nan_to_num(obs_errors, nan=1.0e30, posinf=1.0e30, neginf=1.0e30)
@@ -1413,7 +2284,21 @@ def spectroscopic_loglike(pred_fluxes, obs_fluxes, obs_errors, mask, systematics
 
 
 def spectroscopic_likelihood_weight(wave_obs, mask, spectrum_index, likelihood_weight_mode, resolving_power):
-    """Return a scalar spectral likelihood weight."""
+    """Return a scalar spectral likelihood weight.
+
+    Parameters
+    ----------
+    wave_obs : object
+        wave_obs value.
+    mask : object
+        mask value.
+    spectrum_index : object
+        spectrum_index value.
+    likelihood_weight_mode : object
+        likelihood_weight_mode value.
+    resolving_power : object
+        resolving_power value.
+    """
     if str(likelihood_weight_mode).lower() not in {"resolution_elements", "resolution"}:
         return jnp.asarray(1.0, dtype=jnp.float64)
     if resolving_power is None or not np.isfinite(float(resolving_power)) or float(resolving_power) <= 0.0:
@@ -1439,12 +2324,28 @@ def spectroscopic_likelihood_weight(wave_obs, mask, spectrum_index, likelihood_w
 
 
 def _flambda_to_mjy(wave_obs, flux_lambda):
-    """Convert internal f_lambda values on an observed wavelength grid to mJy."""
+    """Convert internal f_lambda values on an observed wavelength grid to mJy.
+
+    Parameters
+    ----------
+    wave_obs : object
+        wave_obs value.
+    flux_lambda : object
+        flux_lambda value.
+    """
     return 1.0e-10 / 299792458.0 * 1.0e29 * wave_obs * wave_obs * flux_lambda
 
 
 def _fixed_spectral_line_coverage_rest(context: ModelContext, cfg: FitConfig) -> tuple[float, float] | None:
-    """Return fixed-redshift rest coverage for the jaxqsofit tied-line table."""
+    """Return fixed-redshift rest coverage for the jaxqsofit tied-line table.
+
+    Parameters
+    ----------
+    context : object
+        context value.
+    cfg : object
+        cfg value.
+    """
     if cfg.observation.fits_redshift:
         return None
     if str(cfg.spectroscopy_config.backend).lower() != "jaxqsofit":
@@ -1464,7 +2365,19 @@ def _fixed_spectral_line_coverage_rest(context: ModelContext, cfg: FitConfig) ->
 
 
 def _photometric_agn_line_mask(context: ModelContext, cfg: FitConfig, line_wave, redshift):
-    """Mask native AGN SED lines to those not covered by jaxqsofit spectroscopy."""
+    """Mask native AGN SED lines to those not covered by jaxqsofit spectroscopy.
+
+    Parameters
+    ----------
+    context : object
+        context value.
+    cfg : object
+        cfg value.
+    line_wave : object
+        line_wave value.
+    redshift : object
+        redshift value.
+    """
     if str(cfg.spectroscopy_config.backend).lower() != "jaxqsofit":
         return jnp.ones_like(line_wave)
     jqf_cfg = cfg.spectroscopy_config.jaxqsofit
@@ -1490,7 +2403,17 @@ def _photometric_agn_line_mask(context: ModelContext, cfg: FitConfig, line_wave,
 
 
 def _integrated_spectral_flux_proxy(wave_obs, flux_mjy, mask):
-    """Integrate positive line flux density on the observed spectral grid."""
+    """Integrate positive line flux density on the observed spectral grid.
+
+    Parameters
+    ----------
+    wave_obs : object
+        wave_obs value.
+    flux_mjy : object
+        flux_mjy value.
+    mask : object
+        mask value.
+    """
     wave_obs = jnp.asarray(wave_obs, dtype=jnp.float64)
     flux_mjy = jnp.asarray(flux_mjy, dtype=jnp.float64)
     mask = jnp.asarray(mask, dtype=bool)
@@ -1499,7 +2422,17 @@ def _integrated_spectral_flux_proxy(wave_obs, flux_mjy, mask):
 
 
 def _line_strength_bridge_logprob(pred_flux, ref_flux, sigma_dex):
-    """Broad log-normal bridge between same-grid integrated line-flux proxies."""
+    """Broad log-normal bridge between same-grid integrated line-flux proxies.
+
+    Parameters
+    ----------
+    pred_flux : object
+        pred_flux value.
+    ref_flux : object
+        ref_flux value.
+    sigma_dex : object
+        sigma_dex value.
+    """
     floor = jnp.asarray(1.0e-30, dtype=jnp.float64)
     sigma_ln = jnp.maximum(jnp.asarray(float(sigma_dex), dtype=jnp.float64) * jnp.log(10.0), 1.0e-6)
     pred = jnp.maximum(jnp.asarray(pred_flux, dtype=jnp.float64), floor)
@@ -1521,7 +2454,31 @@ def _evaluate_jaxqsofit_backend(
     fixed_narrow_fwhm_kms=None,
     fixed_narrow_amp_scale=None,
 ):
-    """Evaluate optional jaxqsofit spectral components inside jaxsedfit."""
+    """Evaluate optional jaxqsofit spectral components inside jaxsedfit.
+
+    Parameters
+    ----------
+    wave_obs : object
+        wave_obs value.
+    redshift : object
+        redshift value.
+    continuum_mjy : object
+        continuum_mjy value.
+    cfg : object
+        cfg value.
+    line_prior_config : object
+        line_prior_config value.
+    rest_wave : object
+        rest_wave value.
+    feii_template_flux : object
+        feii_template_flux value.
+    line_coverage_rest : object
+        line_coverage_rest value.
+    fixed_narrow_fwhm_kms : object
+        fixed_narrow_fwhm_kms value.
+    fixed_narrow_amp_scale : object
+        fixed_narrow_amp_scale value.
+    """
     try:
         from jaxqsofit.components import SpectralComponentConfig, evaluate_joint_spectral_components
     except Exception as exc:  # pragma: no cover - exercised only without optional dependency
@@ -1569,7 +2526,25 @@ def evaluate_photometric_state(
     return_state: bool = True,
     force_component_fluxes: bool = False,
 ):
-    """Evaluate one jaxsedfit photometric model state inside a NumPyro trace."""
+    """Evaluate one jaxsedfit photometric model state inside a NumPyro trace.
+
+    Parameters
+    ----------
+    context : object
+        context value.
+    include_components : object
+        include_components value.
+    include_sed_agn_features : object
+        include_sed_agn_features value.
+    include_spectral_features : object
+        include_spectral_features value.
+    add_likelihood : object
+        add_likelihood value.
+    return_state : object
+        return_state value.
+    force_component_fluxes : object
+        force_component_fluxes value.
+    """
     cfg = context.fit_config
     prior_config = cfg.prior_config.to_mapping()
     rest_wave = context.rest_wave_jax
@@ -2842,7 +3817,19 @@ def grahsp_photometric_model(
     include_sed_agn_features: bool = True,
     include_spectral_features: bool = True,
 ):
-    """NumPyro model for one jaxsedfit photometric fit or predictive expansion."""
+    """NumPyro model for one jaxsedfit photometric fit or predictive expansion.
+
+    Parameters
+    ----------
+    context : object
+        context value.
+    include_components : object
+        include_components value.
+    include_sed_agn_features : object
+        include_sed_agn_features value.
+    include_spectral_features : object
+        include_spectral_features value.
+    """
     return evaluate_photometric_state(
         context,
         include_components=include_components,
@@ -2864,6 +3851,17 @@ def sed_numpyro_model(
     This is the preferred public name for the low-level NumPyro model. The
     historical name :func:`grahsp_photometric_model` remains available as a
     compatibility alias.
+
+    Parameters
+    ----------
+    context : object
+        context value.
+    include_components : object
+        include_components value.
+    include_sed_agn_features : object
+        include_sed_agn_features value.
+    include_spectral_features : object
+        include_spectral_features value.
     """
     return grahsp_photometric_model(
         context,
@@ -2887,6 +3885,23 @@ def evaluate_sed_model(
     This is the preferred public name for deterministic model evaluation. It
     delegates to :func:`evaluate_photometric_state`, which is kept for
     compatibility with earlier releases.
+
+    Parameters
+    ----------
+    context : object
+        context value.
+    include_components : object
+        include_components value.
+    include_sed_agn_features : object
+        include_sed_agn_features value.
+    include_spectral_features : object
+        include_spectral_features value.
+    add_likelihood : object
+        add_likelihood value.
+    return_state : object
+        return_state value.
+    force_component_fluxes : object
+        force_component_fluxes value.
     """
     return evaluate_photometric_state(
         context,
@@ -2900,10 +3915,26 @@ def evaluate_sed_model(
 
 
 def photometric_log_likelihood(*args, **kwargs):
-    """Return the photometric log likelihood for one model/data comparison."""
+    """Return the photometric log likelihood for one model/data comparison.
+
+    Parameters
+    ----------
+    *args : tuple
+        Additional positional arguments.
+    **kwargs : dict
+        Additional keyword arguments.
+    """
     return photometric_loglike(*args, **kwargs)
 
 
 def spectroscopic_log_likelihood(*args, **kwargs):
-    """Return the spectroscopic log likelihood for one model/data comparison."""
+    """Return the spectroscopic log likelihood for one model/data comparison.
+
+    Parameters
+    ----------
+    *args : tuple
+        Additional positional arguments.
+    **kwargs : dict
+        Additional keyword arguments.
+    """
     return spectroscopic_loglike(*args, **kwargs)

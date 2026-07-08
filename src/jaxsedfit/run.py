@@ -10,7 +10,13 @@ from .core import JAXSEDFit
 
 
 def _load_config(path: str) -> FitConfig:
-    """Load a fit configuration from a JSON file or Python module."""
+    """Load a fit configuration from a JSON file or Python module.
+
+    Parameters
+    ----------
+    path : object
+        path value.
+    """
     cfg_path = Path(path)
     if cfg_path.suffix == ".json":
         with open(cfg_path, "r", encoding="utf-8") as fh:
@@ -34,7 +40,13 @@ def _load_config(path: str) -> FitConfig:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Run the jaxsedfit single-object CLI entrypoint."""
+    """Run the jaxsedfit single-object CLI entrypoint.
+
+    Parameters
+    ----------
+    argv : object
+        argv value.
+    """
     parser = argparse.ArgumentParser(description="Run a single-source jaxsedfit fit.")
     parser.add_argument("config", help="Path to a Python or JSON fit config.")
     parser.add_argument("--method", choices=("map", "nuts"), default="map")

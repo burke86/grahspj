@@ -27,6 +27,19 @@ def build_host_basis_jax(
     The returned basis preserves the DSPS physical SSP luminosity and mass
     normalization used by JAXSEDFit. It is intended for reuse by spectral
     fitting code that needs host-galaxy SFH parity with JAXSEDFit.
+
+    Parameters
+    ----------
+    rest_wave : object
+        rest_wave value.
+    dsps_ssp_fn : object
+        dsps_ssp_fn value.
+    t_obs_gyr : object
+        t_obs_gyr value.
+    sfh_n_steps : object
+        sfh_n_steps value.
+    sfh_t_min_gyr : object
+        sfh_t_min_gyr value.
     """
     rest_wave = np.asarray(rest_wave, dtype=float)
     if rest_wave.ndim != 1 or rest_wave.size < 2:
@@ -59,6 +72,25 @@ def build_host_state(
     state contains the physical SSP weights, host rest-frame luminosity SED,
     stellar mass, surviving mass fraction, SFH diagnostics, and metallicity
     diagnostics produced by the underlying JAXSEDFit host model.
+
+    Parameters
+    ----------
+    host_basis_jax : object
+        host_basis_jax value.
+    prior_config : object
+        prior_config value.
+    host_sfh_model : object
+        host_sfh_model value.
+    t_obs_gyr : object
+        t_obs_gyr value.
+    redshift : object
+        redshift value.
+    sfh_t_min_gyr : object
+        sfh_t_min_gyr value.
+    tau_host_prior_scale : object
+        tau_host_prior_scale value.
+    full_output : object
+        full_output value.
     """
     galaxy = SimpleNamespace(
         host_sfh_model=str(host_sfh_model),
@@ -75,7 +107,15 @@ def build_host_state(
 
 
 def host_rest_on_basis(host_state: dict[str, Any], host_basis_jax: HostBasisJax):
-    """Evaluate a sampled JAXSEDFit host state on a compatible host basis."""
+    """Evaluate a sampled JAXSEDFit host state on a compatible host basis.
+
+    Parameters
+    ----------
+    host_state : object
+        host_state value.
+    host_basis_jax : object
+        host_basis_jax value.
+    """
     return _host_rest_on_basis(host_state, host_basis_jax)
 
 
