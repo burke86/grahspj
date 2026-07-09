@@ -12,7 +12,6 @@ from .mplstyle import use_style
 
 _COMPONENT_STYLE = [
     (("host_obs_sed",), "Host stellar", "#2b6cb0", 1.6),
-    (("nebular_continuum_obs_sed",), "Nebular emission", "#319795", 1.1),
     (("dust_obs_sed",), "Host dust", "#b7791f", 1.5),
     (("disk_obs_sed",), "AGN disk", "#c05621", 1.2),
     (("torus_obs_sed",), "Torus", "#805ad5", 1.2),
@@ -614,9 +613,35 @@ def plot_fit_sed(
             else:
                 ax_sed.plot(obs_wave, component, color=color, lw=max(lw, 2.0), ls=":", alpha=0.95, label=plot_label, zorder=3)
 
-        if "nebular_lines_local_obs_wave" in pred and "nebular_lines_local_obs_sed" in pred:
+        if "nebular_lines_local_obs_wave" in pred and "nebular_lines_local_obs_sed" in pred and "nebular_continuum_obs_sed" in pred:
+            continuum_obs = _median_site(pred, "nebular_continuum_obs_sed")
+            continuum_component = _to_display_flux_density(obs_wave, continuum_obs)
+            finite_continuum = np.asarray(continuum_component, dtype=float)
+            if np.any(np.isfinite(finite_continuum) & (np.abs(finite_continuum) > 0.0)):
+                plotted_components.append(continuum_component)
+                plot_label = "Nebular emission" if "Nebular emission" not in legend_labels_seen else "_nolegend_"
+                if plot_label != "_nolegend_":
+                    legend_labels_seen.add("Nebular emission")
+                ax_sed.plot(
+                    obs_wave,
+                    continuum_component,
+                    color="#319795",
+                    lw=2.0,
+                    ls=":",
+                    alpha=0.95,
+                    label=plot_label,
+                    zorder=3,
+                )
             local_wave = _median_site(pred, "nebular_lines_local_obs_wave")
-            local_component = _to_display_flux_density(local_wave, _median_site(pred, "nebular_lines_local_obs_sed"))
+            local_lines = _median_site(pred, "nebular_lines_local_obs_sed")
+            continuum = np.interp(
+                np.asarray(local_wave, dtype=float),
+                np.asarray(obs_wave, dtype=float),
+                np.asarray(continuum_obs, dtype=float),
+                left=0.0,
+                right=0.0,
+            )
+            local_component = _to_display_flux_density(local_wave, continuum + local_lines)
             finite_component = np.asarray(local_component, dtype=float)
             finite_wave = np.asarray(local_wave, dtype=float)
             finite = np.isfinite(finite_wave) & np.isfinite(finite_component) & (np.abs(finite_component) > 0.0)
@@ -624,14 +649,29 @@ def plot_fit_sed(
             local_component_plot = np.where(finite, finite_component, np.nan)
             if np.any(finite):
                 plotted_components.append(local_component)
-                plot_label = "Nebular emission" if "Nebular emission" not in legend_labels_seen else "_nolegend_"
-                if plot_label != "_nolegend_":
-                    legend_labels_seen.add("Nebular emission")
                 ax_sed.plot(
                     local_wave_plot,
                     local_component_plot,
                     color="#319795",
                     lw=1.4,
+                    ls=":",
+                    alpha=0.95,
+                    label="_nolegend_",
+                    zorder=3,
+                )
+        elif "nebular_obs_sed" in pred:
+            component = _to_display_flux_density(obs_wave, _median_site(pred, "nebular_obs_sed"))
+            finite_component = np.asarray(component, dtype=float)
+            if np.any(np.isfinite(finite_component) & (np.abs(finite_component) > 0.0)):
+                plotted_components.append(component)
+                plot_label = "Nebular emission" if "Nebular emission" not in legend_labels_seen else "_nolegend_"
+                if plot_label != "_nolegend_":
+                    legend_labels_seen.add("Nebular emission")
+                ax_sed.plot(
+                    obs_wave,
+                    component,
+                    color="#319795",
+                    lw=2.0,
                     ls=":",
                     alpha=0.95,
                     label=plot_label,
