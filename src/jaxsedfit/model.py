@@ -2012,6 +2012,18 @@ def _estimate_log_agn_amp_prior_loc(context: ModelContext, redshift: float) -> f
     return float(np.log(np.clip(agn_amp_w, 1.0e30, 1.0e50)))
 
 
+def _default_log_agn_amp_prior(context: ModelContext, redshift: float):
+    """Return the default AGN luminosity prior.
+
+    The photometry-seeded luminosity is an upper-envelope estimate because the
+    filter flux includes host light. Center the default below that value so
+    fit_agn=True allows weak/no AGN solutions instead of expecting the AGN to
+    explain the full optical continuum.
+    """
+    photometry_seeded_loc = _estimate_log_agn_amp_prior_loc(context, redshift)
+    return dist.Normal(photometry_seeded_loc - 4.0, 3.0)
+
+
 def _sample_redshift(context: ModelContext, prior_config: dict[str, Any], cfg) -> jnp.ndarray:
     """Sample redshift from either the legacy Gaussian prior or a tabulated p(z).
 
@@ -2640,7 +2652,7 @@ def evaluate_photometric_state(
         log_agn_amp = _sample_prior(
             prior_config,
             "log_agn_amp",
-            dist.Normal(_estimate_log_agn_amp_prior_loc(context, cfg.observation.redshift), 2.0),
+            _default_log_agn_amp_prior(context, cfg.observation.redshift),
         )
         agn_amp = jnp.exp(log_agn_amp)
         if fit_host:

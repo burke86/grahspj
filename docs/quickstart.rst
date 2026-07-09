@@ -614,6 +614,138 @@ When ``save_result=True`` or :meth:`jaxsedfit.FitResult.save` is used,
 ``<object_id>_samples.h5``. The bundle contains the fit config, posterior
 samples, cached predictive outputs, and summary metadata.
 
+Photometric apertures, PSFs, and spectra
+----------------------------------------
+
+SED photometry often mixes measurements with different effective apertures:
+SDSS PSF fluxes, 2MASS point-source photometry, AllWISE profile-fit
+photometry, fixed-aperture measurements, catalog ``AUTO``/total-like fluxes,
+and sometimes a spectrum from a fiber or slit. ``jaxsedfit`` handles this with
+an empirical extended-light capture model. The model is disabled by default;
+enable it when the photometry or spectroscopy does not all measure the same
+aperture.
+
+.. code-block:: python
+
+   cfg.likelihood.use_host_capture_model = True
+
+The capture model is driven by explicit angular-size metadata, not by the text
+label in ``photometry_method``. For each photometric point, ``jaxsedfit`` uses
+``aperture_diameter_arcsec`` when supplied; otherwise it uses
+``psf_fwhm_arcsec``. If neither is supplied for a band, that band is treated as
+total/full-capture photometry.
+
+Use ``photometry_method`` to record what kind of catalog measurement was used:
+``psf`` means point-source/PSF-like photometry, ``profile`` means profile-fit
+photometry such as AllWISE ``W?mag``, ``aperture`` means an explicit fixed
+aperture, ``auto`` means Kron/AUTO-like photometry, ``model``/``cmodel``/
+``petrosian`` mean extended-source model measurements, and ``catalog`` is a
+fallback for catalog fluxes whose aperture semantics are not known.
+
+.. code-block:: python
+
+   cfg.photometry = PhotometryData(
+       filter_names=[
+           "u_sdss", "g_sdss", "r_sdss", "i_sdss", "z_sdss",
+           "J_2mass", "H_2mass", "Ks_2mass", "W1", "W2",
+       ],
+       fluxes=[...],
+       errors=[...],
+       # Metadata labels are useful for provenance and plotting, but they do
+       # not by themselves change the aperture model.
+       photometry_method=[
+           "psf", "psf", "psf", "psf", "psf",
+           "psf", "psf", "psf", "profile", "profile",
+       ],
+       # SDSS and 2MASS point-source measurements use the PSF scale. AllWISE
+       # profile-fit measurements use the WISE beam/profile scale.
+       psf_fwhm_arcsec=[
+           1.4, 1.4, 1.4, 1.4, 1.4,
+           2.5, 2.5, 2.5, 6.08, 6.84,
+       ],
+       aperture_diameter_arcsec=[None] * 10,
+   )
+
+Internally, the model builds intrinsic total source components first. It then
+applies an aperture-dependent capture fraction only to extended components
+such as the stellar host, host dust, nebular emission, and narrow-line-like
+emission. Compact AGN continuum and broad-line-like components are not reduced
+by the host capture fraction. This is the intended behavior for SED-only fits:
+small-PSF optical points can see less host light than large-beam infrared
+points while still sharing one intrinsic physical source model.
+
+For joint spectrum+SED fitting, provide the same kind of aperture metadata for
+the spectrum. For example, an SDSS spectrum should usually use the 3 arcsec
+fiber diameter:
+
+.. code-block:: python
+
+   from jaxsedfit import SpectroscopyData
+
+   cfg.spectroscopy_list = [
+       SpectroscopyData(
+           wave_obs=wave_obs,
+           fluxes=spec_flux,
+           errors=spec_err,
+           instrument="sdss",
+           aperture_diameter_arcsec=3.0,
+       )
+   ]
+   cfg.spectroscopy_config.enabled = True
+   cfg.spectroscopy_config.fit_scale = True
+   cfg.likelihood.use_host_capture_model = True
+
+With this setup the photometry and spectrum are treated as different views of
+the same intrinsic source:
+
+* SDSS PSF photometry measures compact AGN light plus a PSF-captured fraction
+  of the extended host.
+* The SDSS spectrum measures compact AGN light plus a fiber-captured fraction
+  of the extended host.
+* 2MASS and AllWISE catalog photometry are finite-resolution measurements; they
+  use their PSF/profile scales rather than being automatically treated as total
+  host measurements.
+* Larger-aperture or total-like catalog photometry can approach the full host
+  contribution when supplied with large aperture metadata, or when no spatial
+  scale is supplied.
+
+``cfg.spectroscopy_config.fit_scale`` adds a gray spectral calibration/fiber
+scale parameter on top of the component capture model. This is useful because
+real spectra can have additional absolute calibration or slit-loss offsets
+relative to broadband photometry.
+
+AGN type and SED line branches
+------------------------------
+
+The native SED-scale AGN component is configured through
+:class:`jaxsedfit.AGNConfig`. The ``agn_type`` field selects which empirical
+AGN emission-line branch is used for broadband line corrections:
+
+.. code-block:: python
+
+   from jaxsedfit import AGNConfig
+
+   cfg.agn = AGNConfig(agn_type=1)
+
+``agn_type=1`` is the broad-line AGN branch. It includes the BLAGN broad-line
+template, the Seyfert-2-like narrow-line template, and allows native SED-scale
+Fe II and Balmer-continuum components when those switches are enabled.
+
+``agn_type=2`` is the narrow-line/Seyfert-2 branch. It excludes broad AGN
+lines and uses the Seyfert-2-like narrow-line template. Native Fe II and
+Balmer-continuum components are not used for this branch.
+
+``agn_type=3`` is the LINER branch. It excludes broad AGN lines and uses the
+LINER narrow-line template. This is a line-ratio/template choice for
+low-ionization narrow-line AGN; it is not a general ``type 3 quasar`` category.
+
+The ``agn_type`` setting affects the native jaxsedfit SED-scale AGN line
+corrections. When spectroscopy uses the ``jaxqsofit`` backend, the detailed
+spectral Fe II, Balmer continuum, and emission-line model is controlled by the
+``jaxqsofit`` configuration and line table. In joint fits, jaxqsofit should own
+lines covered by the spectrum, while jaxsedfit's SED-scale line corrections are
+most useful for broadband filters outside the spectral coverage.
+
 Changing jaxqsofit broad-line components
 ----------------------------------------
 

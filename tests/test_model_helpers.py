@@ -37,12 +37,14 @@ from jaxsedfit.model import (
     GRAHSP_SI_EM_LAM_A,
     GRAHSP_SI_EM_WIDTH_A,
     GRAHSP_TORUS_NORM_A,
+    C_MS,
     _attenuation_transmitted_fraction,
     _attenuation_curve,
     _apply_biattenuation,
     _apply_extended_capture,
     _balmer_continuum_jax,
     _chi2_upper_limit,
+    _default_log_agn_amp_prior,
     _feii_component,
     _flux_conserving_line_gaussians,
     _gal_lgmet_to_absolute_z,
@@ -94,14 +96,14 @@ def test_likelihood_defaults_include_absolute_flux_scale_prior():
 
 def test_photometry_method_is_normalized_metadata_only():
     phot = PhotometryData(
-        filter_names=["u", "g", "r"],
-        fluxes=[1.0, 2.0, 3.0],
-        errors=[0.1, 0.1, 0.1],
-        photometry_method=["PSF", " catalog ", None],
+        filter_names=["u", "g", "r", "i"],
+        fluxes=[1.0, 2.0, 3.0, 4.0],
+        errors=[0.1, 0.1, 0.1, 0.1],
+        photometry_method=["PSF", " profile ", " catalog ", None],
     )
     phot.validate()
 
-    assert phot.photometry_method == ["psf", "catalog", None]
+    assert phot.photometry_method == ["psf", "profile", "catalog", None]
 
     bad = PhotometryData(
         filter_names=["u"],
@@ -322,6 +324,24 @@ def test_agn_disk_is_normalized_at_5100_angstrom():
     assert disk[1] == pytest.approx(2.0)
     assert np.all(np.isfinite(disk))
     assert np.all(disk > 0.0)
+
+
+def test_default_agn_amplitude_prior_allows_weak_agn():
+    context = SimpleNamespace(
+        fluxes=np.asarray([1.0, 5.0, 2.0]),
+        positive_detected_mask=np.asarray([True, True, True]),
+        filters=[
+            SimpleNamespace(effective_wavelength=2500.0),
+            SimpleNamespace(effective_wavelength=5600.0),
+            SimpleNamespace(effective_wavelength=22000.0),
+        ],
+        luminosity_distance_m=1.0e26,
+    )
+    prior = _default_log_agn_amp_prior(context, redshift=0.1)
+
+    seeded_loc = np.log(4.0 * np.pi * context.luminosity_distance_m**2 * (C_MS / (5600.0e-10)) * 5.0e-29)
+    assert float(prior.loc) == pytest.approx(seeded_loc - 4.0)
+    assert float(prior.scale) == pytest.approx(3.0)
 
 
 def test_agn_disk_powerlaw_slopes_and_cutoff_are_in_wavelength_space():
