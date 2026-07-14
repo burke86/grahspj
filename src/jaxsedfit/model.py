@@ -376,8 +376,8 @@ def _sample_optional_normal(prior_config: dict[str, Any], key: str, default: flo
     return _sample_prior(prior_config, key, dist.Normal(default, scale))
 
 
-def _sample_optional_truncnorm(prior_config: dict[str, Any], key: str, default: float, scale: float, low: float, high: float):
-    """Return a fixed default unless a truncated Normal-like prior is explicitly configured.
+def _sample_bounded_normal(prior_config: dict[str, Any], key: str, default: float, scale: float, low, high):
+    """Sample a Normal-like prior truncated to model support.
 
     Parameters
     ----------
@@ -394,9 +394,40 @@ def _sample_optional_truncnorm(prior_config: dict[str, Any], key: str, default: 
     high : object
         high value.
     """
+    cfg = prior_config.get(key, None)
+    loc = default
+    prior_scale = scale
+    prior_low = low
+    prior_high = high
+    if isinstance(cfg, (tuple, list)) and len(cfg) >= 2:
+        loc, prior_scale = cfg[:2]
+    elif isinstance(cfg, dict):
+        family = str(cfg.get("dist", cfg.get("family", "normal"))).lower()
+        if family not in {"normal", "gaussian", "truncatednormal", "truncated_normal", "truncnormal", "truncnorm"}:
+            raise ValueError(f"prior_config[{key!r}] must be Normal-like to enforce bounded model support.")
+        loc = cfg.get("loc", default)
+        prior_scale = cfg.get("scale", scale)
+        if family not in {"normal", "gaussian"}:
+            prior_low = jnp.maximum(jnp.asarray(low, dtype=jnp.float64), jnp.asarray(cfg.get("low", low), dtype=jnp.float64))
+            prior_high = jnp.minimum(jnp.asarray(high, dtype=jnp.float64), jnp.asarray(cfg.get("high", high), dtype=jnp.float64))
+    prior_low = jnp.asarray(prior_low, dtype=jnp.float64)
+    prior_high = jnp.asarray(prior_high, dtype=jnp.float64)
+    return numpyro.sample(
+        key,
+        dist.TruncatedNormal(
+            jnp.asarray(loc, dtype=jnp.float64),
+            jnp.maximum(jnp.asarray(prior_scale, dtype=jnp.float64), 1.0e-6),
+            low=prior_low,
+            high=prior_high,
+        ),
+    )
+
+
+def _sample_optional_truncnorm(prior_config: dict[str, Any], key: str, default: float, scale: float, low, high):
+    """Return a fixed default unless a bounded Normal-like prior is configured."""
     if key not in prior_config:
         return jnp.asarray(default, dtype=jnp.float64)
-    return _sample_prior(prior_config, key, dist.TruncatedNormal(default, scale, low=low, high=high))
+    return _sample_bounded_normal(prior_config, key, default, scale, low, high)
 
 
 def _safe_log10(x):
@@ -952,6 +983,13 @@ def _attenuation_curve(wave_rest, opt_index, nir_index, norm, lam_break):
         lam_break value.
     """
     return norm * (wave_rest / lam_break) ** jnp.where(wave_rest < lam_break, opt_index, nir_index)
+
+
+def _absorbed_line_luminosity(line_wave, line_lumin, ebv, opt_index, nir_index, norm, lam_break):
+    """Return attenuation-absorbed energy from integrated narrow-line luminosities."""
+    curve = _attenuation_curve(line_wave, opt_index, nir_index, norm, lam_break)
+    transmitted = 10 ** (jnp.asarray(ebv, dtype=jnp.float64) * curve / -2.5)
+    return jnp.sum(jnp.asarray(line_lumin, dtype=jnp.float64) * (1.0 - transmitted))
 
 
 def _apply_biattenuation(wave_rest, gal_spec, agn_spec, ebv_gal, ebv_agn, opt_index, nir_index, norm, lam_break):
@@ -1619,17 +1657,17 @@ def _build_diffstar_host(context: ModelContext, prior_config: dict[str, Any], *,
         return_smh=True,
     )
 
-    gal_lgmet = _sample_prior(
+    gal_lgmet = _sample_bounded_normal(
         prior_config,
         "gal_lgmet",
-        dist.Normal(
-            _default_gal_lgmet_loc(
-                ssp_lgmet,
-                galaxy_cfg.ssp_metallicity_coordinate,
-                galaxy_cfg.ssp_solar_metallicity,
-            ),
-            0.5,
+        _default_gal_lgmet_loc(
+            ssp_lgmet,
+            galaxy_cfg.ssp_metallicity_coordinate,
+            galaxy_cfg.ssp_solar_metallicity,
         ),
+        0.5,
+        jnp.min(ssp_lgmet),
+        jnp.max(ssp_lgmet),
     )
     gal_lgmet_scatter = _sample_positive_distribution(
         prior_config,
@@ -1725,40 +1763,52 @@ def _build_delayed_host(context: ModelContext, prior_config: dict[str, Any], *, 
     log_stellar_mass = _sample_log_stellar_mass(prior_config)
     min_age = jnp.asarray(max(float(cfg.sfh_t_min_gyr), 1.0e-3), dtype=jnp.float64)
     max_age = jnp.maximum(t_obs_gyr, min_age * 1.01)
-    log_age_gyr = _sample_prior(
+    log_age_gyr = _sample_bounded_normal(
         prior_config,
         "log_sfh_age_gyr",
-        dist.TruncatedNormal(
-            np.log(min(3.0, max(float(context.t_obs_gyr), 1.0e-3))),
-            1.0,
-            low=jnp.log(min_age),
-            high=jnp.log(max_age),
-        ),
-    )
-    log_tau_over_age = _sample_prior(
-        prior_config,
-        "log_sfh_tau_over_age",
-        dist.Normal(0.0, float(cfg.tau_host_prior_scale)),
+        np.log(min(3.0, max(float(context.t_obs_gyr), 1.0e-3))),
+        1.0,
+        jnp.log(min_age),
+        jnp.log(max_age),
     )
     age_gyr = jnp.exp(log_age_gyr)
-    tau_gyr = jnp.clip(age_gyr * jnp.exp(log_tau_over_age), 0.03, 30.0)
-    log_tau_gyr = numpyro.deterministic("log_sfh_tau_gyr", jnp.log(tau_gyr))
+    if "log_sfh_tau_gyr" in prior_config:
+        log_tau_gyr = _sample_bounded_normal(
+            prior_config,
+            "log_sfh_tau_gyr",
+            np.log(1.0),
+            float(cfg.tau_host_prior_scale),
+            np.log(0.03),
+            np.log(30.0),
+        )
+        log_tau_over_age = numpyro.deterministic("log_sfh_tau_over_age", log_tau_gyr - log_age_gyr)
+    else:
+        log_tau_over_age = _sample_bounded_normal(
+            prior_config,
+            "log_sfh_tau_over_age",
+            0.0,
+            float(cfg.tau_host_prior_scale),
+            jnp.log(0.03 / age_gyr),
+            jnp.log(30.0 / age_gyr),
+        )
+        log_tau_gyr = numpyro.deterministic("log_sfh_tau_gyr", log_age_gyr + log_tau_over_age)
+    tau_gyr = jnp.exp(log_tau_gyr)
     stellar_age_gyr = jnp.maximum(t_obs_gyr - gal_t_table, 0.0)
     sfh_age_gyr = age_gyr - stellar_age_gyr
     base_sfh = jnp.where((sfh_age_gyr > 0.0) & (sfh_age_gyr <= age_gyr), sfh_age_gyr * jnp.exp(-sfh_age_gyr / tau_gyr), 0.0)
     base_smh = _cumulative_trapezoid(base_sfh, gal_t_table) * 1.0e9
 
-    gal_lgmet = _sample_prior(
+    gal_lgmet = _sample_bounded_normal(
         prior_config,
         "gal_lgmet",
-        dist.Normal(
-            _default_gal_lgmet_loc(
-                ssp_lgmet,
-                cfg.ssp_metallicity_coordinate,
-                cfg.ssp_solar_metallicity,
-            ),
-            0.5,
+        _default_gal_lgmet_loc(
+            ssp_lgmet,
+            cfg.ssp_metallicity_coordinate,
+            cfg.ssp_solar_metallicity,
         ),
+        0.5,
+        jnp.min(ssp_lgmet),
+        jnp.max(ssp_lgmet),
     )
     gal_lgmet_scatter = _sample_positive_distribution(
         prior_config,
@@ -1899,7 +1949,14 @@ def _empty_host_state(context: ModelContext):
     }
 
 
-def _build_nebular_components(context: ModelContext, host_state: dict[str, Any], host_rest, prior_config: dict[str, Any]):
+def _build_nebular_components(
+    context: ModelContext,
+    host_state: dict[str, Any],
+    host_rest,
+    prior_config: dict[str, Any],
+    *,
+    build_line_sed: bool = True,
+):
     """Build CIGALE/GRAHSP-style host nebular absorption, lines, and continuum.
 
     Parameters
@@ -1938,7 +1995,15 @@ def _build_nebular_components(context: ModelContext, host_state: dict[str, Any],
             "line_lumin": jnp.zeros((1,), dtype=jnp.float64),
         }
 
-    logu = _sample_optional_normal(prior_config, "nebular_logU", float(cfg.logU), 0.3)
+    templates = context.nebular_templates_jax
+    logu = _sample_optional_truncnorm(
+        prior_config,
+        "nebular_logU",
+        float(cfg.logU),
+        0.3,
+        templates.logu_grid[0],
+        templates.logu_grid[-1],
+    )
     default_zgas = float(cfg.zgas) if cfg.zgas is not None else None
     galaxy_cfg = context.fit_config.galaxy
     host_zgas = _gal_lgmet_to_absolute_z(
@@ -1947,9 +2012,23 @@ def _build_nebular_components(context: ModelContext, host_state: dict[str, Any],
         solar_metallicity=galaxy_cfg.ssp_solar_metallicity,
     )
     zgas_default = host_zgas if default_zgas is None else jnp.asarray(default_zgas, dtype=jnp.float64)
-    zgas = _sample_optional_normal(prior_config, "nebular_zgas", float(default_zgas) if default_zgas is not None else 0.02, 0.01)
-    zgas = jnp.where(default_zgas is None and "nebular_zgas" not in prior_config, zgas_default, jnp.clip(zgas, 1.0e-6, 1.0))
-    ne = jnp.clip(_sample_optional_normal(prior_config, "nebular_ne", float(cfg.ne), 100.0), 1.0e-6, 1.0e8)
+    zgas = _sample_optional_truncnorm(
+        prior_config,
+        "nebular_zgas",
+        float(default_zgas) if default_zgas is not None else 0.02,
+        0.01,
+        templates.z_grid[0],
+        templates.z_grid[-1],
+    )
+    zgas = jnp.where(default_zgas is None and "nebular_zgas" not in prior_config, zgas_default, zgas)
+    ne = _sample_optional_truncnorm(
+        prior_config,
+        "nebular_ne",
+        float(cfg.ne),
+        100.0,
+        templates.ne_grid[0],
+        templates.ne_grid[-1],
+    )
     f_esc = _sample_optional_truncnorm(prior_config, "nebular_f_esc", float(cfg.f_esc), 0.1, 0.0, 1.0)
     default_remaining = max(1.0 - float(cfg.f_esc), 1.0e-12)
     default_f_dust_fraction = float(np.clip(float(cfg.f_dust) / default_remaining, 0.0, 1.0))
@@ -1962,7 +2041,14 @@ def _build_nebular_components(context: ModelContext, host_state: dict[str, Any],
         1.0,
     )
     f_dust = jnp.maximum(1.0 - f_esc, 0.0) * f_dust_fraction
-    lines_width = jnp.clip(_sample_optional_normal(prior_config, "nebular_lines_width", float(cfg.lines_width), 100.0), 0.0, 1.0e5)
+    lines_width = _sample_optional_truncnorm(
+        prior_config,
+        "nebular_lines_width",
+        float(cfg.lines_width),
+        100.0,
+        1.0,
+        1.0e5,
+    )
     if "log_nebular_line_scale" in prior_config:
         line_scale = _sample_log_positive_from_distribution(
             prior_config,
@@ -1987,7 +2073,6 @@ def _build_nebular_components(context: ModelContext, host_state: dict[str, Any],
     ly_lum_total = jnp.clip(ly_lum_young + ly_lum_old, 0.0, 1.0e300)
 
     corr = _cigale_nebular_correction(f_esc, f_dust)
-    templates = context.nebular_templates_jax
     rest_templates = context.nebular_rest_templates_jax
     continuum_per_photon = _trilinear_nebular_grid(
         rest_templates.continuum_lumin_per_a_per_photon,
@@ -2009,7 +2094,9 @@ def _build_nebular_components(context: ModelContext, host_state: dict[str, Any],
     )
     continuum_rest = continuum_per_photon * n_ly_total * corr
     line_lumin = line_lumin_per_photon * n_ly_total * corr
-    if context.fixed_nebular_line_profile_jax is not None:
+    if not build_line_sed:
+        lines_rest = zeros
+    elif context.fixed_nebular_line_profile_jax is not None:
         lines_rest = context.fixed_nebular_line_profile_jax * n_ly_total * corr
     elif rest_templates.line_profile_per_photon is not None:
         line_profile_per_photon = _trilinear_nebular_grid(
@@ -2675,6 +2762,15 @@ def evaluate_photometric_state(
         and not spectroscopy_enabled
         and not cfg.likelihood.attenuation_model_uncertainty
     )
+    skip_coarse_nebular_line_grid = bool(
+        fit_host
+        and cfg.nebular.enabled
+        and cfg.nebular.emission
+        and cfg.likelihood.use_local_line_photometry
+        and not include_components
+        and not spectroscopy_enabled
+        and not cfg.likelihood.attenuation_model_uncertainty
+    )
     needs_spec_host_basis = bool(
         spectroscopy_enabled
         and str(cfg.spectroscopy_config.backend).lower() == "jaxqsofit"
@@ -3010,10 +3106,13 @@ def evaluate_photometric_state(
         else jnp.asarray(0.0, dtype=jnp.float64)
     )
     if cfg.galaxy.use_energy_balance and fit_host:
-        dust_alpha = _sample_prior(
+        dust_alpha = _sample_bounded_normal(
             prior_config,
             "dust_alpha",
-            dist.TruncatedNormal(cfg.galaxy.dust_alpha, 0.4, low=float(np.min(dust_alpha_grid)), high=float(np.max(dust_alpha_grid))),
+            cfg.galaxy.dust_alpha,
+            0.4,
+            float(np.min(dust_alpha_grid)),
+            float(np.max(dust_alpha_grid)),
         )
     else:
         dust_alpha = jnp.asarray(float(cfg.galaxy.dust_alpha), dtype=jnp.float64)
@@ -3053,7 +3152,13 @@ def evaluate_photometric_state(
         redshift = context.fixed_redshift_jax
         luminosity_distance_m = context.fixed_luminosity_distance_m_jax
         igm = context.fixed_igm_jax
-    nebular = _build_nebular_components(context, host_state, host_rest, prior_config)
+    nebular = _build_nebular_components(
+        context,
+        host_state,
+        host_rest,
+        prior_config,
+        build_line_sed=not skip_coarse_nebular_line_grid,
+    )
     host_with_nebular_rest = host_rest + nebular["absorption_rest"] + nebular["emission_rest"]
     agn_attenuated_input_rest = disk_rest + feii_rest + line_rest + balmer_rest
     gal_att_rest, agn_attenuated_rest, host_absorbed_rest, dust_luminosity = _apply_biattenuation(
@@ -3067,6 +3172,19 @@ def evaluate_photometric_state(
         1.2,
         GRAHSP_BIATTENUATION_BREAK_A,
     )
+    if skip_coarse_nebular_line_grid:
+        # Narrow lines are generally unresolved by the broadband rest-wave
+        # grid.  Use their conserved integrated luminosities for energy
+        # balance instead of integrating undersampled Gaussian profiles.
+        dust_luminosity = dust_luminosity + _absorbed_line_luminosity(
+            context.nebular_templates_jax.line_wave_a,
+            nebular["line_lumin"],
+            ebv_gal,
+            -1.2,
+            -3.0,
+            1.2,
+            GRAHSP_BIATTENUATION_BREAK_A,
+        )
     dust_luminosity = dust_luminosity + nebular["dust_luminosity"]
     attenuation_curve = _attenuation_curve(rest_wave, -1.2, -3.0, 1.2, GRAHSP_BIATTENUATION_BREAK_A)
     gal_att_factor = 10 ** (ebv_gal * attenuation_curve / -2.5)

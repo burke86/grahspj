@@ -300,9 +300,9 @@ class LikelihoodConfig:
     use_local_line_photometry: bool = True
     local_nebular_line_uncertainty_dex: float = 0.3
     use_fixed_local_line_cache: bool = True
-    fixed_local_line_cache_n_width: int = 128
-    fixed_local_line_cache_min_width_kms: float = 200.0
-    fixed_local_line_cache_max_width_kms: float = 30000.0
+    fixed_local_line_cache_n_width: int = 256
+    fixed_local_line_cache_min_width_kms: float = 1.0
+    fixed_local_line_cache_max_width_kms: float = 100000.0
     use_redshift_projection_cache: bool = True
     redshift_projection_n_grid: int = 128
     redshift_projection_sigma: float = 6.0
@@ -832,6 +832,8 @@ class PriorConfig:
     def validate(self) -> None:
         """Validate nested semantic prior objects."""
         self.redshift.validate()
+        if self.host.log_sfh_tau_gyr is not None and self.host.log_sfh_tau_over_age is not None:
+            raise ValueError("Configure only one of host.log_sfh_tau_gyr and host.log_sfh_tau_over_age.")
 
     def to_mapping(self) -> dict[str, Any]:
         """Return the flat prior mapping consumed by the NumPyro model."""
