@@ -502,6 +502,7 @@ def _median_effective_variance(fitter, pred: dict[str, Any]) -> np.ndarray:
             """Minimal likelihood configuration used when old fitter objects lack one."""
 
             systematics_width = 0.0
+            agn_systematics_width = 0.0
             variability_uncertainty = False
             attenuation_model_uncertainty = False
             lyman_break_uncertainty = False
@@ -509,12 +510,18 @@ def _median_effective_variance(fitter, pred: dict[str, Any]) -> np.ndarray:
         cfg = _FallbackLikelihood()
 
     obs_variance = obs_errors**2
+    obs_fluxes = np.asarray(getattr(fitter.context, "fluxes", fitter.config.photometry.fluxes), dtype=float)
     systematics_width = (
         float(np.median(np.asarray(pred["systematics_width"], dtype=float)))
         if "systematics_width" in pred
         else float(cfg.systematics_width)
     )
-    sys_variance = (systematics_width * pred_fluxes) ** 2
+    agn_systematics_width = (
+        float(np.median(np.asarray(pred["agn_systematics_width"], dtype=float)))
+        if "agn_systematics_width" in pred
+        else float(getattr(cfg, "agn_systematics_width", 0.0))
+    )
+    sys_variance = (systematics_width * obs_fluxes) ** 2 + (agn_systematics_width * agn_fluxes) ** 2
     var_variance = np.where(bool(cfg.variability_uncertainty), agn_variability_nev * agn_fluxes**2, 0.0)
     if cfg.attenuation_model_uncertainty:
         tf = np.clip(transmitted_fraction, 1e-4, 1.0)

@@ -97,6 +97,8 @@ def test_likelihood_defaults_include_local_line_photometry():
     assert not hasattr(cfg, "absolute_flux_scale_prior_sigma_dex")
     assert cfg.use_local_line_photometry is True
     assert cfg.local_nebular_line_uncertainty_dex == pytest.approx(0.3)
+    assert cfg.fit_agn_systematics_width is True
+    assert cfg.agn_systematics_width_prior_scale == pytest.approx(0.20)
 
 
 @pytest.mark.parametrize("redshift", [-0.1, np.nan, np.inf])
@@ -946,6 +948,24 @@ def test_local_nebular_line_uncertainty_regularizes_only_line_component():
         )
     )
     assert no_line_component == pytest.approx(exact)
+
+
+def test_photometric_systematic_variance_matches_grahsp_error_model():
+    kwargs = _minimal_photometric_loglike_kwargs()
+    kwargs.update(
+        obs_fluxes=np.asarray([8.0]),
+        obs_errors=np.asarray([0.5]),
+        systematics_width=0.1,
+        agn_systematics_width=0.02,
+        agn_component=np.asarray([5.0]),
+    )
+    pred_fluxes = np.asarray([9.0])
+
+    actual = float(photometric_loglike(pred_fluxes=pred_fluxes, **kwargs))
+    sigma = np.sqrt(0.5**2 + (0.1 * 8.0) ** 2 + (0.02 * 5.0) ** 2)
+    expected = -0.5 * (((8.0 - 9.0) / sigma) ** 2 + np.log(2.0 * np.pi * sigma**2))
+
+    assert actual == pytest.approx(expected)
 
 
 def _minimal_photometric_loglike_kwargs():

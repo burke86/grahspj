@@ -289,6 +289,9 @@ class LikelihoodConfig:
     systematics_width: float = 0.10
     fit_systematics_width: bool = True
     systematics_width_prior_scale: float = 0.10
+    agn_systematics_width: float = 0.0
+    fit_agn_systematics_width: bool = True
+    agn_systematics_width_prior_scale: float = 0.20
     likelihood_family: str = "gaussian"
     student_t_df: float = 5.0
     variability_uncertainty: bool = True
@@ -747,6 +750,8 @@ class LikelihoodPriorConfig:
     """Likelihood and calibration prior options."""
     systematics_width: Any | None = None
     log_systematics_width: Any | None = None
+    agn_systematics_width: Any | None = None
+    log_agn_systematics_width: Any | None = None
     host_capture_scale_arcsec: Any | None = None
     log_host_capture_scale_arcsec: Any | None = None
     host_capture_slope: Any | None = None
@@ -761,6 +766,8 @@ class LikelihoodPriorConfig:
             {
                 "systematics_width": "systematics_width",
                 "log_systematics_width": "log_systematics_width",
+                "agn_systematics_width": "agn_systematics_width",
+                "log_agn_systematics_width": "log_agn_systematics_width",
                 "host_capture_scale_arcsec": "host_capture_scale_arcsec",
                 "log_host_capture_scale_arcsec": "log_host_capture_scale_arcsec",
                 "host_capture_slope": "host_capture_slope",

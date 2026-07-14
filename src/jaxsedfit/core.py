@@ -335,6 +335,7 @@ class JAXSEDFit:
             "log_agn_bol_luminosity_fit",
             "log_disk_luminosity_fit",
             "agn_variability_nev",
+            "agn_systematics_width",
             "host_total_fluxes",
             "host_capture_source_fluxes",
             "agn_narrow_line_fluxes_total",
