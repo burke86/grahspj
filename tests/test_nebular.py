@@ -33,12 +33,13 @@ def _mock_config():
         galaxy=GalaxyConfig(dsps_ssp_fn="fake.h5", rest_wave_min=100.0, rest_wave_max=10000.0, n_wave=96, sfh_n_steps=16),
         agn=AGNConfig(
             fit_agn=False,
-            feii_template=FeIITemplate(name="fe", wave=[1000.0, 2000.0], lumin=[1.0, 0.5]),
+            feii_template=FeIITemplate(name="fe", wave=[1000.0, 2000.0], lumin=[1.0, 0.5], wavelength_unit="angstrom"),
             emission_line_template=EmissionLineTemplate(
                 wave=[121.6, 486.1],
                 lumin_blagn=[1.0, 0.5],
                 lumin_sy2=[0.2, 0.1],
                 lumin_liner=[0.1, 0.05],
+                wavelength_unit="angstrom",
             ),
         ),
         inference=InferenceConfig(map_steps=2),

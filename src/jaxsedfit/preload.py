@@ -361,6 +361,28 @@ def _scalar_angstrom_value(value) -> float:
     return float(value)
 
 
+def _inline_wavelengths_to_angstrom(values, wavelength_unit: str | None, label: str) -> np.ndarray:
+    """Convert explicitly unit-tagged inline template wavelengths to Angstrom."""
+    aliases = {
+        "angstrom": u.AA,
+        "angstroms": u.AA,
+        "aa": u.AA,
+        "a": u.AA,
+        "nm": u.nm,
+        "nanometer": u.nm,
+        "nanometers": u.nm,
+        "um": u.um,
+        "micron": u.um,
+        "microns": u.um,
+    }
+    unit_key = str(wavelength_unit).strip().lower()
+    try:
+        unit = aliases[unit_key]
+    except KeyError as exc:
+        raise ValueError(f"{label}.wavelength_unit must be one of: angstrom, nm, micron.") from exc
+    return np.asarray((np.asarray(values, dtype=float) * unit).to_value(u.AA), dtype=float)
+
+
 def _mw_band_attenuation_factor(wave_obs, filt_trans, ebv, r_v=3.1):
     """Compute the Milky Way attenuation factor integrated through one bandpass.
 
@@ -565,6 +587,8 @@ def _load_templates(cfg: FitConfig) -> LoadedTemplates:
         need_agn_templates,
         need_dust_templates,
         feii.name,
+        feii.wavelength_unit,
+        em.wavelength_unit,
         id(feii.wave),
         id(feii.lumin),
         id(em.wave),
@@ -597,9 +621,9 @@ def _load_templates(cfg: FitConfig) -> LoadedTemplates:
         return loaded
     if feii.wave is not None and em.wave is not None:
         loaded = LoadedTemplates(
-            feii_wave=np.asarray(feii.wave, dtype=float),
+            feii_wave=_inline_wavelengths_to_angstrom(feii.wave, feii.wavelength_unit, "agn.feii_template"),
             feii_lumin=np.asarray(feii.lumin, dtype=float),
-            line_wave=np.asarray(em.wave, dtype=float),
+            line_wave=_inline_wavelengths_to_angstrom(em.wave, em.wavelength_unit, "agn.emission_line_template"),
             line_blagn=np.asarray(em.lumin_blagn, dtype=float),
             line_sy2=np.asarray(em.lumin_sy2, dtype=float),
             line_liner=np.asarray(em.lumin_liner, dtype=float),
@@ -985,7 +1009,7 @@ def _build_igm_cache_jax(rest_wave: np.ndarray) -> IGMCacheJax:
     wavelength = jnp.asarray(rest_wave, dtype=jnp.float64)
     n_transitions_low = 10
     n_transitions_max = 31
-    lambda_limit = 91.2
+    lambda_limit = 912.0
     n_arr = jnp.arange(n_transitions_max, dtype=jnp.float64)
     lambda_n = jnp.where(n_arr >= 2, lambda_limit / (1.0 - 1.0 / jnp.maximum(n_arr * n_arr, 1.0)), 1.0)
     z_n = wavelength[None, :] / lambda_n[:, None] - 1.0
@@ -1073,7 +1097,7 @@ def _build_fixed_igm_jax(igm_cache: IGMCacheJax, redshift: float) -> jnp.ndarray
     )
     term4 = jnp.sum(term4_terms, axis=0)
     tau_l_lls = jnp.where(w, n0 * ((term1 - term2) * term3 - term4), 0.0)
-    lambda_min_igm = (1.0 + z) * 70.0
+    lambda_min_igm = (1.0 + z) * 700.0
     weight = jnp.where(obs_wavelength < lambda_min_igm, (obs_wavelength / lambda_min_igm) ** 2, 1.0)
     return jnp.exp(-tau_taun - tau_l_igm - tau_l_lls) * weight
 

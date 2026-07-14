@@ -1,7 +1,8 @@
 import numpy as np
 import jax.numpy as jnp
 import numpyro
-from numpyro.handlers import seed, trace
+import pytest
+from numpyro.handlers import seed, substitute, trace
 
 from jaxsedfit.host import HostBasisJax, build_host_state, host_rest_on_basis
 
@@ -93,3 +94,55 @@ def test_public_host_rest_on_basis_reuses_sampled_weights():
     assert host_rest.shape == (5,)
     assert np.isfinite(np.asarray(host_rest, dtype=float)).all()
     assert np.allclose(np.asarray(host_rest), 2.0 * np.asarray(tr["public_host_rest"]["value"]))
+
+
+def _fixed_mass_host_trace(log_stellar_mass):
+    basis = _toy_host_basis()
+
+    def model():
+        state = build_host_state(
+            basis,
+            {"mass_metallicity_relation": {"enabled": False}},
+            host_sfh_model="delayed",
+            t_obs_gyr=1.2,
+        )
+        for key in (
+            "host_rest",
+            "host_ssp_weights",
+            "formed_mass",
+            "surviving_mass_fraction",
+            "gal_sfr_table",
+            "gal_smh_table",
+            "log_stellar_mass",
+        ):
+            numpyro.deterministic(f"mass_test_{key}", state[key])
+
+    fixed = substitute(model, data={"log_stellar_mass": jnp.asarray(log_stellar_mass)})
+    return trace(seed(fixed, 27)).get_trace()
+
+
+def test_host_luminosity_and_histories_scale_linearly_with_stellar_mass():
+    low = _fixed_mass_host_trace(8.0)
+    high = _fixed_mass_host_trace(9.0)
+
+    for key in ("host_rest", "formed_mass", "gal_sfr_table", "gal_smh_table"):
+        low_value = np.asarray(low[f"mass_test_{key}"]["value"], dtype=float)
+        high_value = np.asarray(high[f"mass_test_{key}"]["value"], dtype=float)
+        np.testing.assert_allclose(high_value, 10.0 * low_value, rtol=2.0e-12, atol=1.0e-20)
+    np.testing.assert_allclose(
+        np.asarray(high["mass_test_host_ssp_weights"]["value"]),
+        np.asarray(low["mass_test_host_ssp_weights"]["value"]),
+        rtol=0.0,
+        atol=0.0,
+    )
+
+
+def test_host_surviving_and_formed_mass_accounting_is_closed():
+    tr = _fixed_mass_host_trace(9.25)
+    formed = float(np.asarray(tr["mass_test_formed_mass"]["value"]))
+    surviving_fraction = float(np.asarray(tr["mass_test_surviving_mass_fraction"]["value"]))
+    target_surviving = 10.0 ** float(np.asarray(tr["mass_test_log_stellar_mass"]["value"]))
+    final_history_mass = float(np.asarray(tr["mass_test_gal_smh_table"]["value"])[-1])
+
+    assert formed * surviving_fraction == pytest.approx(target_surviving, rel=2.0e-12)
+    assert final_history_mass == pytest.approx(formed, rel=2.0e-12)

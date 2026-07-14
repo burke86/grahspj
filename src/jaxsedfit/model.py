@@ -987,6 +987,14 @@ def _attenuation_transmitted_fraction(direct_attenuated, direct_intrinsic):
     )
 
 
+def _band_transmitted_fraction(direct_attenuated_flux, direct_intrinsic_flux):
+    """Return a dimensionless bandwise attenuated-to-intrinsic flux ratio."""
+    attenuated = jnp.asarray(direct_attenuated_flux, dtype=jnp.float64)
+    intrinsic = jnp.asarray(direct_intrinsic_flux, dtype=jnp.float64)
+    ratio = attenuated / jnp.maximum(intrinsic, 1.0e-30)
+    return jnp.where(intrinsic > 0.0, jnp.clip(ratio, 1.0e-4, 1.0), 1.0)
+
+
 def _apply_extended_capture(total_flux, extended_flux, capture_fraction):
     """Return total flux after aperture capture of extended components only.
 
@@ -3037,10 +3045,8 @@ def evaluate_photometric_state(
     )
     agn_rest = agn_attenuated_rest + torus_att_rest
     total_rest = gal_att_rest + dust_rest + agn_rest
-    transmitted_fraction = _attenuation_transmitted_fraction(
-        gal_att_rest + agn_attenuated_rest,
-        host_with_nebular_rest + agn_attenuated_input_rest,
-    )
+    direct_intrinsic_rest = host_with_nebular_rest + agn_attenuated_input_rest
+    direct_attenuated_rest = gal_att_rest + agn_attenuated_rest
     fast_projection_enabled = _can_use_fixed_filter_projection(context, cfg)
     redshift_projection_enabled = (
         _can_use_redshift_filter_projection(context, cfg)
@@ -3541,7 +3547,6 @@ def evaluate_photometric_state(
         line_nl_obs = _redshift_to_obs(rest_wave, line_nl_att_rest * igm, obs_wave, redshift, luminosity_distance_m)
         line_liner_obs = _redshift_to_obs(rest_wave, line_liner_att_rest * igm, obs_wave, redshift, luminosity_distance_m)
         balmer_obs = _redshift_to_obs(rest_wave, balmer_att_rest * igm, obs_wave, redshift, luminosity_distance_m)
-        transmitted_fraction_obs = _redshift_scalar_to_obs(rest_wave, transmitted_fraction, obs_wave, redshift)
         if fast_projection_enabled:
             agn_fluxes = _project_rest_luminosity_filters(context, agn_rest)
             dust_fluxes = _project_rest_luminosity_filters(context, dust_rest)
@@ -3556,7 +3561,8 @@ def evaluate_photometric_state(
             line_nl_fluxes = _project_rest_luminosity_filters(context, line_nl_att_rest)
             line_liner_fluxes = _project_rest_luminosity_filters(context, line_liner_att_rest)
             balmer_fluxes = _project_rest_luminosity_filters(context, balmer_att_rest)
-            trans_fluxes = _project_rest_scalar_filters(context, transmitted_fraction)
+            direct_attenuated_fluxes = _project_rest_luminosity_filters(context, direct_attenuated_rest)
+            direct_intrinsic_fluxes = _project_rest_luminosity_filters(context, direct_intrinsic_rest)
         else:
             agn_fluxes = _project_filters(agn_obs, context.packed_filters_jax)
             dust_fluxes = _project_filters(dust_obs, context.packed_filters_jax)
@@ -3571,7 +3577,15 @@ def evaluate_photometric_state(
             line_nl_fluxes = _project_filters(line_nl_obs, context.packed_filters_jax)
             line_liner_fluxes = _project_filters(line_liner_obs, context.packed_filters_jax)
             balmer_fluxes = _project_filters(balmer_obs, context.packed_filters_jax)
-            trans_fluxes = _project_filters(transmitted_fraction_obs, context.packed_filters_jax)
+            direct_attenuated_obs = _redshift_to_obs(
+                rest_wave, direct_attenuated_rest * igm, obs_wave, redshift, luminosity_distance_m
+            )
+            direct_intrinsic_obs = _redshift_to_obs(
+                rest_wave, direct_intrinsic_rest * igm, obs_wave, redshift, luminosity_distance_m
+            )
+            direct_attenuated_fluxes = _project_filters(direct_attenuated_obs, context.packed_filters_jax)
+            direct_intrinsic_fluxes = _project_filters(direct_intrinsic_obs, context.packed_filters_jax)
+        trans_fluxes = _band_transmitted_fraction(direct_attenuated_fluxes, direct_intrinsic_fluxes)
         if correct_nebular_line_photometry:
             nebular_lines_fluxes = local_nebular_line_fluxes
             nebular_fluxes = nebular_continuum_fluxes + local_nebular_line_fluxes
@@ -3608,12 +3622,21 @@ def evaluate_photometric_state(
             agn_fluxes = _apply_extended_capture(agn_fluxes, agn_narrow_line_fluxes_total, host_capture_fraction)
         if need_trans_fluxes:
             if fast_projection_enabled:
-                trans_fluxes = _project_rest_scalar_filters(context, transmitted_fraction)
+                direct_attenuated_fluxes = _project_rest_luminosity_filters(context, direct_attenuated_rest)
+                direct_intrinsic_fluxes = _project_rest_luminosity_filters(context, direct_intrinsic_rest)
             elif redshift_projection_enabled:
-                trans_fluxes = _project_redshift_scalar_filters(context, transmitted_fraction, redshift)
+                direct_attenuated_fluxes = _project_redshift_luminosity_filters(context, direct_attenuated_rest, redshift)
+                direct_intrinsic_fluxes = _project_redshift_luminosity_filters(context, direct_intrinsic_rest, redshift)
             else:
-                transmitted_fraction_obs = _redshift_scalar_to_obs(rest_wave, transmitted_fraction, obs_wave, redshift)
-                trans_fluxes = _project_filters(transmitted_fraction_obs, context.packed_filters_jax)
+                direct_attenuated_obs = _redshift_to_obs(
+                    rest_wave, direct_attenuated_rest * igm, obs_wave, redshift, luminosity_distance_m
+                )
+                direct_intrinsic_obs = _redshift_to_obs(
+                    rest_wave, direct_intrinsic_rest * igm, obs_wave, redshift, luminosity_distance_m
+                )
+                direct_attenuated_fluxes = _project_filters(direct_attenuated_obs, context.packed_filters_jax)
+                direct_intrinsic_fluxes = _project_filters(direct_intrinsic_obs, context.packed_filters_jax)
+            trans_fluxes = _band_transmitted_fraction(direct_attenuated_fluxes, direct_intrinsic_fluxes)
         else:
             trans_fluxes = jnp.ones_like(pred_fluxes)
 
