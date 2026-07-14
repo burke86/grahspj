@@ -86,7 +86,6 @@ def _cfg(
         ),
         likelihood=LikelihoodConfig(
             variability_uncertainty=False,
-            use_absolute_flux_scale_prior=False,
             use_host_capture_model=False,
         ),
         spectroscopy=(

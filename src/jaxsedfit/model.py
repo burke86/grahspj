@@ -2144,51 +2144,6 @@ def _chi2_upper_limit(obs_fluxes, model_fluxes, total_variance):
     return -2.0 * jnp.log(0.5 * (1.0 + jax.scipy.special.erf(z)) + 1e-300)
 
 
-def _robust_flux_scale(fluxes, valid_mask):
-    """Estimate a robust characteristic flux scale from valid photometric points.
-
-    Parameters
-    ----------
-    fluxes : object
-        fluxes value.
-    valid_mask : object
-        valid_mask value.
-    """
-    fluxes = jnp.asarray(fluxes, dtype=jnp.float64)
-    valid_mask = jnp.asarray(valid_mask, dtype=bool)
-    safe_flux = jnp.where(valid_mask, jnp.abs(fluxes), jnp.nan)
-    scale = jnp.nanmedian(safe_flux)
-    fallback = jnp.nanmax(safe_flux)
-    scale = jnp.where(jnp.isfinite(scale) & (scale > 0.0), scale, fallback)
-    return jnp.where(jnp.isfinite(scale) & (scale > 0.0), scale, 1.0e-6)
-
-
-def _absolute_flux_scale_logprior(pred_fluxes, obs_fluxes, valid_mask, sigma_dex):
-    """Penalize solutions whose overall flux scale is far from the data.
-
-    Parameters
-    ----------
-    pred_fluxes : object
-        pred_fluxes value.
-    obs_fluxes : object
-        obs_fluxes value.
-    valid_mask : object
-        valid_mask value.
-    sigma_dex : object
-        sigma_dex value.
-    """
-    n_valid = jnp.sum(valid_mask.astype(jnp.int32))
-
-    def _compute():
-        """Evaluate the Gaussian prior on log10 model/data flux scale."""
-        obs_scale = _robust_flux_scale(obs_fluxes, valid_mask)
-        pred_scale = _robust_flux_scale(pred_fluxes, valid_mask)
-        log_ratio = jnp.log10(jnp.maximum(pred_scale, 1.0e-30) / jnp.maximum(obs_scale, 1.0e-30))
-        return dist.Normal(0.0, jnp.maximum(jnp.asarray(sigma_dex, dtype=jnp.float64), 1.0e-6)).log_prob(log_ratio)
-
-    return jax.lax.cond(n_valid > 0, _compute, lambda: jnp.asarray(0.0, dtype=jnp.float64))
-
-
 def _agn_variability_nev(agn_bol_lum_w, max_nev):
     """Return the Simm+2016-inspired fractional variability variance cap.
 
@@ -2670,7 +2625,6 @@ def evaluate_photometric_state(
     obs_errors = _np_to_jnp(context.errors)
     upper_limits = _bool_to_jnp(context.upper_limits)
     data_mask = _bool_to_jnp(context.data_mask)
-    positive_detected_mask = _bool_to_jnp(context.positive_detected_mask)
     spec_wave_obs = _np_to_jnp(context.spec_wave_obs)
     spec_fluxes = _np_to_jnp(context.spec_fluxes)
     spec_errors = _np_to_jnp(context.spec_errors)
@@ -3754,17 +3708,6 @@ def evaluate_photometric_state(
     )
     if add_likelihood:
         numpyro.factor("photometry_loglike", logl)
-    abs_flux_scale_logprior = jnp.asarray(0.0, dtype=jnp.float64)
-    if cfg.likelihood.use_absolute_flux_scale_prior:
-        abs_flux_scale_logprior = _absolute_flux_scale_logprior(
-            pred_fluxes=pred_fluxes,
-            obs_fluxes=obs_fluxes,
-            valid_mask=positive_detected_mask,
-            sigma_dex=cfg.likelihood.absolute_flux_scale_prior_sigma_dex,
-        )
-        if add_likelihood:
-            numpyro.factor("absolute_flux_scale_prior", abs_flux_scale_logprior)
-
     numpyro.deterministic("pred_fluxes", pred_fluxes)
     numpyro.deterministic("pred_spectrum_fluxes", spec_model_fluxes)
     numpyro.deterministic("spec_continuum_model_fluxes", spec_continuum_model_fluxes)
@@ -3812,7 +3755,6 @@ def evaluate_photometric_state(
     numpyro.deterministic("nebular_corr_fit", nebular["corr"])
     numpyro.deterministic("nebular_n_ly_young_fit", nebular["n_ly_young"])
     numpyro.deterministic("nebular_n_ly_old_fit", nebular["n_ly_old"])
-    numpyro.deterministic("absolute_flux_scale_logprior", abs_flux_scale_logprior)
     numpyro.deterministic("rest_wave", rest_wave)
     numpyro.deterministic("obs_wave", obs_wave)
     numpyro.deterministic("spec_wave_obs", spec_wave_obs)

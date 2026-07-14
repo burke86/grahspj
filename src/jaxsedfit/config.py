@@ -295,8 +295,6 @@ class LikelihoodConfig:
     agn_nev: float = 0.1
     attenuation_model_uncertainty: bool = False
     lyman_break_uncertainty: bool = False
-    use_absolute_flux_scale_prior: bool = True
-    absolute_flux_scale_prior_sigma_dex: float = 0.5
     use_host_capture_model: bool = False
     use_fast_photometry_projection: bool = True
     use_local_line_photometry: bool = True

@@ -348,7 +348,6 @@ templates justify:
    cfg.likelihood.likelihood_family = "gaussian"
    cfg.likelihood.systematics_width = 0.10
    cfg.likelihood.fit_systematics_width = True
-   cfg.likelihood.use_absolute_flux_scale_prior = True
 
 Useful options:
 
@@ -359,10 +358,6 @@ Useful options:
 ``systematics_width``
    Fractional model-error floor. Fix it for simpler geometry, or sample it
    with ``fit_systematics_width=True`` when the data warrant it.
-
-``use_absolute_flux_scale_prior``
-   Adds a broad prior on absolute scale so mass, AGN amplitude, and systematic
-   scatter do not drift into implausible combinations.
 
 ``variability_uncertainty``
    Adds an AGN variability term to photometric uncertainty when AGN emission is

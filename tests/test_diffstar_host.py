@@ -69,7 +69,6 @@ def test_diffstar_host_model_exposes_log_stellar_mass(monkeypatch):
     assert np.all(np.isfinite(np.asarray(tr["host_absorbed_rest_sed"]["value"])))
     assert np.all(np.isfinite(np.asarray(tr["dust_rest_sed"]["value"])))
     assert np.all(np.asarray(tr["dust_rest_sed"]["value"]) >= 0.0)
-    assert np.isfinite(float(np.asarray(tr["absolute_flux_scale_logprior"]["value"])))
     assert np.any(np.asarray(tr["line_bl_rest_sed"]["value"]) > 0.0)
     assert np.any(np.asarray(tr["line_nl_rest_sed"]["value"]) > 0.0)
     assert np.allclose(np.asarray(tr["line_liner_rest_sed"]["value"]), 0.0)

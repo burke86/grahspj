@@ -88,10 +88,10 @@ from jaxsedfit.preload import (
 )
 
 
-def test_likelihood_defaults_include_absolute_flux_scale_prior():
+def test_likelihood_defaults_include_local_line_photometry():
     cfg = LikelihoodConfig()
-    assert cfg.use_absolute_flux_scale_prior is True
-    assert cfg.absolute_flux_scale_prior_sigma_dex > 0.0
+    assert not hasattr(cfg, "use_absolute_flux_scale_prior")
+    assert not hasattr(cfg, "absolute_flux_scale_prior_sigma_dex")
     assert cfg.use_local_line_photometry is True
     assert cfg.local_nebular_line_uncertainty_dex == pytest.approx(0.3)
 
@@ -1497,7 +1497,6 @@ def test_jaxqsofit_spectrum_resolution_host_basis_uses_host_kinematics(monkeypat
         nebular=NebularConfig(enabled=False),
         likelihood=LikelihoodConfig(
             variability_uncertainty=False,
-            use_absolute_flux_scale_prior=False,
         ),
         spectroscopy=SpectroscopyData(
             wave_obs=[5000.0, 5100.0, 5200.0],
@@ -1564,7 +1563,6 @@ def test_jaxqsofit_backend_keeps_nebular_width_fixed_without_nebular_prior(monke
         nebular=NebularConfig(enabled=True, zgas=0.02),
         likelihood=LikelihoodConfig(
             variability_uncertainty=False,
-            use_absolute_flux_scale_prior=False,
         ),
         spectroscopy=SpectroscopyData(
             wave_obs=[4995.0, 5000.0, 5005.0],
@@ -1625,7 +1623,6 @@ def test_jaxsedfit_model_can_call_jaxqsofit_backend(monkeypatch):
         likelihood=LikelihoodConfig(
             use_host_capture_model=True,
             variability_uncertainty=False,
-            use_absolute_flux_scale_prior=False,
         ),
         spectroscopy=SpectroscopyData(
             wave_obs=[5200.0, 5400.0, 5600.0],
@@ -1704,7 +1701,6 @@ def test_jaxsedfit_jaxqsofit_backend_uses_nested_tied_line_config(monkeypatch):
         agn=AGNConfig(),
         likelihood=LikelihoodConfig(
             variability_uncertainty=False,
-            use_absolute_flux_scale_prior=False,
         ),
         spectroscopy=SpectroscopyData(
             wave_obs=[4800.0, 4900.0, 5000.0],
@@ -1807,7 +1803,6 @@ def test_jaxsedfit_jaxqsofit_tied_line_backend_runs_svi_jit(monkeypatch):
         agn=AGNConfig(),
         likelihood=LikelihoodConfig(
             variability_uncertainty=False,
-            use_absolute_flux_scale_prior=False,
         ),
         spectroscopy=SpectroscopyData(
             wave_obs=[4900.0, 5000.0, 5100.0],
