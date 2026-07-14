@@ -249,3 +249,38 @@ def test_smooth_components_converge_with_wavelength_grid_resolution():
     assert errors[1] < errors[0]
     assert errors[2] < errors[1]
     assert errors[-1] < 5.0e-4
+
+
+def test_production_wavelength_grid_candidates_agree_for_typical_filters():
+    """The proposed 512/768/1024 grids preserve broad-band photometry.
+
+    The representative filters span rest-frame UV, optical, near-IR, and
+    mid-IR coverage.  Grid alignment makes the errors mildly non-monotonic,
+    so the relevant requirement is absolute agreement with a dense reference
+    rather than assuming that every increment in ``n_wave`` improves every
+    individual band.
+    """
+    filter_names = ("uv", "optical", "near_ir", "mid_ir")
+    reference, _ = _smooth_component_photometry(32768)
+    candidate_fluxes = {
+        n_wave: _smooth_component_photometry(n_wave)[0]
+        for n_wave in (512, 768, 1024)
+    }
+    relative_errors = {
+        n_wave: np.abs(fluxes / reference - 1.0)
+        for n_wave, fluxes in candidate_fluxes.items()
+    }
+
+    worst = max(
+        (float(error), n_wave, filter_names[index])
+        for n_wave, errors in relative_errors.items()
+        for index, error in enumerate(errors)
+    )
+    assert worst[0] < 1.1e-3, (
+        f"n_wave={worst[1]} differs from the dense reference by "
+        f"{worst[0]:.3%} in the {worst[2]} filter"
+    )
+
+    stacked = np.stack(list(candidate_fluxes.values()))
+    candidate_spread = np.ptp(stacked, axis=0) / reference
+    assert np.all(candidate_spread < 1.5e-3), dict(zip(filter_names, candidate_spread))
