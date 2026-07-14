@@ -66,7 +66,7 @@ from jaxsedfit.model import (
     spectroscopic_likelihood_weight,
     spectroscopic_log_likelihood,
 )
-from jaxsedfit.preload import _build_fixed_igm_jax, _build_igm_cache_jax, build_model_context
+from jaxsedfit.preload import _build_fixed_igm_jax, _build_igm_cache_jax, _surviving_fraction_for_imf, build_model_context
 from jaxsedfit.filters import load_filter_curve
 from jaxsedfit.preload import (
     ModelContext,
@@ -489,12 +489,37 @@ def test_biattenuation_routes_host_and_agn_extinction_and_dust_budget():
 
 
 def test_gal_lgmet_to_absolute_z_respects_ssp_metallicity_convention():
-    absolute_grid = np.asarray([-4.34771165, -3.34771165, -2.34771165, -1.34771165])
-    relative_grid = np.asarray([-2.0, -1.0, -0.3, 0.0])
+    assert float(_gal_lgmet_to_absolute_z(np.log10(0.019), metallicity_coordinate="absolute_log10_z")) == pytest.approx(0.019)
+    assert float(_gal_lgmet_to_absolute_z(0.0, metallicity_coordinate="log10_z_over_zsun")) == pytest.approx(0.019)
+    assert float(_gal_lgmet_to_absolute_z(-0.3, metallicity_coordinate="log10_z_over_zsun")) == pytest.approx(0.019 * 10.0**-0.3)
 
-    assert float(_gal_lgmet_to_absolute_z(np.log10(0.019), absolute_grid)) == pytest.approx(0.019)
-    assert float(_gal_lgmet_to_absolute_z(0.0, relative_grid)) == pytest.approx(0.019)
-    assert float(_gal_lgmet_to_absolute_z(-0.3, relative_grid)) == pytest.approx(0.019 * 10.0**-0.3)
+
+@pytest.mark.parametrize("field", ["age_grid_gyr", "logzsol_grid", "imf_type", "zcontinuous", "sfh"])
+def test_removed_fsps_generation_fields_are_not_galaxy_runtime_options(field):
+    with pytest.raises(TypeError):
+        GalaxyConfig(**{field: 1})
+
+
+@pytest.mark.parametrize("ssp_imf", ["chabrier_2003", "salpeter_1955", "kroupa_2001", "van_dokkum_2008"])
+def test_galaxy_accepts_supported_ssp_imf_provenance(ssp_imf):
+    GalaxyConfig(ssp_imf=ssp_imf).validate()
+
+
+def test_galaxy_rejects_ambiguous_ssp_provenance():
+    with pytest.raises(ValueError, match="ssp_imf"):
+        GalaxyConfig(ssp_imf="unknown").validate()
+    with pytest.raises(ValueError, match="ssp_metallicity_coordinate"):
+        GalaxyConfig(ssp_metallicity_coordinate="guess").validate()
+
+
+def test_surviving_mass_fraction_uses_declared_ssp_imf():
+    ages = np.asarray([-1.0, 0.0, 1.0])
+    chabrier = _surviving_fraction_for_imf(ages, "chabrier_2003")
+    salpeter = _surviving_fraction_for_imf(ages, "salpeter_1955")
+
+    assert np.all(np.isfinite(chabrier))
+    assert np.all(np.isfinite(salpeter))
+    assert not np.allclose(chabrier, salpeter)
 
 
 def test_attenuation_transmitted_fraction_uses_only_direct_light():
@@ -827,6 +852,80 @@ def test_local_nebular_line_uncertainty_regularizes_only_line_component():
         )
     )
     assert no_line_component == pytest.approx(exact)
+
+
+def _minimal_photometric_loglike_kwargs():
+    return dict(
+        obs_fluxes=np.asarray([1.0]),
+        obs_errors=np.asarray([0.1]),
+        upper_limits=np.asarray([False]),
+        data_mask=np.asarray([True]),
+        systematics_width=0.0,
+        likelihood_family="gaussian",
+        student_t_df=5.0,
+        agn_component=np.asarray([0.0]),
+        agn_bol_lum_w=1.0e38,
+        agn_nev=0.1,
+        variability_uncertainty=False,
+        attenuation_model_uncertainty=False,
+        transmitted_fraction=np.asarray([1.0]),
+        lyman_break_uncertainty=False,
+        filter_wavelength=np.asarray([5000.0]),
+        redshift=0.0,
+    )
+
+
+@pytest.mark.parametrize("invalid_prediction", [np.nan, np.inf, -np.inf])
+def test_photometric_likelihood_penalizes_nonfinite_active_predictions(invalid_prediction):
+    logl = float(
+        photometric_loglike(
+            pred_fluxes=np.asarray([invalid_prediction]),
+            **_minimal_photometric_loglike_kwargs(),
+        )
+    )
+
+    assert np.isfinite(logl)
+    assert logl < -9.0e5
+
+
+def test_photometric_likelihood_ignores_nonfinite_masked_predictions():
+    kwargs = _minimal_photometric_loglike_kwargs()
+    kwargs["data_mask"] = np.asarray([False])
+    logl = float(photometric_loglike(pred_fluxes=np.asarray([np.nan]), **kwargs))
+
+    assert logl == pytest.approx(0.0)
+
+
+@pytest.mark.parametrize("invalid_prediction", [np.nan, np.inf, -np.inf])
+def test_spectroscopic_likelihood_penalizes_nonfinite_active_predictions(invalid_prediction):
+    logl = float(
+        spectroscopic_log_likelihood(
+            np.asarray([invalid_prediction]),
+            np.asarray([1.0]),
+            np.asarray([0.1]),
+            np.asarray([True]),
+            0.0,
+            5.0,
+        )
+    )
+
+    assert np.isfinite(logl)
+    assert logl < -9.0e5
+
+
+def test_spectroscopic_likelihood_ignores_nonfinite_masked_predictions():
+    logl = float(
+        spectroscopic_log_likelihood(
+            np.asarray([np.nan]),
+            np.asarray([1.0]),
+            np.asarray([0.1]),
+            np.asarray([False]),
+            0.0,
+            5.0,
+        )
+    )
+
+    assert logl == pytest.approx(0.0)
 
 
 def test_spectroscopic_likelihood_weight_uses_resolution_elements():

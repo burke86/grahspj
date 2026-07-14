@@ -435,34 +435,6 @@ def _mw_pixel_attenuation_factor(wave_obs, ebv, r_v=3.1):
     return factors
 
 
-def _map_logzsol_to_dsps_lgmet(logzsol_grid: Sequence[float], ssp_lgmet: np.ndarray) -> np.ndarray:
-    """Map log(Z/Zsun) fitting values onto the DSPS metallicity convention.
-
-    Parameters
-    ----------
-    logzsol_grid : object
-        logzsol_grid value.
-    ssp_lgmet : object
-        ssp_lgmet value.
-    """
-    logzsol_grid = np.asarray(logzsol_grid, dtype=float)
-    ssp_lgmet = np.asarray(ssp_lgmet, dtype=float)
-    cand_direct = logzsol_grid
-    cand_shifted = logzsol_grid + np.log10(0.019)
-
-    def mismatch(cand):
-        """Return the mean nearest-grid mismatch for one metallicity convention.
-
-        Parameters
-        ----------
-        cand : object
-            cand value.
-        """
-        return np.mean([np.min(np.abs(ssp_lgmet - val)) for val in cand])
-
-    return cand_direct if mismatch(cand_direct) <= mismatch(cand_shifted) else cand_shifted
-
-
 def load_cached_ssp_data(dsps_ssp_fn: str) -> SSPData:
     """Load DSPS SSP data once and cache it by input file path.
 
@@ -1101,7 +1073,30 @@ def _build_fixed_igm_jax(igm_cache: IGMCacheJax, redshift: float) -> jnp.ndarray
     weight = jnp.where(obs_wavelength < lambda_min_igm, (obs_wavelength / lambda_min_igm) ** 2, 1.0)
     return jnp.exp(-tau_taun - tau_l_igm - tau_l_lls) * weight
 
-def _build_host_basis(rest_wave: np.ndarray, ssp_data: SSPData) -> HostBasis:
+def _surviving_fraction_for_imf(lg_age_gyr: np.ndarray, ssp_imf: str) -> np.ndarray:
+    """Return an IMF-consistent surviving stellar-mass fraction."""
+    from dsps.imf.surviving_mstar import (
+        CHABRIER_PARAMS,
+        KROUPA_PARAMS,
+        SALPETER_PARAMS,
+        VAN_DOKKUM_PARAMS,
+        surviving_mstar,
+    )
+
+    params_by_imf = {
+        "chabrier_2003": CHABRIER_PARAMS,
+        "salpeter_1955": SALPETER_PARAMS,
+        "kroupa_2001": KROUPA_PARAMS,
+        "van_dokkum_2008": VAN_DOKKUM_PARAMS,
+    }
+    try:
+        params = params_by_imf[str(ssp_imf)]
+    except KeyError as exc:
+        raise ValueError(f"Unsupported SSP IMF for surviving-mass calculation: {ssp_imf!r}.") from exc
+    return np.asarray(surviving_mstar(np.asarray(lg_age_gyr, dtype=float) + 9.0, **params), dtype=float)
+
+
+def _build_host_basis(rest_wave: np.ndarray, ssp_data: SSPData, ssp_imf: str = "chabrier_2003") -> HostBasis:
     """Precompute the SSP basis on the model rest-wave grid.
 
     Parameters
@@ -1116,6 +1111,7 @@ def _build_host_basis(rest_wave: np.ndarray, ssp_data: SSPData) -> HostBasis:
         float(rest_wave[0]),
         float(rest_wave[-1]),
         int(rest_wave.size),
+        str(ssp_imf),
     )
     cached = _HOST_BASIS_CACHE.get(cache_key)
     if cached is not None:
@@ -1138,9 +1134,7 @@ def _build_host_basis(rest_wave: np.ndarray, ssp_data: SSPData) -> HostBasis:
                 left=0.0,
                 right=0.0,
             )
-    from dsps.imf.surviving_mstar import surviving_mstar
-
-    surviving_frac_by_age = np.asarray(surviving_mstar(ssp_data.ssp_lg_age_gyr + 9.0), dtype=float)
+    surviving_frac_by_age = _surviving_fraction_for_imf(ssp_data.ssp_lg_age_gyr, ssp_imf)
     loaded = HostBasis(
         rest_llambda=rest_llambda,
         surviving_frac_by_age=surviving_frac_by_age,
@@ -1920,7 +1914,7 @@ def build_model_context(cfg: FitConfig) -> ModelContext:
     ).astype(float)
     if cfg.galaxy.fit_host:
         ssp_data = load_cached_ssp_data(cfg.galaxy.dsps_ssp_fn)
-        host_basis = _build_host_basis(rest_wave, ssp_data)
+        host_basis = _build_host_basis(rest_wave, ssp_data, cfg.galaxy.ssp_imf)
         host_basis_jax = _build_host_basis_jax(ssp_data, host_basis, gal_t_table)
     else:
         ssp_data = _empty_ssp_data()
@@ -1938,7 +1932,7 @@ def build_model_context(cfg: FitConfig) -> ModelContext:
     )
     if needs_spec_host_basis:
         spec_rest_wave = (spec_wave_obs / (1.0 + max(cfg.observation.redshift, 0.0))).astype(float)
-        spec_host_basis = _build_host_basis(spec_rest_wave, ssp_data)
+        spec_host_basis = _build_host_basis(spec_rest_wave, ssp_data, cfg.galaxy.ssp_imf)
         spec_host_basis_jax = _build_host_basis_jax(ssp_data, spec_host_basis, gal_t_table)
 
     filter_responses = _load_filter_responses(cfg)

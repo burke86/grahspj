@@ -425,21 +425,33 @@ def _sample_log_stellar_mass(prior_config: dict[str, Any]):
     return _sample_prior(prior_config, "log_stellar_mass", dist.StudentT(df=5.0, loc=10.0, scale=2.0))
 
 
-def _ssp_lgmet_solar_offset(ssp_lgmet):
-    """Return the solar-metallicity offset for the SSP metallicity convention.
+def _ssp_lgmet_solar_offset(
+    ssp_lgmet,
+    metallicity_coordinate: str = "absolute_log10_z",
+    solar_metallicity: float = DSPS_SOLAR_METALLICITY,
+):
+    """Return the declared solar-metallicity offset of an SSP grid.
 
     Parameters
     ----------
     ssp_lgmet : object
         ssp_lgmet value.
     """
-    ssp_lgmet = jnp.asarray(ssp_lgmet, dtype=jnp.float64)
-    # DSPS SSP grids use absolute log10(Z). Older/simple test grids may use
-    # log10(Z/Zsun). A max below -1 is a robust signature of absolute log10(Z).
-    return jnp.where(jnp.nanmax(ssp_lgmet) < -1.0, jnp.log10(DSPS_SOLAR_METALLICITY), 0.0)
+    del ssp_lgmet
+    coordinate = str(metallicity_coordinate).strip().lower()
+    if coordinate == "absolute_log10_z":
+        return jnp.log10(jnp.asarray(solar_metallicity, dtype=jnp.float64))
+    if coordinate == "log10_z_over_zsun":
+        return jnp.asarray(0.0, dtype=jnp.float64)
+    raise ValueError(f"Unsupported SSP metallicity coordinate: {metallicity_coordinate!r}.")
 
 
-def _gal_lgmet_to_absolute_z(gal_lgmet, ssp_lgmet):
+def _gal_lgmet_to_absolute_z(
+    gal_lgmet,
+    ssp_lgmet=None,
+    metallicity_coordinate: str = "absolute_log10_z",
+    solar_metallicity: float = DSPS_SOLAR_METALLICITY,
+):
     """Convert galaxy metallicity from the SSP-grid convention to absolute Z.
 
     Parameters
@@ -450,16 +462,22 @@ def _gal_lgmet_to_absolute_z(gal_lgmet, ssp_lgmet):
         ssp_lgmet value.
     """
     gal_lgmet = jnp.asarray(gal_lgmet, dtype=jnp.float64)
-    ssp_lgmet = jnp.asarray(ssp_lgmet, dtype=jnp.float64)
-    absolute_logz = jnp.where(
-        jnp.nanmax(ssp_lgmet) < -1.0,
-        gal_lgmet,
-        gal_lgmet + jnp.log10(DSPS_SOLAR_METALLICITY),
-    )
+    del ssp_lgmet
+    coordinate = str(metallicity_coordinate).strip().lower()
+    if coordinate == "absolute_log10_z":
+        absolute_logz = gal_lgmet
+    elif coordinate == "log10_z_over_zsun":
+        absolute_logz = gal_lgmet + jnp.log10(jnp.asarray(solar_metallicity, dtype=jnp.float64))
+    else:
+        raise ValueError(f"Unsupported SSP metallicity coordinate: {metallicity_coordinate!r}.")
     return jnp.power(10.0, absolute_logz)
 
 
-def _default_gal_lgmet_loc(ssp_lgmet):
+def _default_gal_lgmet_loc(
+    ssp_lgmet,
+    metallicity_coordinate: str = "absolute_log10_z",
+    solar_metallicity: float = DSPS_SOLAR_METALLICITY,
+):
     """Default galaxy metallicity center in the SSP grid's metallicity convention.
 
     Parameters
@@ -468,7 +486,7 @@ def _default_gal_lgmet_loc(ssp_lgmet):
         ssp_lgmet value.
     """
     ssp_lgmet = jnp.asarray(ssp_lgmet, dtype=jnp.float64)
-    loc = _ssp_lgmet_solar_offset(ssp_lgmet) - 0.3
+    loc = _ssp_lgmet_solar_offset(ssp_lgmet, metallicity_coordinate, solar_metallicity) - 0.3
     return jnp.clip(loc, jnp.nanmin(ssp_lgmet), jnp.nanmax(ssp_lgmet))
 
 
@@ -522,6 +540,8 @@ def _mass_metallicity_relation_logprior(
     *,
     ssp_lgmet=None,
     redshift: float = 0.0,
+    metallicity_coordinate: str = "absolute_log10_z",
+    solar_metallicity: float = DSPS_SOLAR_METALLICITY,
 ):
     """Return an optional soft stellar mass-metallicity log-prior.
 
@@ -567,7 +587,11 @@ def _mass_metallicity_relation_logprior(
     if not isinstance(cfg, dict) or cfg.get("enabled", True) is False:
         return jnp.asarray(0.0, dtype=jnp.float64)
 
-    solar_offset = _ssp_lgmet_solar_offset(ssp_lgmet) if ssp_lgmet is not None else jnp.asarray(0.0, dtype=jnp.float64)
+    solar_offset = (
+        _ssp_lgmet_solar_offset(ssp_lgmet, metallicity_coordinate, solar_metallicity)
+        if ssp_lgmet is not None
+        else jnp.asarray(0.0, dtype=jnp.float64)
+    )
     pivot_mass = jnp.asarray(cfg.get("pivot_mass", 10.0), dtype=jnp.float64)
     pivot_lgmet = _cfg_lgmet_value(cfg, "pivot_logzsol", -0.15, solar_offset, absolute_key="pivot_lgmet")
     slope = jnp.asarray(cfg.get("slope", 0.35), dtype=jnp.float64)
@@ -1577,6 +1601,7 @@ def _build_diffstar_host(context: ModelContext, prior_config: dict[str, Any], *,
     surviving_frac_by_age = context.host_basis_jax.surviving_frac_by_age
     gal_t_table = context.host_basis_jax.gal_t_table
     t_obs_gyr = jnp.asarray(context.t_obs_gyr, dtype=jnp.float64)
+    galaxy_cfg = context.fit_config.galaxy
 
     log_stellar_mass = _sample_log_stellar_mass(prior_config)
 
@@ -1594,7 +1619,18 @@ def _build_diffstar_host(context: ModelContext, prior_config: dict[str, Any], *,
         return_smh=True,
     )
 
-    gal_lgmet = _sample_prior(prior_config, "gal_lgmet", dist.Normal(_default_gal_lgmet_loc(ssp_lgmet), 0.5))
+    gal_lgmet = _sample_prior(
+        prior_config,
+        "gal_lgmet",
+        dist.Normal(
+            _default_gal_lgmet_loc(
+                ssp_lgmet,
+                galaxy_cfg.ssp_metallicity_coordinate,
+                galaxy_cfg.ssp_solar_metallicity,
+            ),
+            0.5,
+        ),
+    )
     gal_lgmet_scatter = _sample_positive_distribution(
         prior_config,
         value_key="gal_lgmet_scatter",
@@ -1609,6 +1645,8 @@ def _build_diffstar_host(context: ModelContext, prior_config: dict[str, Any], *,
         prior_config,
         ssp_lgmet=ssp_lgmet,
         redshift=float(context.fit_config.observation.redshift),
+        metallicity_coordinate=galaxy_cfg.ssp_metallicity_coordinate,
+        solar_metallicity=galaxy_cfg.ssp_solar_metallicity,
     )
     numpyro.factor("mass_metallicity_relation_prior", mmr_logprior)
     host_weights_info = calc_ssp_weights_sfh_table_lognormal_mdf(
@@ -1710,7 +1748,18 @@ def _build_delayed_host(context: ModelContext, prior_config: dict[str, Any], *, 
     base_sfh = jnp.where((sfh_age_gyr > 0.0) & (sfh_age_gyr <= age_gyr), sfh_age_gyr * jnp.exp(-sfh_age_gyr / tau_gyr), 0.0)
     base_smh = _cumulative_trapezoid(base_sfh, gal_t_table) * 1.0e9
 
-    gal_lgmet = _sample_prior(prior_config, "gal_lgmet", dist.Normal(_default_gal_lgmet_loc(ssp_lgmet), 0.5))
+    gal_lgmet = _sample_prior(
+        prior_config,
+        "gal_lgmet",
+        dist.Normal(
+            _default_gal_lgmet_loc(
+                ssp_lgmet,
+                cfg.ssp_metallicity_coordinate,
+                cfg.ssp_solar_metallicity,
+            ),
+            0.5,
+        ),
+    )
     gal_lgmet_scatter = _sample_positive_distribution(
         prior_config,
         value_key="gal_lgmet_scatter",
@@ -1725,6 +1774,8 @@ def _build_delayed_host(context: ModelContext, prior_config: dict[str, Any], *, 
         prior_config,
         ssp_lgmet=ssp_lgmet,
         redshift=float(context.fit_config.observation.redshift),
+        metallicity_coordinate=cfg.ssp_metallicity_coordinate,
+        solar_metallicity=cfg.ssp_solar_metallicity,
     )
     numpyro.factor("mass_metallicity_relation_prior", mmr_logprior)
     host_weights_info = calc_ssp_weights_sfh_table_lognormal_mdf(
@@ -1889,7 +1940,12 @@ def _build_nebular_components(context: ModelContext, host_state: dict[str, Any],
 
     logu = _sample_optional_normal(prior_config, "nebular_logU", float(cfg.logU), 0.3)
     default_zgas = float(cfg.zgas) if cfg.zgas is not None else None
-    host_zgas = _gal_lgmet_to_absolute_z(host_state["gal_lgmet"], host_state["ssp_lgmet"])
+    galaxy_cfg = context.fit_config.galaxy
+    host_zgas = _gal_lgmet_to_absolute_z(
+        host_state["gal_lgmet"],
+        metallicity_coordinate=galaxy_cfg.ssp_metallicity_coordinate,
+        solar_metallicity=galaxy_cfg.ssp_solar_metallicity,
+    )
     zgas_default = host_zgas if default_zgas is None else jnp.asarray(default_zgas, dtype=jnp.float64)
     zgas = _sample_optional_normal(prior_config, "nebular_zgas", float(default_zgas) if default_zgas is not None else 0.02, 0.01)
     zgas = jnp.where(default_zgas is None and "nebular_zgas" not in prior_config, zgas_default, jnp.clip(zgas, 1.0e-6, 1.0))
@@ -2236,7 +2292,29 @@ def photometric_loglike(
     local_nebular_line_uncertainty_dex : object
         local_nebular_line_uncertainty_dex value.
     """
+    pred_fluxes = jnp.asarray(pred_fluxes, dtype=jnp.float64)
+    obs_fluxes = jnp.asarray(obs_fluxes, dtype=jnp.float64)
+    obs_errors = jnp.asarray(obs_errors, dtype=jnp.float64)
+    agn_component = jnp.asarray(agn_component, dtype=jnp.float64)
+    transmitted_fraction = jnp.asarray(transmitted_fraction, dtype=jnp.float64)
+    active = jnp.asarray(data_mask, dtype=bool) | jnp.asarray(upper_limits, dtype=bool)
+    input_valid = (
+        jnp.isfinite(pred_fluxes)
+        & jnp.isfinite(obs_fluxes)
+        & jnp.isfinite(obs_errors)
+        & (obs_errors > 0.0)
+    )
+    auxiliary_valid = jnp.ones_like(input_valid)
+    if variability_uncertainty:
+        auxiliary_valid = auxiliary_valid & jnp.isfinite(agn_component)
+    if attenuation_model_uncertainty:
+        auxiliary_valid = auxiliary_valid & jnp.isfinite(transmitted_fraction)
+    if nebular_line_component is not None:
+        auxiliary_valid = auxiliary_valid & jnp.isfinite(jnp.asarray(nebular_line_component, dtype=jnp.float64))
+
     pred_fluxes = jnp.nan_to_num(pred_fluxes, nan=0.0, posinf=1.0e30, neginf=-1.0e30)
+    obs_fluxes = jnp.nan_to_num(obs_fluxes, nan=0.0, posinf=1.0e30, neginf=-1.0e30)
+    obs_errors = jnp.nan_to_num(obs_errors, nan=1.0e30, posinf=1.0e30, neginf=1.0e30)
     agn_component = jnp.nan_to_num(agn_component, nan=0.0, posinf=1.0e30, neginf=-1.0e30)
     transmitted_fraction = jnp.nan_to_num(transmitted_fraction, nan=1.0e-4, posinf=1.0, neginf=1.0e-4)
     obs_variance = obs_errors**2
@@ -2258,7 +2336,9 @@ def photometric_loglike(
     if lyman_break_uncertainty:
         ly_unc = jnp.where(filter_wavelength / (1.0 + redshift) < 1500.0, 1.0e8, 0.0)
         sys_variance = sys_variance + (ly_unc * pred_fluxes) ** 2
-    total_variance = jnp.nan_to_num(obs_variance + sys_variance + var_variance, nan=1.0e30, posinf=1.0e30, neginf=1.0e30)
+    raw_total_variance = obs_variance + sys_variance + var_variance
+    variance_valid = jnp.isfinite(raw_total_variance) & (raw_total_variance > 0.0)
+    total_variance = jnp.nan_to_num(raw_total_variance, nan=1.0e30, posinf=1.0e30, neginf=1.0e30)
     scale = jnp.sqrt(jnp.clip(total_variance, 1e-30, 1.0e60))
     family = str(likelihood_family).lower()
     if family in {"gaussian", "normal"}:
@@ -2269,7 +2349,7 @@ def photometric_loglike(
         raise ValueError("likelihood.likelihood_family must be one of: 'gaussian', 'student_t'.")
     logl_data = jnp.sum(jnp.where(data_mask, data_dist.log_prob(obs_fluxes), 0.0))
     logl_lim = jnp.sum(jnp.where(upper_limits, -0.5 * _chi2_upper_limit(obs_fluxes, pred_fluxes, total_variance), 0.0))
-    invalid = ~(jnp.isfinite(pred_fluxes) & jnp.isfinite(scale) & jnp.isfinite(obs_fluxes) & jnp.isfinite(obs_errors))
+    invalid = active & ~(input_valid & auxiliary_valid & variance_valid)
     penalty = -1.0e6 * jnp.sum(invalid.astype(jnp.float64))
     return logl_data + logl_lim + penalty
 
@@ -2292,13 +2372,24 @@ def spectroscopic_loglike(pred_fluxes, obs_fluxes, obs_errors, mask, systematics
     student_t_df : object
         student_t_df value.
     """
+    pred_fluxes = jnp.asarray(pred_fluxes, dtype=jnp.float64)
+    obs_fluxes = jnp.asarray(obs_fluxes, dtype=jnp.float64)
+    obs_errors = jnp.asarray(obs_errors, dtype=jnp.float64)
+    mask = jnp.asarray(mask, dtype=bool)
+    input_valid = (
+        jnp.isfinite(pred_fluxes)
+        & jnp.isfinite(obs_fluxes)
+        & jnp.isfinite(obs_errors)
+        & (obs_errors > 0.0)
+    )
     pred_fluxes = jnp.nan_to_num(pred_fluxes, nan=0.0, posinf=1.0e30, neginf=-1.0e30)
     obs_fluxes = jnp.nan_to_num(obs_fluxes, nan=0.0, posinf=1.0e30, neginf=-1.0e30)
     obs_errors = jnp.nan_to_num(obs_errors, nan=1.0e30, posinf=1.0e30, neginf=1.0e30)
     variance = obs_errors**2 + (jnp.maximum(systematics_width, 0.0) * pred_fluxes) ** 2
+    variance_valid = jnp.isfinite(variance) & (variance > 0.0)
     scale = jnp.sqrt(jnp.clip(variance, 1e-30, 1.0e60))
     student = dist.StudentT(df=student_t_df, loc=pred_fluxes, scale=scale)
-    valid = mask & jnp.isfinite(pred_fluxes) & jnp.isfinite(obs_fluxes) & jnp.isfinite(scale)
+    valid = mask & input_valid & variance_valid & jnp.isfinite(scale)
     penalty = -1.0e6 * jnp.sum((mask & ~valid).astype(jnp.float64))
     return jnp.sum(jnp.where(valid, student.log_prob(obs_fluxes), 0.0)) + penalty
 

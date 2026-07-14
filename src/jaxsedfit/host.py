@@ -18,6 +18,7 @@ def build_host_basis_jax(
     rest_wave: np.ndarray,
     *,
     dsps_ssp_fn: str = "tempdata.h5",
+    ssp_imf: str = "chabrier_2003",
     t_obs_gyr: float,
     sfh_n_steps: int = 64,
     sfh_t_min_gyr: float = 0.01,
@@ -34,6 +35,8 @@ def build_host_basis_jax(
         rest_wave value.
     dsps_ssp_fn : object
         dsps_ssp_fn value.
+    ssp_imf : str
+        IMF provenance of the SSP library and surviving-mass calibration.
     t_obs_gyr : object
         t_obs_gyr value.
     sfh_n_steps : object
@@ -50,7 +53,7 @@ def build_host_basis_jax(
         max(float(t_obs_gyr), float(sfh_t_min_gyr) * 1.01),
         int(sfh_n_steps),
     )
-    host_basis = _build_host_basis(rest_wave, ssp_data)
+    host_basis = _build_host_basis(rest_wave, ssp_data, ssp_imf)
     return _build_host_basis_jax(ssp_data, host_basis, gal_t_table)
 
 
@@ -63,6 +66,8 @@ def build_host_state(
     redshift: float = 0.0,
     sfh_t_min_gyr: float = 0.01,
     tau_host_prior_scale: float = 0.5,
+    ssp_metallicity_coordinate: str = "absolute_log10_z",
+    ssp_solar_metallicity: float = 0.019,
     full_output: bool = True,
 ) -> dict[str, Any]:
     """Sample/build the JAXSEDFit physical host state from a host basis.
@@ -89,6 +94,10 @@ def build_host_state(
         sfh_t_min_gyr value.
     tau_host_prior_scale : object
         tau_host_prior_scale value.
+    ssp_metallicity_coordinate : str
+        Coordinate used by ``host_basis_jax.ssp_lgmet``.
+    ssp_solar_metallicity : float
+        Absolute solar metallicity used for coordinate conversion.
     full_output : object
         full_output value.
     """
@@ -96,6 +105,8 @@ def build_host_state(
         host_sfh_model=str(host_sfh_model),
         sfh_t_min_gyr=float(sfh_t_min_gyr),
         tau_host_prior_scale=float(tau_host_prior_scale),
+        ssp_metallicity_coordinate=str(ssp_metallicity_coordinate),
+        ssp_solar_metallicity=float(ssp_solar_metallicity),
     )
     observation = SimpleNamespace(redshift=float(redshift))
     context = SimpleNamespace(
