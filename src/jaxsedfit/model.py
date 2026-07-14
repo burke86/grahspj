@@ -2290,6 +2290,7 @@ def photometric_loglike(
     redshift,
     nebular_line_component=None,
     local_nebular_line_uncertainty_dex=0.0,
+    agn_systematics_width=0.0,
 ):
     """Evaluate the broadband photometric log-likelihood for one model state.
 
@@ -2333,6 +2334,9 @@ def photometric_loglike(
         nebular_line_component value.
     local_nebular_line_uncertainty_dex : object
         local_nebular_line_uncertainty_dex value.
+    agn_systematics_width : object
+        Fractional AGN model-mismatch coefficient in the GRAHSP systematic
+        error term.
     """
     pred_fluxes = jnp.asarray(pred_fluxes, dtype=jnp.float64)
     obs_fluxes = jnp.asarray(obs_fluxes, dtype=jnp.float64)
@@ -2362,7 +2366,9 @@ def photometric_loglike(
     obs_variance = obs_errors**2
     variability_nev = _agn_variability_nev(agn_bol_lum_w, agn_nev)
     var_variance = jnp.where(variability_uncertainty, variability_nev * agn_component**2, 0.0)
-    sys_variance = (systematics_width * pred_fluxes) ** 2
+    # Keep the catalogue-wide systematic and AGN-template mismatch as
+    # independent contributions, as implemented by GRAHSP.
+    sys_variance = (systematics_width * obs_fluxes) ** 2 + (agn_systematics_width * agn_component) ** 2
     if nebular_line_component is not None:
         nebular_line_component = jnp.nan_to_num(nebular_line_component, nan=0.0, posinf=1.0e30, neginf=-1.0e30)
         nebular_line_sigma = jnp.expm1(
@@ -3140,6 +3146,17 @@ def evaluate_photometric_state(
             )
     else:
         systematics_width = jnp.asarray(float(cfg.likelihood.systematics_width), dtype=jnp.float64)
+    if cfg.likelihood.fit_agn_systematics_width and fit_agn:
+        agn_systematics_width = _sample_positive(
+            prior_config,
+            value_key="agn_systematics_width",
+            log_key="log_agn_systematics_width",
+            default_value=float(cfg.likelihood.agn_systematics_width_prior_scale),
+            default_log_scale=1.0,
+            default_family="exponential",
+        )
+    else:
+        agn_systematics_width = jnp.asarray(float(cfg.likelihood.agn_systematics_width), dtype=jnp.float64)
     if cfg.observation.fits_redshift:
         redshift = _sample_redshift(context, prior_config, cfg)
         luminosity_distance_m = _luminosity_distance_m_jax(
@@ -3810,6 +3827,7 @@ def evaluate_photometric_state(
         upper_limits=upper_limits,
         data_mask=data_mask,
         systematics_width=systematics_width,
+        agn_systematics_width=agn_systematics_width,
         likelihood_family=cfg.likelihood.likelihood_family,
         student_t_df=cfg.likelihood.student_t_df,
         agn_component=agn_fluxes,

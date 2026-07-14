@@ -291,6 +291,26 @@ def test_systematics_width_can_use_physical_lognormal_prior(monkeypatch):
     assert np.isclose(_site(tr, "systematics_width"), 0.02)
 
 
+def test_agn_systematics_width_defaults_to_grahsp_exponential_prior(monkeypatch):
+    _patch_ssp(monkeypatch)
+    cfg = _cfg()
+    context = build_model_context(cfg)
+
+    tr = _deterministic_likelihood_trace(
+        context,
+        {
+            **_fixed_component_data(),
+            "agn_systematics_width": np.array(0.1),
+        },
+    )
+
+    assert tr["agn_systematics_width"]["type"] == "sample"
+    fn = tr["agn_systematics_width"]["fn"]
+    assert fn.__class__.__name__ == "Exponential"
+    assert np.isclose(np.asarray(fn.rate), 5.0)
+    assert np.isclose(_site(tr, "agn_systematics_width"), 0.1)
+
+
 def test_positive_geometry_parameters_are_sampled_in_log_space(monkeypatch):
     _patch_ssp(monkeypatch)
     context = build_model_context(_cfg())
