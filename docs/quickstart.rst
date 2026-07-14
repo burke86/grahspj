@@ -223,10 +223,21 @@ low-dimensional and usually the most stable choice for broadband SED fitting.
        fit_host=True,
        host_sfh_model="delayed",
        dsps_ssp_fn="tempdata.h5",
+       ssp_imf="chabrier_2003",
+       ssp_metallicity_coordinate="absolute_log10_z",
+       ssp_solar_metallicity=0.019,
        rest_wave_min=100.0,
        rest_wave_max=3.0e6,
        n_wave=1024,
    )
+
+``ssp_imf`` and ``ssp_metallicity_coordinate`` declare the provenance of the
+loaded SSP library. They do not regenerate it. The IMF declaration also selects
+the matching DSPS surviving-mass calibration, so it must describe the SSP file
+accurately. Supported IMFs are ``chabrier_2003``, ``salpeter_1955``,
+``kroupa_2001``, and ``van_dokkum_2008``. Supported metallicity coordinates are
+``absolute_log10_z`` and ``log10_z_over_zsun``. Custom IMFs require an SSP format
+that supplies its own surviving-mass fractions and are not silently approximated.
 
 Use ``host_sfh_model="diffstar"`` when you want the Diffstar-based SFH
 parameterization:
@@ -337,7 +348,6 @@ templates justify:
    cfg.likelihood.likelihood_family = "gaussian"
    cfg.likelihood.systematics_width = 0.10
    cfg.likelihood.fit_systematics_width = True
-   cfg.likelihood.use_absolute_flux_scale_prior = True
 
 Useful options:
 
@@ -348,10 +358,6 @@ Useful options:
 ``systematics_width``
    Fractional model-error floor. Fix it for simpler geometry, or sample it
    with ``fit_systematics_width=True`` when the data warrant it.
-
-``use_absolute_flux_scale_prior``
-   Adds a broad prior on absolute scale so mass, AGN amplitude, and systematic
-   scatter do not drift into implausible combinations.
 
 ``variability_uncertainty``
    Adds an AGN variability term to photometric uncertainty when AGN emission is

@@ -156,16 +156,20 @@ class EmissionLineTemplate:
 
 @dataclass
 class GalaxyConfig:
-    """Host-galaxy model, cosmology, and wavelength-grid settings."""
+    """Host-galaxy model, SSP provenance, cosmology, and wavelength-grid settings.
+
+    ``ssp_imf`` and ``ssp_metallicity_coordinate`` describe the already-built
+    library at ``dsps_ssp_fn``; they do not regenerate or transform that file.
+    The IMF declaration selects the matching stellar surviving-mass
+    calibration used to convert between formed and surviving mass.
+    """
     fit_host: bool = True
     fit_host_kinematics: bool = False
     host_sfh_model: str = "delayed"
     dsps_ssp_fn: str = "tempdata.h5"
-    age_grid_gyr: Sequence[float] = (0.1, 0.3, 1.0, 3.0, 10.0)
-    logzsol_grid: Sequence[float] = (-1.0, -0.5, 0.0, 0.2)
-    imf_type: int = 1
-    zcontinuous: int = 1
-    sfh: int = 0
+    ssp_imf: str = "chabrier_2003"
+    ssp_metallicity_coordinate: str = "absolute_log10_z"
+    ssp_solar_metallicity: float = 0.019
     rest_wave_min: float = 100.0
     rest_wave_max: float = 3.0e6
     n_wave: int = 1024
@@ -181,6 +185,18 @@ class GalaxyConfig:
 
     def validate(self) -> None:
         """Validate the internal Angstrom wavelength grid and SFH grid."""
+        supported_imfs = {"chabrier_2003", "salpeter_1955", "kroupa_2001", "van_dokkum_2008"}
+        self.ssp_imf = str(self.ssp_imf).strip().lower()
+        if self.ssp_imf not in supported_imfs:
+            supported = ", ".join(sorted(supported_imfs))
+            raise ValueError(f"galaxy.ssp_imf must be one of: {supported}.")
+        supported_coordinates = {"absolute_log10_z", "log10_z_over_zsun"}
+        self.ssp_metallicity_coordinate = str(self.ssp_metallicity_coordinate).strip().lower()
+        if self.ssp_metallicity_coordinate not in supported_coordinates:
+            supported = ", ".join(sorted(supported_coordinates))
+            raise ValueError(f"galaxy.ssp_metallicity_coordinate must be one of: {supported}.")
+        if not np.isfinite(float(self.ssp_solar_metallicity)) or float(self.ssp_solar_metallicity) <= 0.0:
+            raise ValueError("galaxy.ssp_solar_metallicity must be positive and finite.")
         if not np.isfinite(float(self.rest_wave_min)) or float(self.rest_wave_min) <= 0.0:
             raise ValueError("galaxy.rest_wave_min must be positive and finite (Angstrom).")
         if not np.isfinite(float(self.rest_wave_max)) or float(self.rest_wave_max) <= float(self.rest_wave_min):
@@ -279,8 +295,6 @@ class LikelihoodConfig:
     agn_nev: float = 0.1
     attenuation_model_uncertainty: bool = False
     lyman_break_uncertainty: bool = False
-    use_absolute_flux_scale_prior: bool = True
-    absolute_flux_scale_prior_sigma_dex: float = 0.5
     use_host_capture_model: bool = False
     use_fast_photometry_projection: bool = True
     use_local_line_photometry: bool = True

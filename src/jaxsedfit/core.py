@@ -345,7 +345,6 @@ class JAXSEDFit:
             "log_host_capture_scale_arcsec_fit",
             "host_capture_slope_fit",
             "transmitted_fraction_fluxes",
-            "absolute_flux_scale_logprior",
         ]
         if kind == "photometry":
             return photometry_sites
@@ -1081,8 +1080,6 @@ class JAXSEDFit:
                 out["log_agn_bol_luminosity_fit"] = float(np.median(np.asarray(state.predictive["log_agn_bol_luminosity_fit"], dtype=float)))
             if "log_disk_luminosity_fit" in state.predictive:
                 out["log_disk_luminosity_fit"] = float(np.median(np.asarray(state.predictive["log_disk_luminosity_fit"], dtype=float)))
-            if "absolute_flux_scale_logprior" in state.predictive:
-                out["absolute_flux_scale_logprior"] = float(np.median(np.asarray(state.predictive["absolute_flux_scale_logprior"], dtype=float)))
         state.summary = out
         return out
 
