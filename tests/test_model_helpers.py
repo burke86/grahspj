@@ -39,6 +39,7 @@ from jaxsedfit.model import (
     GRAHSP_TORUS_NORM_A,
     C_MS,
     _band_transmitted_fraction,
+    _absorbed_line_luminosity,
     _attenuation_transmitted_fraction,
     _attenuation_curve,
     _apply_biattenuation,
@@ -52,11 +53,13 @@ from jaxsedfit.model import (
     _host_dust_emission,
     _igm_transmission,
     _line_gaussians,
+    _local_flux_conserving_line_grid,
     _evaluate_jaxqsofit_backend,
     _powerlaw_jax,
     _project_local_nebular_line_filters,
     _project_filters,
     _redshift_to_obs,
+    _sample_bounded_normal,
     _torus_component,
     evaluate_sed_model,
     grahsp_photometric_model,
@@ -440,6 +443,97 @@ def test_flux_conserving_lines_preserve_integrated_luminosity():
     line = np.asarray(_flux_conserving_line_gaussians(wave, np.asarray([5000.0]), np.asarray([3.0]), 300.0))
 
     assert np.trapezoid(line, x=wave) == pytest.approx(3.0, rel=2.0e-4)
+
+
+def test_absorbed_line_luminosity_uses_conserved_integrated_energy():
+    line_wave = np.asarray([1000.0, 5000.0])
+    line_lumin = np.asarray([2.0, 3.0])
+    ebv = 0.2
+    curve = np.asarray(_attenuation_curve(line_wave, -1.2, -3.0, 1.2, GRAHSP_BIATTENUATION_BREAK_A))
+    expected = np.sum(line_lumin * (1.0 - 10 ** (ebv * curve / -2.5)))
+
+    absorbed = _absorbed_line_luminosity(
+        line_wave,
+        line_lumin,
+        ebv,
+        -1.2,
+        -3.0,
+        1.2,
+        GRAHSP_BIATTENUATION_BREAK_A,
+    )
+
+    assert float(absorbed) == pytest.approx(expected, rel=1.0e-12)
+
+
+def test_bounded_physical_priors_have_supported_nonzero_edge_gradients():
+    specs = {
+        "sfh_age": (0.0, 1.0, -4.0, 2.0),
+        "sfh_tau": (0.0, 1.0, np.log(0.03), np.log(30.0)),
+        "stellar_metallicity": (-1.0, 0.5, -2.0, -0.5),
+        "dust_alpha": (2.0, 0.4, 0.5, 4.0),
+        "nebular_logu": (-2.0, 0.3, -4.0, -1.0),
+        "nebular_z": (0.02, 0.01, 1.0e-4, 0.05),
+        "nebular_ne": (100.0, 100.0, 10.0, 1000.0),
+        "line_width": (300.0, 100.0, 1.0, 1.0e5),
+    }
+    prior_config = {
+        name: {
+            "dist": "TruncatedNormal",
+            "loc": loc,
+            "scale": scale,
+            "low": low - abs(high - low),
+            "high": high + abs(high - low),
+        }
+        for name, (loc, scale, low, high) in specs.items()
+    }
+
+    def model():
+        for name, (loc, scale, low, high) in specs.items():
+            _sample_bounded_normal(prior_config, name, loc, scale, low, high)
+
+    tr = trace(seed(model, 123)).get_trace()
+    for name, (_, _, low, high) in specs.items():
+        fn = tr[name]["fn"]
+        assert float(np.asarray(fn.support.lower_bound)) == pytest.approx(low)
+        assert float(np.asarray(fn.support.upper_bound)) == pytest.approx(high)
+        span = high - low
+        for value in (low + 0.01 * span, high - 0.01 * span):
+            gradient = jax.grad(lambda x: fn.log_prob(x))(value)
+            assert np.isfinite(float(gradient))
+            assert abs(float(gradient)) > 0.0
+
+
+def test_local_nebular_line_grid_converges_at_filter_edge():
+    """Bound sparse-quadrature error where a line crosses a sharp band edge."""
+    line_wave = 5000.0
+    line_lumin = np.asarray([1.0])
+    width_kms = 300.0
+    fwhm = line_wave * width_kms / 299792.458
+    edge_offsets = np.asarray([-1.0, -0.5, 0.0, 0.5, 1.0])
+
+    sparse_wave, sparse_lumin = _local_flux_conserving_line_grid(
+        np.asarray([line_wave]), line_lumin, width_kms
+    )
+    dense_wave, dense_lumin = _local_flux_conserving_line_grid(
+        np.asarray([line_wave]), line_lumin, width_kms, n_local=4097
+    )
+    sparse_wave = np.asarray(sparse_wave[0])
+    sparse_lumin = np.asarray(sparse_lumin[0])
+    dense_wave = np.asarray(dense_wave[0])
+    dense_lumin = np.asarray(dense_lumin[0])
+
+    sparse_flux = []
+    dense_flux = []
+    for offset in edge_offsets:
+        edge_center = line_wave + offset * fwhm
+        # A deliberately severe edge that ramps from zero to unity over two
+        # line FWHM; ordinary broadband edges are generally much smoother.
+        sparse_trans = np.clip((sparse_wave - edge_center) / (2.0 * fwhm) + 0.5, 0.0, 1.0)
+        dense_trans = np.clip((dense_wave - edge_center) / (2.0 * fwhm) + 0.5, 0.0, 1.0)
+        sparse_flux.append(np.trapezoid(sparse_lumin * sparse_trans, x=sparse_wave))
+        dense_flux.append(np.trapezoid(dense_lumin * dense_trans, x=dense_wave))
+
+    np.testing.assert_allclose(sparse_flux, dense_flux, rtol=0.0, atol=0.04)
 
 
 def test_native_agn_lines_use_5100_scaled_normalization():

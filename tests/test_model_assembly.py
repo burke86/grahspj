@@ -1,4 +1,6 @@
 import numpy as np
+import jax
+import jax.numpy as jnp
 import numpyro.distributions as dist
 from numpyro.handlers import seed, substitute, trace
 
@@ -21,7 +23,7 @@ from jaxsedfit.config import (
     SpectroscopyData,
 )
 from jaxsedfit.core import JAXSEDFit
-from jaxsedfit.model import GRAHSP_PL_BEND_LOC_A, GRAHSP_PL_BEND_WIDTH, GRAHSP_PL_CUTOFF_A, _project_filters, _redshift_to_obs, evaluate_photometric_state, grahsp_photometric_model
+from jaxsedfit.model import GRAHSP_PL_BEND_LOC_A, GRAHSP_PL_BEND_WIDTH, GRAHSP_PL_CUTOFF_A, _project_filters, _project_fixed_cached_local_line_filters, _project_fixed_cached_local_nebular_line_filters, _project_local_line_filters, _project_local_nebular_line_filters, _redshift_to_obs, evaluate_photometric_state, grahsp_photometric_model
 from jaxsedfit.preload import build_model_context
 
 
@@ -796,6 +798,33 @@ def test_fixed_local_nebular_line_cache_matches_exact_projection(monkeypatch):
 
     np.testing.assert_allclose(cached, exact, rtol=5.0e-4, atol=1.0e-30)
 
+    line_lumin = jnp.ones(cached_context.nebular_templates_jax.line_wave_a.shape)
+
+    def cached_projection(width_kms):
+        return jnp.sum(_project_fixed_cached_local_nebular_line_filters(cached_context, line_lumin, width_kms, 0.2))
+
+    def exact_projection(width_kms):
+        return jnp.sum(_project_local_nebular_line_filters(
+            exact_context,
+            exact_context.nebular_templates_jax.line_wave_a,
+            line_lumin,
+            width_kms,
+            0.2,
+            exact_context.fixed_redshift_jax,
+            exact_context.fixed_luminosity_distance_m_jax,
+            exact_context.fixed_igm_jax,
+        ))
+
+    widths = jnp.geomspace(1.05, 9.5e4, 21)
+    cached_fluxes = jax.vmap(cached_projection)(widths)
+    exact_fluxes = jax.vmap(exact_projection)(widths)
+    np.testing.assert_allclose(cached_fluxes, exact_fluxes, rtol=5.0e-4, atol=1.0e-30)
+
+    cached_gradients = jax.vmap(jax.grad(cached_projection))(widths)
+    exact_gradients = jax.vmap(jax.grad(exact_projection))(widths)
+    gradient_scale = jnp.maximum(jnp.max(jnp.abs(exact_gradients)), 1.0e-30)
+    assert float(jnp.max(jnp.abs(cached_gradients - exact_gradients)) / gradient_scale) < 0.05
+
 
 def test_predict_supports_lightweight_and_median_modes(monkeypatch):
     _patch_ssp(monkeypatch)
@@ -929,16 +958,41 @@ def test_fixed_local_line_cache_matches_exact_local_line_projection(monkeypatch)
     data["log_narrow_line_width_kms"] = np.array(np.log(1200.0))
     data["feii_norm"] = np.array(0.0)
 
-    cached = _site(
-        _deterministic_likelihood_trace(build_model_context(_line_cfg(use_cache=True)), data),
-        "pred_fluxes",
-    )
-    exact = _site(
-        _deterministic_likelihood_trace(build_model_context(_line_cfg(use_cache=False)), data),
-        "pred_fluxes",
-    )
+    cached_context = build_model_context(_line_cfg(use_cache=True))
+    exact_context = build_model_context(_line_cfg(use_cache=False))
+    cached = _site(_deterministic_likelihood_trace(cached_context, data), "pred_fluxes")
+    exact = _site(_deterministic_likelihood_trace(exact_context, data), "pred_fluxes")
 
     np.testing.assert_allclose(cached, exact, rtol=5.0e-4, atol=1.0e-30)
+
+    line_lumin = jnp.ones(cached_context.templates.line_wave.shape)
+
+    def cached_projection(width_kms):
+        return jnp.sum(_project_fixed_cached_local_line_filters(cached_context, line_lumin, width_kms, 0.3))
+
+    def exact_projection(width_kms):
+        return jnp.sum(_project_local_line_filters(
+            exact_context,
+            exact_context.templates.line_wave,
+            line_lumin,
+            width_kms,
+            0.3,
+            exact_context.fixed_redshift_jax,
+            exact_context.fixed_luminosity_distance_m_jax,
+            exact_context.fixed_igm_jax,
+        ))
+
+    widths = jnp.geomspace(1.05, 9.5e4, 21)
+    np.testing.assert_allclose(
+        jax.vmap(cached_projection)(widths),
+        jax.vmap(exact_projection)(widths),
+        rtol=5.0e-4,
+        atol=1.0e-30,
+    )
+    cached_gradients = jax.vmap(jax.grad(cached_projection))(widths)
+    exact_gradients = jax.vmap(jax.grad(exact_projection))(widths)
+    gradient_scale = jnp.maximum(jnp.max(jnp.abs(exact_gradients)), 1.0e-30)
+    assert float(jnp.max(jnp.abs(cached_gradients - exact_gradients)) / gradient_scale) < 0.05
 
 
 def test_local_line_photometry_improves_redshift_fit_line_projection(monkeypatch):

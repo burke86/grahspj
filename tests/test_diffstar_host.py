@@ -1,5 +1,6 @@
 import numpy as np
 import numpyro.distributions as dist
+import pytest
 from numpyro.handlers import seed, trace
 
 from jaxsedfit.config import (
@@ -99,6 +100,47 @@ def test_delayed_host_model_is_default(monkeypatch):
     assert np.isfinite(float(np.asarray(tr["sfh_tau_gyr_fit"]["value"])))
     assert np.all(np.isfinite(np.asarray(tr["gal_sfr_table"]["value"], dtype=float)))
     assert np.all(np.isfinite(np.asarray(tr["gal_smh_table"]["value"], dtype=float)))
+
+
+def test_delayed_host_priors_respect_physical_and_template_support(monkeypatch):
+    class _SSPData:
+        ssp_lgmet = np.array([-2.0, -1.5, -1.0, -0.5])
+        ssp_lg_age_gyr = np.array([-1.0, -0.5, 0.0, 0.5])
+        ssp_wave = np.array([900.0, 2000.0, 5000.0, 10000.0])
+        ssp_flux = np.ones((4, 4, 4))
+
+    monkeypatch.setattr("jaxsedfit.preload._load_ssp_templates", lambda fn: _SSPData())
+    monkeypatch.setattr("jaxsedfit.preload._SSP_DATA_CACHE", {})
+    cfg = _mock_config()
+    cfg.galaxy.dsps_ssp_fn = "fake-bounded-delayed.h5"
+    cfg.prior_config.host.log_sfh_age_gyr = dist.Normal(0.0, 10.0)
+    cfg.prior_config.host.log_sfh_tau_gyr = dist.Normal(0.0, 10.0)
+    cfg.prior_config.host.gal_lgmet = dist.Normal(-1.0, 10.0)
+    cfg.prior_config.host.dust_alpha = dist.Normal(2.0, 10.0)
+    context = build_model_context(cfg)
+    tr = trace(seed(lambda: grahsp_photometric_model(context, include_components=False), 11)).get_trace()
+
+    assert tr["log_sfh_tau_gyr"]["type"] == "sample"
+    assert tr["log_sfh_tau_over_age"]["type"] == "deterministic"
+    bounds = {
+        "log_sfh_age_gyr": (np.log(cfg.galaxy.sfh_t_min_gyr), np.log(context.t_obs_gyr)),
+        "log_sfh_tau_gyr": (np.log(0.03), np.log(30.0)),
+        "gal_lgmet": (-2.0, -0.5),
+        "dust_alpha": (float(np.min(context.templates.dust_alpha_grid)), float(np.max(context.templates.dust_alpha_grid))),
+    }
+    for name, (low, high) in bounds.items():
+        support = tr[name]["fn"].support
+        assert float(np.asarray(support.lower_bound)) == pytest.approx(low)
+        assert float(np.asarray(support.upper_bound)) == pytest.approx(high)
+
+
+def test_delayed_host_rejects_both_tau_prior_parameterizations():
+    cfg = _mock_config()
+    cfg.prior_config.host.log_sfh_tau_gyr = dist.Normal(0.0, 1.0)
+    cfg.prior_config.host.log_sfh_tau_over_age = dist.Normal(0.0, 1.0)
+
+    with pytest.raises(ValueError, match="Configure only one"):
+        cfg.validate()
 
 
 def test_agn_type_2_uses_sy2_narrow_lines_only(monkeypatch):

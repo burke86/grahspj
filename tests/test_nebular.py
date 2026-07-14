@@ -157,6 +157,30 @@ def test_nebular_trilinear_interpolation_has_parameter_gradients():
     assert all(abs(float(g)) > 0.0 for g in grads)
 
 
+def test_nebular_priors_are_truncated_to_template_and_cache_support(monkeypatch):
+    _patch_ssp(monkeypatch)
+    cfg = _mock_config()
+    cfg.prior_config.nebular.logU = dist.Normal(-2.0, 10.0)
+    cfg.prior_config.nebular.zgas = dist.Normal(0.02, 1.0)
+    cfg.prior_config.nebular.ne = dist.Normal(100.0, 1.0e5)
+    cfg.prior_config.nebular.lines_width = dist.Normal(300.0, 1.0e5)
+    context = build_model_context(cfg)
+
+    tr = trace(seed(lambda: grahsp_photometric_model(context, include_components=False), 7)).get_trace()
+    expected_bounds = {
+        "nebular_logU": (context.nebular_templates_jax.logu_grid[0], context.nebular_templates_jax.logu_grid[-1]),
+        "nebular_zgas": (context.nebular_templates_jax.z_grid[0], context.nebular_templates_jax.z_grid[-1]),
+        "nebular_ne": (context.nebular_templates_jax.ne_grid[0], context.nebular_templates_jax.ne_grid[-1]),
+        "nebular_lines_width": (1.0, 1.0e5),
+    }
+    for name, (low, high) in expected_bounds.items():
+        support = tr[name]["fn"].support
+        np.testing.assert_allclose(np.asarray(support.lower_bound), np.asarray(low), rtol=0.0, atol=0.0)
+        np.testing.assert_allclose(np.asarray(support.upper_bound), np.asarray(high), rtol=0.0, atol=0.0)
+        value = float(np.asarray(tr[name]["value"]))
+        assert float(low) <= value <= float(high)
+
+
 def test_host_basis_lyman_rates_are_finite(monkeypatch):
     _patch_ssp(monkeypatch)
     cfg = _mock_config()
