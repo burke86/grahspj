@@ -3695,7 +3695,13 @@ def evaluate_photometric_state(
     else:
         log_spectrum_scale = jnp.asarray(0.0, dtype=jnp.float64)
         spec_logl = jnp.asarray(0.0, dtype=jnp.float64)
-    need_agn_fluxes = fit_agn and (include_components or force_component_fluxes or cfg.likelihood.variability_uncertainty)
+    need_agn_fluxes = fit_agn and (
+        include_components
+        or force_component_fluxes
+        or cfg.likelihood.variability_uncertainty
+        or cfg.likelihood.fit_agn_systematics_width
+        or cfg.likelihood.agn_systematics_width > 0.0
+    )
     need_trans_fluxes = include_components or cfg.likelihood.attenuation_model_uncertainty
     if include_components:
         agn_obs = _redshift_to_obs(rest_wave, agn_rest * igm, obs_wave, redshift, luminosity_distance_m)
