@@ -175,6 +175,8 @@ def _prior_distribution(prior_config: dict[str, Any], key: str, default_distribu
     cfg = prior_config.get(key, None)
     if cfg is None:
         return default_distribution
+    if isinstance(cfg, dist.Distribution):
+        return cfg
     if isinstance(cfg, (tuple, list)) and len(cfg) >= 2:
         return dist.Normal(jnp.asarray(cfg[0], dtype=jnp.float64), jnp.maximum(jnp.asarray(cfg[1], dtype=jnp.float64), 1.0e-6))
     if not isinstance(cfg, dict):
@@ -332,6 +334,8 @@ def _sample_positive(
     """
     cfg = prior_config.get(value_key, None)
     family = default_family
+    if isinstance(cfg, dist.Distribution):
+        family = cfg.__class__.__name__.lower()
     if isinstance(cfg, dict):
         family = str(cfg.get("family", cfg.get("dist", family))).lower()
     if log_key in prior_config:
@@ -340,7 +344,7 @@ def _sample_positive(
     if family in {"exponential", "exp"}:
         return _sample_prior(prior_config, value_key, dist.Exponential(1.0 / max(default_value, 1.0e-30)))
     if family in {"lognormal", "log-normal", "log_normal", "normal_log"}:
-        if isinstance(cfg, dict):
+        if isinstance(cfg, (dict, dist.LogNormal)):
             return _sample_prior(
                 prior_config,
                 value_key,
@@ -401,6 +405,17 @@ def _sample_bounded_normal(prior_config: dict[str, Any], key: str, default: floa
     prior_high = high
     if isinstance(cfg, (tuple, list)) and len(cfg) >= 2:
         loc, prior_scale = cfg[:2]
+    elif isinstance(cfg, dist.Distribution) and cfg.__class__.__name__ in {
+        "TruncatedNormal", "TwoSidedTruncatedDistribution"
+    }:
+        base = getattr(cfg, "base_dist", cfg)
+        loc, prior_scale = base.loc, base.scale
+        prior_low = jnp.maximum(jnp.asarray(low, dtype=jnp.float64), jnp.asarray(cfg.low, dtype=jnp.float64))
+        prior_high = jnp.minimum(jnp.asarray(high, dtype=jnp.float64), jnp.asarray(cfg.high, dtype=jnp.float64))
+    elif isinstance(cfg, dist.Normal):
+        loc, prior_scale = cfg.loc, cfg.scale
+    elif isinstance(cfg, dist.Distribution):
+        raise ValueError(f"prior_config[{key!r}] must be Normal-like to enforce bounded model support.")
     elif isinstance(cfg, dict):
         family = str(cfg.get("dist", cfg.get("family", "normal"))).lower()
         if family not in {"normal", "gaussian", "truncatednormal", "truncated_normal", "truncnormal", "truncnorm"}:
@@ -3152,8 +3167,8 @@ def evaluate_photometric_state(
             value_key="agn_systematics_width",
             log_key="log_agn_systematics_width",
             default_value=float(cfg.likelihood.agn_systematics_width_prior_scale),
-            default_log_scale=1.0,
-            default_family="exponential",
+            default_log_scale=0.5,
+            default_family="lognormal",
         )
     else:
         agn_systematics_width = jnp.asarray(float(cfg.likelihood.agn_systematics_width), dtype=jnp.float64)

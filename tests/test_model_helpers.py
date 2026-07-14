@@ -343,16 +343,16 @@ def test_prior_config_object_exposes_flat_mapping():
     mapping = prior.to_mapping()
 
     assert "redshift_pdf" in mapping
-    assert mapping["log_stellar_mass"]["dist"] == "uniform"
+    assert isinstance(mapping["log_stellar_mass"], dist.Uniform)
     assert mapping["mass_metallicity_relation"]["enabled"] is False
-    assert mapping["log_agn_amp"] == {"dist": "Normal", "loc": 44.0, "scale": 1.0}
-    assert mapping["log_broad_line_width_kms"] == {
-        "dist": "TruncatedNormal",
-        "loc": pytest.approx(np.log(3000.0)),
-        "scale": 0.4,
-        "low": pytest.approx(np.log(1000.0)),
-        "high": pytest.approx(np.log(15000.0)),
-    }
+    assert isinstance(mapping["log_agn_amp"], dist.Normal)
+    assert float(mapping["log_agn_amp"].loc) == pytest.approx(44.0)
+    width_prior = mapping["log_broad_line_width_kms"]
+    assert width_prior.__class__.__name__ == "TwoSidedTruncatedDistribution"
+    assert float(width_prior.base_dist.loc) == pytest.approx(np.log(3000.0))
+    assert float(width_prior.base_dist.scale) == pytest.approx(0.4)
+    assert float(width_prior.low) == pytest.approx(np.log(1000.0))
+    assert float(width_prior.high) == pytest.approx(np.log(15000.0))
 
 
 def test_agn_disk_is_normalized_at_5100_angstrom():
@@ -1504,7 +1504,7 @@ def test_jaxqsofit_joint_backend_builds_flux_scaled_smart_priors(monkeypatch):
         flux=np.asarray([2.0, 4.0]),
         redshift=0.1,
     ).to_mapping()
-    assert prior["log_cont_norm"]["loc"] == pytest.approx(expected["log_cont_norm"]["loc"])
+    assert float(prior["log_cont_norm"].loc) == pytest.approx(float(expected["log_cont_norm"].loc))
     line_table = prior["line"]["table"]
     assert line_table
     assert min(float(row["minsca"]) for row in line_table) >= 3.0e-4

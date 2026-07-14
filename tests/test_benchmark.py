@@ -101,8 +101,8 @@ def test_build_chimera_fit_config(tmp_path):
     assert cfg.galaxy.dsps_ssp_fn == str(ssp_path)
     prior = cfg.prior_config.to_mapping()
     assert "log_stellar_mass" in prior
-    assert prior["log_stellar_mass"]["dist"] == "student_t"
-    assert prior["log_stellar_mass"]["loc"] == 10.0
+    assert isinstance(prior["log_stellar_mass"], dist.StudentT)
+    assert float(prior["log_stellar_mass"].loc) == 10.0
 
 
 def test_build_chimera_fit_config_preserves_user_prior_overrides(tmp_path):
@@ -113,7 +113,10 @@ def test_build_chimera_fit_config_preserves_user_prior_overrides(tmp_path):
     base = build_chimera_fit_config(row, dsps_ssp_fn=str(ssp_path))
     base.prior_config.stellar_mass = dist.Normal(9.9, 0.1)
     cfg = build_chimera_fit_config(row, dsps_ssp_fn=str(ssp_path), base_config=base)
-    assert cfg.prior_config.to_mapping()["log_stellar_mass"] == {"dist": "Normal", "loc": 9.9, "scale": 0.1}
+    prior = cfg.prior_config.to_mapping()["log_stellar_mass"]
+    assert isinstance(prior, dist.Normal)
+    assert float(prior.loc) == pytest.approx(9.9)
+    assert float(prior.scale) == pytest.approx(0.1)
 
 
 def test_chimera_mass_benchmark_with_surrogate_fitter(tmp_path):

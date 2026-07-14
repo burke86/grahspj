@@ -291,7 +291,7 @@ def test_systematics_width_can_use_physical_lognormal_prior(monkeypatch):
     assert np.isclose(_site(tr, "systematics_width"), 0.02)
 
 
-def test_agn_systematics_width_defaults_to_grahsp_exponential_prior(monkeypatch):
+def test_agn_systematics_width_prior_is_centered_on_twenty_percent(monkeypatch):
     _patch_ssp(monkeypatch)
     cfg = _cfg()
     context = build_model_context(cfg)
@@ -300,14 +300,15 @@ def test_agn_systematics_width_defaults_to_grahsp_exponential_prior(monkeypatch)
         context,
         {
             **_fixed_component_data(),
-            "agn_systematics_width": np.array(0.1),
+            "log_agn_systematics_width": np.array(np.log(0.1)),
         },
     )
 
-    assert tr["agn_systematics_width"]["type"] == "sample"
-    fn = tr["agn_systematics_width"]["fn"]
-    assert fn.__class__.__name__ == "Exponential"
-    assert np.isclose(np.asarray(fn.rate), 5.0)
+    assert tr["log_agn_systematics_width"]["type"] == "sample"
+    fn = tr["log_agn_systematics_width"]["fn"]
+    assert fn.__class__.__name__ == "Normal"
+    assert np.isclose(np.asarray(fn.loc), np.log(0.20))
+    assert np.isclose(np.asarray(fn.scale), 0.5)
     assert np.isclose(_site(tr, "agn_systematics_width"), 0.1)
 
 
