@@ -75,12 +75,13 @@ def _cfg(
             fit_agn=fit_agn,
             fit_feii_broadening=fit_feii_broadening,
             fit_balmer_continuum=fit_balmer_continuum,
-            feii_template=FeIITemplate(name="fe", wave=[1000.0, 2000.0, 3000.0], lumin=[0.0, 1.0, 0.0]),
+            feii_template=FeIITemplate(name="fe", wave=[1000.0, 2000.0, 3000.0], lumin=[0.0, 1.0, 0.0], wavelength_unit="angstrom"),
             emission_line_template=EmissionLineTemplate(
                 wave=[486.1, 656.3],
                 lumin_blagn=[1.0, 0.5],
                 lumin_sy2=[0.2, 0.1],
                 lumin_liner=[0.1, 0.05],
+                wavelength_unit="angstrom",
             ),
         ),
         likelihood=LikelihoodConfig(
@@ -160,6 +161,19 @@ def _fixed_component_data():
         "balmer_tau": np.array(1.0),
         "balmer_vel": np.array(3000.0),
     }
+
+
+def test_attenuation_uncertainty_uses_dimensionless_band_flux_ratio(monkeypatch):
+    _patch_ssp(monkeypatch)
+    cfg = _cfg()
+    cfg.likelihood.attenuation_model_uncertainty = True
+    context = build_model_context(cfg)
+    tr = _deterministic_trace(context, _fixed_component_data())
+
+    transmitted = _site(tr, "transmitted_fraction_fluxes")
+    assert np.all(np.isfinite(transmitted))
+    assert np.all((transmitted >= 1.0e-4) & (transmitted <= 1.0))
+    assert np.any(transmitted < 0.99)
 
 
 def test_native_agn_lines_use_distinct_broad_and_narrow_widths(monkeypatch):

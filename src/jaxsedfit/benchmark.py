@@ -186,6 +186,7 @@ def _load_bruhweiler_feii_template() -> FeIITemplate:
         name="BruhweilerVerner08",
         wave=wave_rest.tolist(),
         lumin=(llam / norm).tolist(),
+        wavelength_unit="angstrom",
     )
     _BENCHMARK_RESOURCE_CACHE[cache_key] = tmpl
     return tmpl
@@ -214,6 +215,7 @@ def _load_mor_netzer_emission_lines() -> EmissionLineTemplate:
         lumin_blagn=np.asarray(data["broad"], dtype=float).tolist(),
         lumin_sy2=np.asarray(data["S2"], dtype=float).tolist(),
         lumin_liner=np.asarray(data["LINER"], dtype=float).tolist(),
+        wavelength_unit="angstrom",
     )
     _BENCHMARK_RESOURCE_CACHE[cache_key] = tmpl
     return tmpl

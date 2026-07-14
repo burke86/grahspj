@@ -28,6 +28,10 @@ class Observation:
         mode = str(self.redshift_mode).lower()
         if mode not in {"fixed", "fit"}:
             raise ValueError("observation.redshift_mode must be either 'fixed' or 'fit'.")
+        if not np.isfinite(float(self.redshift)) or float(self.redshift) < 0.0:
+            raise ValueError("observation.redshift must be finite and non-negative.")
+        if not np.isfinite(float(self.redshift_err)) or float(self.redshift_err) < 0.0:
+            raise ValueError("observation.redshift_err must be finite and non-negative.")
         self.redshift_mode = mode
 
 
@@ -129,19 +133,25 @@ class FilterSet:
 
 @dataclass
 class FeIITemplate:
-    """Fe II template configuration or inline template data."""
+    """Fe II template configuration or inline template data.
+
+    ``wavelength_unit`` is required for inline ``wave`` values. Supported
+    values are ``angstrom``, ``nm``, and ``micron`` (plus common aliases).
+    """
     name: str = "BruhweilerVerner08"
     wave: Sequence[float] | None = None
     lumin: Sequence[float] | None = None
+    wavelength_unit: str | None = None
 
 
 @dataclass
 class EmissionLineTemplate:
-    """Emission-line template tables for BLAGN, Sy2, and LINER branches."""
+    """Emission-line template tables with explicit inline wavelength units."""
     wave: Sequence[float] | None = None
     lumin_blagn: Sequence[float] | None = None
     lumin_sy2: Sequence[float] | None = None
     lumin_liner: Sequence[float] | None = None
+    wavelength_unit: str | None = None
 
 
 @dataclass
@@ -168,6 +178,19 @@ class GalaxyConfig:
     # empirical AGN component, not by adding AGN-absorbed luminosity here.
     use_energy_balance: bool = True
     dust_alpha: float = 2.0
+
+    def validate(self) -> None:
+        """Validate the internal Angstrom wavelength grid and SFH grid."""
+        if not np.isfinite(float(self.rest_wave_min)) or float(self.rest_wave_min) <= 0.0:
+            raise ValueError("galaxy.rest_wave_min must be positive and finite (Angstrom).")
+        if not np.isfinite(float(self.rest_wave_max)) or float(self.rest_wave_max) <= float(self.rest_wave_min):
+            raise ValueError("galaxy.rest_wave_max must be finite and greater than rest_wave_min (Angstrom).")
+        if int(self.n_wave) < 2:
+            raise ValueError("galaxy.n_wave must be at least 2.")
+        if int(self.sfh_n_steps) < 2:
+            raise ValueError("galaxy.sfh_n_steps must be at least 2.")
+        if not np.isfinite(float(self.sfh_t_min_gyr)) or float(self.sfh_t_min_gyr) <= 0.0:
+            raise ValueError("galaxy.sfh_t_min_gyr must be positive and finite.")
 
 
 @dataclass
@@ -218,6 +241,30 @@ class AGNConfig:
         """Normalize nested template sections."""
         self.feii_template = _coerce_dataclass(FeIITemplate, self.feii_template)
         self.emission_line_template = _coerce_dataclass(EmissionLineTemplate, self.emission_line_template)
+
+    def validate(self) -> None:
+        """Validate inline template units and array shapes."""
+        allowed_units = {"angstrom", "angstroms", "aa", "a", "nm", "nanometer", "nanometers", "um", "micron", "microns"}
+        for label, template in (("feii_template", self.feii_template), ("emission_line_template", self.emission_line_template)):
+            unit = None if template.wavelength_unit is None else str(template.wavelength_unit).strip().lower()
+            if template.wave is not None and unit is None:
+                raise ValueError(f"agn.{label}.wavelength_unit is required when inline wave values are provided.")
+            if unit is not None and unit not in allowed_units:
+                allowed = "angstrom, nm, micron"
+                raise ValueError(f"agn.{label}.wavelength_unit must be one of: {allowed}.")
+            if template.wave is not None:
+                wave = np.asarray(template.wave, dtype=float)
+                min_size = 2 if label == "feii_template" else 1
+                if wave.ndim != 1 or wave.size < min_size or not np.all(np.isfinite(wave)) or np.any(wave <= 0.0):
+                    raise ValueError(f"agn.{label}.wave must contain at least {min_size} positive finite wavelength value(s).")
+            if label == "feii_template" and template.wave is not None:
+                if template.lumin is None or len(template.lumin) != len(template.wave):
+                    raise ValueError("agn.feii_template.lumin must match feii_template.wave.")
+            if label == "emission_line_template" and template.wave is not None:
+                for field_name in ("lumin_blagn", "lumin_sy2", "lumin_liner"):
+                    values = getattr(template, field_name)
+                    if values is None or len(values) != len(template.wave):
+                        raise ValueError(f"agn.emission_line_template.{field_name} must match emission_line_template.wave.")
 
 
 @dataclass
@@ -844,7 +891,9 @@ class FitConfig:
         """Validate nested config components that require runtime checks."""
         self.observation.validate()
         self.photometry.validate()
+        self.galaxy.validate()
         self.nebular.validate()
+        self.agn.validate()
         for spectrum in self.spectroscopy_list:
             spectrum.validate()
         if not self.galaxy.fit_host and not self.agn.fit_agn:

@@ -38,6 +38,7 @@ from jaxsedfit.model import (
     GRAHSP_SI_EM_WIDTH_A,
     GRAHSP_TORUS_NORM_A,
     C_MS,
+    _band_transmitted_fraction,
     _attenuation_transmitted_fraction,
     _attenuation_curve,
     _apply_biattenuation,
@@ -80,6 +81,7 @@ from jaxsedfit.preload import (
     _build_host_basis,
     _lnu_lsun_per_hz_to_llambda_w_per_a_np,
     _load_filter_responses,
+    _load_templates,
     _mw_band_attenuation_factor,
     _mw_pixel_attenuation_factor,
     _load_vendored_dale2014_templates,
@@ -92,6 +94,37 @@ def test_likelihood_defaults_include_absolute_flux_scale_prior():
     assert cfg.absolute_flux_scale_prior_sigma_dex > 0.0
     assert cfg.use_local_line_photometry is True
     assert cfg.local_nebular_line_uncertainty_dex == pytest.approx(0.3)
+
+
+@pytest.mark.parametrize("redshift", [-0.1, np.nan, np.inf])
+def test_observation_rejects_invalid_redshift(redshift):
+    with pytest.raises(ValueError, match="finite and non-negative"):
+        Observation(redshift=redshift).validate()
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"rest_wave_min": 0.0},
+        {"rest_wave_min": 1000.0, "rest_wave_max": 1000.0},
+        {"n_wave": 1},
+        {"sfh_n_steps": 1},
+    ],
+)
+def test_galaxy_rejects_invalid_internal_grids(kwargs):
+    with pytest.raises(ValueError):
+        GalaxyConfig(**kwargs).validate()
+
+
+def test_inline_templates_require_explicit_wavelength_units():
+    cfg = AGNConfig(
+        feii_template=FeIITemplate(wave=[1000.0, 2000.0], lumin=[1.0, 1.0]),
+        emission_line_template=EmissionLineTemplate(
+            wave=[5000.0], lumin_blagn=[1.0], lumin_sy2=[1.0], lumin_liner=[1.0]
+        ),
+    )
+    with pytest.raises(ValueError, match="wavelength_unit is required"):
+        cfg.validate()
 
 
 def test_photometry_method_is_normalized_metadata_only():
@@ -480,6 +513,11 @@ def test_attenuation_transmitted_fraction_uses_only_direct_light():
     np.testing.assert_allclose(frac[:2], [0.2, 0.8])
     assert frac[2] == pytest.approx(1.0e-4)
     assert np.all(total_emergent_fraction[:2] > frac[:2])
+
+
+def test_band_transmitted_fraction_is_dimensionless_ratio():
+    fraction = np.asarray(_band_transmitted_fraction([2.0, 8.0, 0.0], [10.0, 10.0, 0.0]))
+    np.testing.assert_allclose(fraction, [0.2, 0.8, 1.0])
 
 
 def test_extended_capture_leaves_compact_flux_unchanged_and_scales_extended_flux():
@@ -936,12 +974,13 @@ def test_build_context_with_inline_templates(monkeypatch):
         filters=FilterSet(curves=[FilterCurve(name="f1", wave=[1000.0, 2000.0, 3000.0], transmission=[0.0, 1.0, 0.0])]),
         galaxy=GalaxyConfig(dsps_ssp_fn="fake.h5", n_wave=64),
         agn=AGNConfig(
-            feii_template=FeIITemplate(name="fe", wave=[1000.0, 2000.0], lumin=[1.0, 0.5]),
+            feii_template=FeIITemplate(name="fe", wave=[1000.0, 2000.0], lumin=[1.0, 0.5], wavelength_unit="angstrom"),
             emission_line_template=EmissionLineTemplate(
                 wave=[121.6, 486.1],
                 lumin_blagn=[1.0, 0.5],
                 lumin_sy2=[0.2, 0.1],
                 lumin_liner=[0.1, 0.05],
+                wavelength_unit="nm",
             ),
         ),
         likelihood=LikelihoodConfig(),
@@ -962,6 +1001,7 @@ def test_build_context_with_inline_templates(monkeypatch):
     assert len(context.filters) == 1
     assert context.filters[0].name == "f1"
     assert context.templates.feii_wave.shape[0] == 2
+    np.testing.assert_allclose(context.templates.line_wave, [1216.0, 4861.0])
     assert context.templates.dust_alpha_grid.size > 0
     assert context.templates.dust_wave.size > 0
     assert context.templates.dust_lumin.ndim == 2
@@ -1413,12 +1453,13 @@ def test_jaxqsofit_backend_keeps_nebular_width_fixed_without_nebular_prior(monke
         filters=FilterSet(curves=[FilterCurve(name="f1", wave=[1000.0, 2000.0, 3000.0], transmission=[0.0, 1.0, 0.0])]),
         galaxy=GalaxyConfig(dsps_ssp_fn="fake.h5", n_wave=64, fit_host=True),
         agn=AGNConfig(
-            feii_template=FeIITemplate(name="fe", wave=[1000.0, 2000.0], lumin=[0.0, 0.0]),
+            feii_template=FeIITemplate(name="fe", wave=[1000.0, 2000.0], lumin=[0.0, 0.0], wavelength_unit="angstrom"),
             emission_line_template=EmissionLineTemplate(
                 wave=[5000.0],
                 lumin_blagn=[0.0],
                 lumin_sy2=[0.0],
                 lumin_liner=[0.0],
+                wavelength_unit="angstrom",
             ),
         ),
         nebular=NebularConfig(enabled=True, zgas=0.02),
@@ -1473,12 +1514,13 @@ def test_jaxsedfit_model_can_call_jaxqsofit_backend(monkeypatch):
         filters=FilterSet(curves=[FilterCurve(name="f1", wave=[1000.0, 2000.0, 3000.0], transmission=[0.0, 1.0, 0.0])]),
         galaxy=GalaxyConfig(dsps_ssp_fn="fake.h5", n_wave=64, fit_host=False),
         agn=AGNConfig(
-            feii_template=FeIITemplate(name="fe", wave=[1000.0, 2000.0], lumin=[0.0, 0.0]),
+            feii_template=FeIITemplate(name="fe", wave=[1000.0, 2000.0], lumin=[0.0, 0.0], wavelength_unit="angstrom"),
             emission_line_template=EmissionLineTemplate(
                 wave=[486.1],
                 lumin_blagn=[0.0],
                 lumin_sy2=[0.0],
                 lumin_liner=[0.0],
+                wavelength_unit="angstrom",
             ),
         ),
         likelihood=LikelihoodConfig(
@@ -1805,7 +1847,7 @@ def test_config_rejects_invalid_redshift_pdf():
 
 
 def test_igm_transmission_on_rest_grid_is_near_unity_redward_of_lyman_alpha():
-    rest_wave = np.array([150.0, 121.6, 100.0, 91.2, 80.0], dtype=float)
+    rest_wave = np.array([1500.0, 1216.0, 1000.0, 912.0, 800.0], dtype=float)
     cache = _build_igm_cache_jax(rest_wave)
     transmission = np.asarray(_build_fixed_igm_jax(cache, 1.0), dtype=float)
 
@@ -1817,7 +1859,7 @@ def test_igm_transmission_on_rest_grid_is_near_unity_redward_of_lyman_alpha():
 
 
 def test_dynamic_and_fixed_igm_evaluators_match():
-    rest_wave = np.array([150.0, 121.6, 100.0, 91.2, 80.0], dtype=float)
+    rest_wave = np.array([1500.0, 1216.0, 1000.0, 912.0, 800.0], dtype=float)
     cache = _build_igm_cache_jax(rest_wave)
 
     fixed = np.asarray(_build_fixed_igm_jax(cache, 2.0), dtype=float)
