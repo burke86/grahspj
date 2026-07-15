@@ -69,8 +69,10 @@ def test_public_delayed_host_api_builds_physical_host_state():
     assert "log_sfh_age_gyr" in tr
     assert "log_sfh_tau_over_age" in tr
     assert "log_sfh_tau_gyr" in tr
-    assert tr["log_sfh_tau_over_age"]["type"] == "sample"
-    assert tr["log_sfh_tau_gyr"]["type"] == "deterministic"
+    assert tr["log_sfh_age_gyr"]["fn"].__class__.__name__ == "Uniform"
+    assert tr["log_sfh_tau_gyr"]["type"] == "sample"
+    assert tr["log_sfh_tau_gyr"]["fn"].__class__.__name__ == "Uniform"
+    assert tr["log_sfh_tau_over_age"]["type"] == "deterministic"
 
 
 def test_public_host_rest_on_basis_reuses_sampled_weights():

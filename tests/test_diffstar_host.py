@@ -93,8 +93,14 @@ def test_delayed_host_model_is_default(monkeypatch):
     assert "log_sfh_age_gyr" in tr
     assert "log_sfh_tau_over_age" in tr
     assert "log_sfh_tau_gyr" in tr
-    assert tr["log_sfh_tau_over_age"]["type"] == "sample"
-    assert tr["log_sfh_tau_gyr"]["type"] == "deterministic"
+    assert tr["log_sfh_age_gyr"]["fn"].__class__.__name__ == "Uniform"
+    assert tr["log_sfh_tau_gyr"]["type"] == "sample"
+    assert tr["log_sfh_tau_gyr"]["fn"].__class__.__name__ == "Uniform"
+    assert tr["log_sfh_tau_over_age"]["type"] == "deterministic"
+    assert float(np.asarray(tr["log_sfh_age_gyr"]["fn"].support.lower_bound)) == pytest.approx(np.log(10.0**-0.8))
+    assert float(np.asarray(tr["log_sfh_age_gyr"]["fn"].support.upper_bound)) == pytest.approx(np.log(min(10.0, context.t_obs_gyr)))
+    assert float(np.asarray(tr["log_sfh_tau_gyr"]["fn"].support.lower_bound)) == pytest.approx(np.log(0.1))
+    assert float(np.asarray(tr["log_sfh_tau_gyr"]["fn"].support.upper_bound)) == pytest.approx(np.log(10.0))
     assert "u_lgmcrit" not in tr
     assert np.isfinite(float(np.asarray(tr["sfh_age_gyr_fit"]["value"])))
     assert np.isfinite(float(np.asarray(tr["sfh_tau_gyr_fit"]["value"])))
