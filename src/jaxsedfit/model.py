@@ -46,6 +46,8 @@ DEFAULT_NARROW_LINES_STRENGTH = 1.0
 DEFAULT_FEII_STRENGTH = 5.0
 DEFAULT_BALMER_CONTINUUM_STRENGTH = 1.0e-3
 GRAHSP_BIATTENUATION_BREAK_A = 11000.0
+GRAHSP_EBV_MIN = 0.01
+GRAHSP_EBV_MAX = 10.0
 GRAHSP_PL_BEND_LOC_A = 1000.0
 GRAHSP_PL_BEND_WIDTH = 10.0
 GRAHSP_PL_CUTOFF_A = 100000.0
@@ -1776,18 +1778,38 @@ def _build_delayed_host(context: ModelContext, prior_config: dict[str, Any], *, 
     cfg = context.fit_config.galaxy
 
     log_stellar_mass = _sample_log_stellar_mass(prior_config)
-    min_age = jnp.asarray(max(float(cfg.sfh_t_min_gyr), 1.0e-3), dtype=jnp.float64)
-    max_age = jnp.maximum(t_obs_gyr, min_age * 1.01)
-    log_age_gyr = _sample_bounded_normal(
-        prior_config,
-        "log_sfh_age_gyr",
-        np.log(min(3.0, max(float(context.t_obs_gyr), 1.0e-3))),
-        1.0,
-        jnp.log(min_age),
-        jnp.log(max_age),
-    )
+    physical_min_age = max(float(cfg.sfh_t_min_gyr), 1.0e-3)
+    physical_max_age = max(float(context.t_obs_gyr), physical_min_age * 1.01)
+    if "log_sfh_age_gyr" in prior_config:
+        log_age_gyr = _sample_bounded_normal(
+            prior_config,
+            "log_sfh_age_gyr",
+            np.log(min(3.0, physical_max_age)),
+            1.0,
+            np.log(physical_min_age),
+            np.log(physical_max_age),
+        )
+    else:
+        # Continuous equivalent of the GRAHSP age_main grid: log-uniform
+        # from 10^2.2 Myr to 10 Gyr, capped by the age of the Universe.
+        default_max_age = min(10.0, physical_max_age)
+        default_min_age = min(max(10.0**-0.8, physical_min_age), default_max_age / 1.01)
+        log_age_gyr = numpyro.sample(
+            "log_sfh_age_gyr",
+            dist.Uniform(np.log(default_min_age), np.log(default_max_age)),
+        )
     age_gyr = jnp.exp(log_age_gyr)
-    if "log_sfh_tau_gyr" in prior_config:
+    if "log_sfh_tau_over_age" in prior_config:
+        log_tau_over_age = _sample_bounded_normal(
+            prior_config,
+            "log_sfh_tau_over_age",
+            0.0,
+            float(cfg.tau_host_prior_scale),
+            jnp.log(0.03 / age_gyr),
+            jnp.log(30.0 / age_gyr),
+        )
+        log_tau_gyr = numpyro.deterministic("log_sfh_tau_gyr", log_age_gyr + log_tau_over_age)
+    elif "log_sfh_tau_gyr" in prior_config:
         log_tau_gyr = _sample_bounded_normal(
             prior_config,
             "log_sfh_tau_gyr",
@@ -1798,15 +1820,12 @@ def _build_delayed_host(context: ModelContext, prior_config: dict[str, Any], *, 
         )
         log_tau_over_age = numpyro.deterministic("log_sfh_tau_over_age", log_tau_gyr - log_age_gyr)
     else:
-        log_tau_over_age = _sample_bounded_normal(
-            prior_config,
-            "log_sfh_tau_over_age",
-            0.0,
-            float(cfg.tau_host_prior_scale),
-            jnp.log(0.03 / age_gyr),
-            jnp.log(30.0 / age_gyr),
+        # Continuous equivalent of GRAHSP's independent tau_main grid.
+        log_tau_gyr = numpyro.sample(
+            "log_sfh_tau_gyr",
+            dist.Uniform(np.log(0.1), np.log(10.0)),
         )
-        log_tau_gyr = numpyro.deterministic("log_sfh_tau_gyr", log_age_gyr + log_tau_over_age)
+        log_tau_over_age = numpyro.deterministic("log_sfh_tau_over_age", log_tau_gyr - log_age_gyr)
     tau_gyr = jnp.exp(log_tau_gyr)
     stellar_age_gyr = jnp.maximum(t_obs_gyr - gal_t_table, 0.0)
     sfh_age_gyr = age_gyr - stellar_age_gyr
@@ -2876,45 +2895,60 @@ def evaluate_photometric_state(
             prior_config,
             value_key="fcov",
             log_key="log_fcov",
-            default_value_distribution=dist.LogNormal(np.log(0.2), 0.6),
-            default_log_distribution=dist.Normal(np.log(0.2), 0.6),
+            default_value_distribution=dist.Uniform(0.05, 0.95),
+            default_log_distribution=dist.TransformedDistribution(
+                dist.Uniform(0.05, 0.95),
+                dist.transforms.ExpTransform().inv,
+            ),
             default_to_log=True,
         )
-        si = _sample_prior(prior_config, "si", dist.Normal(0.0, 1.0))
+        si = _sample_prior(prior_config, "si", dist.Uniform(-4.0, 4.0))
         cool_lam = _sample_positive_distribution(
             prior_config,
             value_key="cool_lam",
             log_key="log_cool_lam",
-            default_value_distribution=dist.LogNormal(np.log(17.0), 0.2),
-            default_log_distribution=dist.Normal(np.log(17.0), 0.2),
+            default_value_distribution=dist.Uniform(10.0, 30.0),
+            default_log_distribution=dist.TransformedDistribution(
+                dist.Uniform(10.0, 30.0),
+                dist.transforms.ExpTransform().inv,
+            ),
         )
         cool_width = _sample_positive_distribution(
             prior_config,
             value_key="cool_width",
             log_key="log_cool_width",
-            default_value_distribution=dist.LogNormal(np.log(0.45), 0.2),
-            default_log_distribution=dist.Normal(np.log(0.45), 0.2),
+            default_value_distribution=dist.Uniform(0.2, 0.65),
+            default_log_distribution=dist.TransformedDistribution(
+                dist.Uniform(0.2, 0.65),
+                dist.transforms.ExpTransform().inv,
+            ),
         )
         hot_lam = _sample_positive_distribution(
             prior_config,
             value_key="hot_lam",
             log_key="log_hot_lam",
-            default_value_distribution=dist.LogNormal(np.log(2.0), 0.3),
-            default_log_distribution=dist.Normal(np.log(2.0), 0.3),
+            default_value_distribution=dist.Uniform(1.0, 5.5),
+            default_log_distribution=dist.TransformedDistribution(
+                dist.Uniform(1.0, 5.5),
+                dist.transforms.ExpTransform().inv,
+            ),
         )
         hot_width = _sample_positive_distribution(
             prior_config,
             value_key="hot_width",
             log_key="log_hot_width",
-            default_value_distribution=dist.LogNormal(np.log(0.5), 0.2),
-            default_log_distribution=dist.Normal(np.log(0.5), 0.2),
+            default_value_distribution=dist.Uniform(0.2, 0.65),
+            default_log_distribution=dist.TransformedDistribution(
+                dist.Uniform(0.2, 0.65),
+                dist.transforms.ExpTransform().inv,
+            ),
         )
         hot_fcov = _sample_positive_distribution(
             prior_config,
             value_key="hot_fcov",
             log_key="log_hot_fcov",
-            default_value_distribution=dist.LogNormal(np.log(0.1), 0.8),
-            default_log_distribution=dist.Normal(np.log(0.1), 0.8),
+            default_value_distribution=dist.LogUniform(0.04, 10.0),
+            default_log_distribution=dist.Uniform(np.log(0.04), np.log(10.0)),
             default_to_log=True,
         )
         torus_rest = _torus_component(
@@ -2939,8 +2973,8 @@ def evaluate_photometric_state(
                 prior_config,
                 value_key="broad_lines_strength",
                 log_key="log_broad_lines_strength",
-                default_value_distribution=dist.LogNormal(np.log(DEFAULT_BROAD_LINES_STRENGTH), 0.5),
-                default_log_distribution=dist.Normal(np.log(DEFAULT_BROAD_LINES_STRENGTH), 0.5),
+                default_value_distribution=dist.LogUniform(0.3, 20.0),
+                default_log_distribution=dist.Uniform(np.log(0.3), np.log(20.0)),
             )
             narrow_lines_strength = _sample_positive_distribution(
                 prior_config,
@@ -3040,8 +3074,8 @@ def evaluate_photometric_state(
                 prior_config,
                 value_key="feii_norm",
                 log_key="log_feii_norm",
-                default_value_distribution=dist.LogNormal(np.log(DEFAULT_FEII_STRENGTH), 0.8),
-                default_log_distribution=dist.Normal(np.log(DEFAULT_FEII_STRENGTH), 0.8),
+                default_value_distribution=dist.LogUniform(0.63, 31.6),
+                default_log_distribution=dist.Uniform(np.log(0.63), np.log(31.6)),
             )
             l_feii = feii_norm * l_broadlines
             if cfg.agn.fit_feii_broadening:
@@ -3107,8 +3141,11 @@ def evaluate_photometric_state(
             prior_config,
             value_key="ebv_gal",
             log_key="log_ebv_gal",
-            default_value_distribution=dist.LogNormal(np.log(0.05), 1.0),
-            default_log_distribution=dist.Normal(np.log(0.05), 1.0),
+            default_value_distribution=dist.TransformedDistribution(
+                dist.Uniform(np.log(GRAHSP_EBV_MIN), np.log(GRAHSP_EBV_MAX)),
+                dist.transforms.ExpTransform(),
+            ),
+            default_log_distribution=dist.Uniform(np.log(GRAHSP_EBV_MIN), np.log(GRAHSP_EBV_MAX)),
             default_to_log=True,
         )
         if fit_host
@@ -3119,8 +3156,11 @@ def evaluate_photometric_state(
             prior_config,
             value_key="ebv_agn",
             log_key="log_ebv_agn",
-            default_value_distribution=dist.LogNormal(np.log(0.05), 1.0),
-            default_log_distribution=dist.Normal(np.log(0.05), 1.0),
+            default_value_distribution=dist.TransformedDistribution(
+                dist.Uniform(np.log(GRAHSP_EBV_MIN), np.log(GRAHSP_EBV_MAX)),
+                dist.transforms.ExpTransform(),
+            ),
+            default_log_distribution=dist.Uniform(np.log(GRAHSP_EBV_MIN), np.log(GRAHSP_EBV_MAX)),
             default_to_log=True,
         )
         if fit_agn
@@ -3226,7 +3266,10 @@ def evaluate_photometric_state(
     nebular_lines_att_rest = nebular["lines_rest"] * gal_att_factor
     nebular_continuum_att_rest = nebular["continuum_rest"] * gal_att_factor
     disk_att_rest = disk_rest * agn_att_factor
-    torus_att_rest = torus_rest
+    # The compact torus is seen through the same foreground host screen as
+    # the rest of the source. Its own nuclear obscuration is already encoded
+    # by the torus template, so do not apply the additional AGN E(B-V).
+    torus_att_rest = torus_rest * gal_att_factor
     feii_att_rest = feii_rest * agn_att_factor
     line_bl_att_rest = line_bl_rest * agn_att_factor
     line_nl_att_rest = line_nl_rest * agn_att_factor

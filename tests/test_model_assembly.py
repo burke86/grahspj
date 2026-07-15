@@ -332,6 +332,56 @@ def test_positive_geometry_parameters_are_sampled_in_log_space(monkeypatch):
         np.testing.assert_allclose(_site(tr, value_key), np.exp(_site(tr, log_key)))
 
 
+def test_default_extinction_priors_match_grahsp_log_uniform_support(monkeypatch):
+    _patch_ssp(monkeypatch)
+    context = build_model_context(_cfg())
+
+    tr = _deterministic_trace(context, _fixed_component_data())
+
+    for key in ("log_ebv_gal", "log_ebv_agn"):
+        prior = tr[key]["fn"]
+        assert prior.__class__.__name__ == "Uniform"
+        np.testing.assert_allclose(np.asarray(prior.low), np.log(0.01))
+        np.testing.assert_allclose(np.asarray(prior.high), np.log(10.0))
+
+
+def test_default_torus_and_agn_feature_priors_match_grahsp_support(monkeypatch):
+    _patch_ssp(monkeypatch)
+    context = build_model_context(_cfg())
+
+    tr = _deterministic_trace(context, _fixed_component_data())
+
+    linear_uniform_bounds = {
+        "si": (-4.0, 4.0),
+        "cool_lam": (10.0, 30.0),
+        "cool_width": (0.2, 0.65),
+        "hot_lam": (1.0, 5.5),
+        "hot_width": (0.2, 0.65),
+    }
+    for key, (low, high) in linear_uniform_bounds.items():
+        prior = tr[key]["fn"]
+        assert prior.__class__.__name__ == "Uniform"
+        np.testing.assert_allclose(np.asarray(prior.low), low)
+        np.testing.assert_allclose(np.asarray(prior.high), high)
+
+    fcov_base = tr["log_fcov"]["fn"].base_dist
+    np.testing.assert_allclose(np.asarray(fcov_base.low), 0.05)
+    np.testing.assert_allclose(np.asarray(fcov_base.high), 0.95)
+
+    log_hot_fcov = tr["log_hot_fcov"]["fn"]
+    np.testing.assert_allclose(np.asarray(log_hot_fcov.low), np.log(0.04))
+    np.testing.assert_allclose(np.asarray(log_hot_fcov.high), np.log(10.0))
+
+    for key, (low, high) in {
+        "broad_lines_strength": (0.3, 20.0),
+        "feii_norm": (0.63, 31.6),
+    }.items():
+        prior = tr[key]["fn"]
+        assert prior.__class__.__name__ == "LogUniform"
+        np.testing.assert_allclose(np.asarray(prior.low), low)
+        np.testing.assert_allclose(np.asarray(prior.high), high)
+
+
 def test_component_rest_and_observed_seds_sum_to_total(monkeypatch):
     _patch_ssp(monkeypatch)
     context = build_model_context(_cfg(fit_balmer_continuum=True))
@@ -384,21 +434,26 @@ def test_component_rest_and_observed_seds_sum_to_total(monkeypatch):
     assert np.allclose(_site(tr, "total_obs_sed"), total_obs_parts, rtol=2.0e-10, atol=1.0e-40)
 
 
-def test_torus_component_is_not_foreground_attenuated(monkeypatch):
+def test_torus_component_gets_host_but_not_additional_agn_extinction(monkeypatch):
     _patch_ssp(monkeypatch)
     context = build_model_context(_cfg())
-    low_ebv = _fixed_component_data()
-    high_ebv = _fixed_component_data()
-    low_ebv["log_ebv_gal"] = _log_positive(0.0)
-    low_ebv["log_ebv_agn"] = _log_positive(0.0)
-    high_ebv["log_ebv_gal"] = _log_positive(0.5)
-    high_ebv["log_ebv_agn"] = _log_positive(0.5)
+    baseline = _fixed_component_data()
+    host_extincted = _fixed_component_data()
+    agn_extincted = _fixed_component_data()
+    baseline["log_ebv_gal"] = _log_positive(0.0)
+    baseline["log_ebv_agn"] = _log_positive(0.0)
+    host_extincted["log_ebv_gal"] = _log_positive(0.5)
+    host_extincted["log_ebv_agn"] = _log_positive(0.0)
+    agn_extincted["log_ebv_gal"] = _log_positive(0.0)
+    agn_extincted["log_ebv_agn"] = _log_positive(0.5)
 
-    tr_low = _deterministic_trace(context, low_ebv)
-    tr_high = _deterministic_trace(context, high_ebv)
+    tr_baseline = _deterministic_trace(context, baseline)
+    tr_host = _deterministic_trace(context, host_extincted)
+    tr_agn = _deterministic_trace(context, agn_extincted)
 
-    np.testing.assert_allclose(_site(tr_high, "torus_rest_sed"), _site(tr_low, "torus_rest_sed"))
-    assert np.sum(_site(tr_high, "disk_rest_sed")) < np.sum(_site(tr_low, "disk_rest_sed"))
+    assert np.sum(_site(tr_host, "torus_rest_sed")) < np.sum(_site(tr_baseline, "torus_rest_sed"))
+    np.testing.assert_allclose(_site(tr_agn, "torus_rest_sed"), _site(tr_baseline, "torus_rest_sed"))
+    assert np.sum(_site(tr_agn, "disk_rest_sed")) < np.sum(_site(tr_baseline, "disk_rest_sed"))
 
 
 def test_evaluate_photometric_state_matches_deterministic_sites(monkeypatch):
