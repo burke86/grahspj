@@ -303,7 +303,9 @@ class LikelihoodConfig:
     agn_systematics_width: float = 0.0
     fit_agn_systematics_width: bool = True
     agn_systematics_width_prior_scale: float = 0.20
-    likelihood_family: str = "gaussian"
+    # Robust default for heterogeneous broadband catalogues. The Gaussian
+    # family remains available as an explicit override.
+    likelihood_family: str = "student_t"
     student_t_df: float = 5.0
     variability_uncertainty: bool = True
     agn_nev: float = 0.1

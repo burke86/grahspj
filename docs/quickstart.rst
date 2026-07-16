@@ -145,23 +145,23 @@ The model flux density compared to photometric band :math:`b` is therefore
    + \eta_b F_b^{\rm extended}.
 
 ``jaxsedfit`` then applies the configured broadband likelihood to
-:math:`F_b^{\rm model}`. For the default Gaussian family, detections are
+:math:`F_b^{\rm model}`. For the default Student-t family, detections are
 approximately
 
 .. math::
 
    F_b^{\rm obs}
    \sim
-   \mathcal{N}
+   t_{5}
    \left(
    F_b^{\rm model},
    \sigma_{{\rm eff},b}
    \right),
 
 with :math:`\sigma_{{\rm eff},b}` including the catalog flux-density error and
-the configured systematic/model-error terms. If
-``cfg.likelihood.likelihood_family = "student_t"``, the same captured model
-flux is used inside the Student-t likelihood. Upper limits use the configured
+the configured systematic/model-error terms. Setting
+``cfg.likelihood.likelihood_family = "gaussian"`` uses the same captured model
+flux inside a normal likelihood instead. Upper limits use the configured
 one-sided photometric likelihood.
 
 For joint spectrum+SED fitting, the spectrum gets its own capture fraction
@@ -345,15 +345,16 @@ templates justify:
 
 .. code-block:: python
 
-   cfg.likelihood.likelihood_family = "gaussian"
+   cfg.likelihood.likelihood_family = "student_t"
+   cfg.likelihood.student_t_df = 5.0
    cfg.likelihood.systematics_width = 0.10
    cfg.likelihood.fit_systematics_width = True
 
 Useful options:
 
 ``likelihood_family``
-   Use ``"gaussian"`` for the default normal likelihood or ``"student_t"`` for
-   a heavier-tailed likelihood with ``student_t_df`` degrees of freedom.
+   The default is the heavier-tailed ``"student_t"`` likelihood with
+   ``student_t_df=5``. Use ``"gaussian"`` to request a normal likelihood.
 
 ``systematics_width``
    Fractional model-error floor. Fix it for simpler geometry, or sample it
