@@ -171,6 +171,12 @@ class GalaxyConfig:
     ssp_imf: str = "chabrier_2003"
     ssp_metallicity_coordinate: str = "absolute_log10_z"
     ssp_solar_metallicity: float = 0.019
+    # GRAHSP-like default: use one solar-metallicity SSP and the same
+    # metallicity for the stellar and nebular components. Explicit host or
+    # nebular metallicity priors can still turn this into one shared sampled Z.
+    stellar_metallicity: float = 0.019
+    stellar_metallicity_scatter: float = 0.0
+    tie_stellar_nebular_metallicity: bool = True
     rest_wave_min: float = 100.0
     rest_wave_max: float = 3.0e6
     n_wave: int = 1024
@@ -198,6 +204,10 @@ class GalaxyConfig:
             raise ValueError(f"galaxy.ssp_metallicity_coordinate must be one of: {supported}.")
         if not np.isfinite(float(self.ssp_solar_metallicity)) or float(self.ssp_solar_metallicity) <= 0.0:
             raise ValueError("galaxy.ssp_solar_metallicity must be positive and finite.")
+        if not np.isfinite(float(self.stellar_metallicity)) or float(self.stellar_metallicity) <= 0.0:
+            raise ValueError("galaxy.stellar_metallicity must be positive and finite.")
+        if not np.isfinite(float(self.stellar_metallicity_scatter)) or float(self.stellar_metallicity_scatter) < 0.0:
+            raise ValueError("galaxy.stellar_metallicity_scatter must be non-negative and finite (dex).")
         if not np.isfinite(float(self.rest_wave_min)) or float(self.rest_wave_min) <= 0.0:
             raise ValueError("galaxy.rest_wave_min must be positive and finite (Angstrom).")
         if not np.isfinite(float(self.rest_wave_max)) or float(self.rest_wave_max) <= float(self.rest_wave_min):
@@ -373,7 +383,7 @@ class InferenceConfig:
     num_samples: int = 200
     num_chains: int = 1
     target_accept_prob: float = 0.85
-    dense_mass: bool = False
+    dense_mass: bool = True
     max_tree_depth: int = 8
     use_map_init: bool = True
     ns_num_live_points: int | None = None
@@ -607,6 +617,9 @@ class HostPriorConfig:
     log_sfh_tau_gyr: Any | None = None
     log_sfh_age_gyr: Any | None = None
     log_sfh_tau_over_age: Any | None = None
+    log_sfh_burst_fraction: Any | None = None
+    log_sfh_burst_age_gyr: Any | None = None
+    log_sfh_burst_tau_gyr: Any | None = None
     u_lgmcrit: Any | None = None
     u_lgy_at_mcrit: Any | None = None
     u_indx_lo: Any | None = None
@@ -628,6 +641,9 @@ class HostPriorConfig:
                 "log_sfh_tau_gyr": "log_sfh_tau_gyr",
                 "log_sfh_age_gyr": "log_sfh_age_gyr",
                 "log_sfh_tau_over_age": "log_sfh_tau_over_age",
+                "log_sfh_burst_fraction": "log_sfh_burst_fraction",
+                "log_sfh_burst_age_gyr": "log_sfh_burst_age_gyr",
+                "log_sfh_burst_tau_gyr": "log_sfh_burst_tau_gyr",
                 "u_lgmcrit": "u_lgmcrit",
                 "u_lgy_at_mcrit": "u_lgy_at_mcrit",
                 "u_indx_lo": "u_indx_lo",
@@ -947,6 +963,15 @@ class FitConfig:
         if not self.galaxy.fit_host and not self.agn.fit_agn:
             raise ValueError("At least one of galaxy.fit_host or agn.fit_agn must be True.")
         self.prior_config.validate()
+        if (
+            self.galaxy.tie_stellar_nebular_metallicity
+            and self.prior_config.host.gal_lgmet is not None
+            and self.prior_config.nebular.zgas is not None
+        ):
+            raise ValueError(
+                "When galaxy.tie_stellar_nebular_metallicity=True, configure only one of "
+                "prior_config.host.gal_lgmet and prior_config.nebular.zgas as the shared metallicity prior."
+            )
 
     def to_dict(self) -> dict[str, Any]:
         """Convert the dataclass tree into a plain Python dictionary."""

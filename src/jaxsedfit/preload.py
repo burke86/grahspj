@@ -971,7 +971,14 @@ def _build_filter_projection_matrices_for_redshift(
 
 
 def _build_igm_cache_jax(rest_wave: np.ndarray) -> IGMCacheJax:
-    """Build JAX-native wavelength-only helper arrays for the IGM model.
+    """Build wavelength-only helpers for the CIGALE v2025.1 IGM model.
+
+    This is a JAX translation of ``pcigale/sed_modules/redshifting.py`` from
+    CIGALE v2025.1 (tag ``v2025.1``, commit
+    ``29cb909fe2636800b4acdb1dfc7129d8c8494a24``).  Keep the high-order
+    Lyman-series coefficient and the below-Lyman-limit treatment synchronized
+    with that upstream implementation:
+    https://gitlab.lam.fr/cigale/cigale/-/blob/v2025.1/pcigale/sed_modules/redshifting.py
 
     Parameters
     ----------
@@ -988,7 +995,8 @@ def _build_igm_cache_jax(rest_wave: np.ndarray) -> IGMCacheJax:
     n_eval = jnp.arange(3, n_transitions_max, dtype=jnp.float64)
     fact = jnp.array([1.0, 1.0, 1.0, 0.348, 0.179, 0.109, 0.0722, 0.0508, 0.0373, 0.0283], dtype=jnp.float64)
     fact_eval = jnp.where(n_eval <= 9.0, fact[n_eval.astype(jnp.int32)], 0.0)
-    val_gt9_coeff = 720.0 / (n_eval * (n_eval * n_eval * n_eval - 1.0))
+    # CIGALE/Meiksin: tau_n = tau_9 * 720 / [n (n^2 - 1)] for n > 9.
+    val_gt9_coeff = 720.0 / (n_eval * (n_eval * n_eval - 1.0))
     z_l = wavelength / lambda_limit - 1.0
     wl_ratio = wavelength / lambda_limit
     n = jnp.arange(n_transitions_low - 1, dtype=jnp.float64)
@@ -1015,7 +1023,13 @@ def _build_igm_cache_jax(rest_wave: np.ndarray) -> IGMCacheJax:
 
 
 def _build_fixed_igm_jax(igm_cache: IGMCacheJax, redshift: float) -> jnp.ndarray:
-    """Evaluate the IGM transmission once for fixed-redshift contexts.
+    """Evaluate the CIGALE v2025.1 mean IGM transmission.
+
+    CIGALE implements the Meiksin (2006) Lyman-series and continuum opacity.
+    Below the Lyman limit it resets the continuum optical depths using the
+    O'Meara et al. (2013) cross-section scaling, ``tau ∝ lambda^2.75``.  The
+    calculation below deliberately follows CIGALE's operation order, including
+    interpolation of the normalization at ``z_l = 0`` on the supplied grid.
 
     Parameters
     ----------
@@ -1033,7 +1047,6 @@ def _build_fixed_igm_jax(igm_cache: IGMCacheJax, redshift: float) -> jnp.ndarray
     n_eval = igm_cache.n_eval
     z = jnp.asarray(redshift, dtype=jnp.float64)
     one_plus_z = 1.0 + z
-    obs_wavelength = rest_wavelength * one_plus_z
     z_n2 = one_plus_z * (igm_cache.z_n2 + 1.0) - 1.0
     z_eval = one_plus_z * (igm_cache.z_eval + 1.0) - 1.0
     z_n9 = one_plus_z * (igm_cache.z_n9 + 1.0) - 1.0
@@ -1041,7 +1054,9 @@ def _build_fixed_igm_jax(igm_cache: IGMCacheJax, redshift: float) -> jnp.ndarray
     wl_ratio = one_plus_z * igm_cache.wl_ratio
     tau_a = jnp.where(z <= 4, 0.00211 * (1.0 + z) ** 3.7, 0.00058 * (1.0 + z) ** 4.5)
     tau2 = jnp.where(z <= 4, 0.00211 * (1.0 + z_n2) ** 3.7, 0.00058 * (1.0 + z_n2) ** 4.5)
-    tau2 = jnp.where(z_n2 >= z, 0.0, tau2)
+    # A photon cannot be absorbed by a Lyman n->1 transition when the implied
+    # absorber redshift is beyond the source or is negative.
+    tau2 = jnp.where((z_n2 >= z) | (z_n2 < 0.0), 0.0, tau2)
     val_le5 = jnp.where(
         z_eval < 3.0,
         tau_a * fact_eval[:, None] * (0.25 * (1.0 + z_eval)) ** (1.0 / 3.0),
@@ -1055,7 +1070,8 @@ def _build_fixed_igm_jax(igm_cache: IGMCacheJax, redshift: float) -> jnp.ndarray
         val_le5,
         jnp.where(n_eval[:, None] <= 9.0, val_6_9, val_gt9),
     )
-    tau_taun = tau2 + jnp.sum(jnp.where(z_eval >= z, 0.0, val_eval), axis=0)
+    valid_transition = (z_eval < z) & (z_eval >= 0.0)
+    tau_taun = tau2 + jnp.sum(jnp.where(valid_transition, val_eval, 0.0), axis=0)
     w = z_l < z
     tau_l_igm = jnp.where(w, 0.805 * (1.0 + z_l) ** 3 * (1.0 / (1.0 + z_l) - 1.0 / (1.0 + z)), 0.0)
     term1 = gamma - jnp.exp(-1.0)
@@ -1069,9 +1085,19 @@ def _build_fixed_igm_jax(igm_cache: IGMCacheJax, redshift: float) -> jnp.ndarray
     )
     term4 = jnp.sum(term4_terms, axis=0)
     tau_l_lls = jnp.where(w, n0 * ((term1 - term2) * term3 - term4), 0.0)
-    lambda_min_igm = (1.0 + z) * 700.0
-    weight = jnp.where(obs_wavelength < lambda_min_igm, (obs_wavelength / lambda_min_igm) ** 2, 1.0)
-    return jnp.exp(-tau_taun - tau_l_igm - tau_l_lls) * weight
+
+    # CIGALE v2025.1 replaced the older ad-hoc suppression below 700 A with
+    # the O'Meara et al. (2013) photoionization cross-section scaling.  Match
+    # CIGALE exactly by interpolating the optical depths at the Lyman limit on
+    # the active wavelength grid, then extending them as lambda^2.75.
+    tau_norm_l_igm = jnp.interp(0.0, z_l, tau_l_igm)
+    tau_norm_l_lls = jnp.interp(0.0, z_l, tau_l_lls)
+    below_limit = z_l < 0.0
+    damp_factor = jnp.power(jnp.maximum(z_l + 1.0, 0.0), 2.75)
+    tau_l_igm = jnp.where(below_limit, tau_norm_l_igm * damp_factor, tau_l_igm)
+    tau_l_lls = jnp.where(below_limit, tau_norm_l_lls * damp_factor, tau_l_lls)
+    return jnp.exp(-tau_taun - tau_l_igm - tau_l_lls)
+
 
 def _surviving_fraction_for_imf(lg_age_gyr: np.ndarray, ssp_imf: str) -> np.ndarray:
     """Return an IMF-consistent surviving stellar-mass fraction."""
@@ -1354,12 +1380,20 @@ def _build_fixed_nebular_line_profile(
     neb = cfg.nebular
     if not (cfg.galaxy.fit_host and neb.enabled and neb.emission):
         return np.zeros_like(rest_wave, dtype=float)
-    if neb.zgas is None:
-        return None
     prior_config = cfg.prior_config.to_mapping()
     shape_keys = {"nebular_logU", "nebular_zgas", "nebular_ne", "nebular_lines_width"}
+    if cfg.galaxy.tie_stellar_nebular_metallicity:
+        # A stellar-metallicity prior becomes the shared gas-metallicity prior.
+        shape_keys.add("gal_lgmet")
     if any(key in prior_config for key in shape_keys):
         return None
+    if neb.zgas is None and not cfg.galaxy.tie_stellar_nebular_metallicity:
+        return None
+    fixed_zgas = (
+        float(neb.zgas)
+        if neb.zgas is not None
+        else float(cfg.galaxy.stellar_metallicity)
+    )
 
     z_grid = np.asarray(templates.z_grid, dtype=float)
     logu_grid = np.asarray(templates.logu_grid, dtype=float)
@@ -1370,7 +1404,7 @@ def _build_fixed_nebular_line_profile(
         float(rest_wave[0]),
         float(rest_wave[-1]),
         int(rest_wave.size),
-        float(neb.zgas),
+        fixed_zgas,
         float(neb.logU),
         float(neb.ne),
         float(neb.lines_width),
@@ -1383,7 +1417,7 @@ def _build_fixed_nebular_line_profile(
         z_grid,
         logu_grid,
         ne_grid,
-        float(neb.zgas),
+        fixed_zgas,
         float(neb.logU),
         float(neb.ne),
     )

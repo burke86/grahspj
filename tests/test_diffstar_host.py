@@ -20,7 +20,14 @@ from jaxsedfit.config import (
     RedshiftPriorConfig,
 )
 from jaxsedfit.core import JAXSEDFit
-from jaxsedfit.model import _default_gal_lgmet_loc, _mass_metallicity_relation_logprior, _luminosity_distance_m_jax, grahsp_photometric_model
+from jaxsedfit.model import (
+    _cigale_delayed_burst_sfh_shape,
+    _cigale_delayed_sfh_shape,
+    _default_gal_lgmet_loc,
+    _mass_metallicity_relation_logprior,
+    _luminosity_distance_m_jax,
+    grahsp_photometric_model,
+)
 from jaxsedfit.preload import build_model_context
 from jaxsedfit.results import FitResult
 
@@ -106,6 +113,77 @@ def test_delayed_host_model_is_default(monkeypatch):
     assert np.isfinite(float(np.asarray(tr["sfh_tau_gyr_fit"]["value"])))
     assert np.all(np.isfinite(np.asarray(tr["gal_sfr_table"]["value"], dtype=float)))
     assert np.all(np.isfinite(np.asarray(tr["gal_smh_table"]["value"], dtype=float)))
+
+
+def test_delayed_sfh_matches_cigale_v2025_1_static_reference():
+    """Match the normalized no-burst output of CIGALE sfhdelayed.py."""
+    elapsed_gyr = np.arange(5000, dtype=float) / 1000.0
+    sfr = np.asarray(_cigale_delayed_sfh_shape(elapsed_gyr, 2.0, 5.0))
+    normalized_sfr = sfr / (np.sum(sfr) * 1.0e6)
+    sample_indices = np.asarray([0, 1, 100, 1000, 2000, 4999])
+    expected = np.asarray(
+        [
+            0.0,
+            3.5062740209461115e-13,
+            3.336939071574288e-11,
+            2.1277262922823895e-10,
+            2.5810624634919064e-10,
+            1.4402141727293028e-10,
+        ]
+    )
+
+    np.testing.assert_allclose(normalized_sfr[sample_indices], expected, rtol=2.0e-12, atol=0.0)
+    assert np.sum(normalized_sfr) * 1.0e6 == pytest.approx(1.0, rel=2.0e-12)
+    assert float(_cigale_delayed_sfh_shape(5.001, 2.0, 5.0)) == 0.0
+
+
+def test_delayed_burst_sfh_matches_cigale_formed_mass_fraction():
+    """The optional exponential component has CIGALE's requested mass fraction."""
+    elapsed_gyr = np.linspace(0.0, 5.0, 5001)
+    f_burst = 0.08
+    main = np.asarray(_cigale_delayed_sfh_shape(elapsed_gyr, 2.0, 5.0))
+    combined = np.asarray(
+        _cigale_delayed_burst_sfh_shape(
+            elapsed_gyr,
+            2.0,
+            5.0,
+            f_burst,
+            0.2,
+            0.05,
+        )
+    )
+    burst = combined - main
+    recovered_fraction = np.trapezoid(burst, elapsed_gyr) / np.trapezoid(combined, elapsed_gyr)
+
+    assert recovered_fraction == pytest.approx(f_burst, rel=2.0e-12)
+    assert np.allclose(burst[elapsed_gyr < 4.8], 0.0)
+
+
+def test_delayed_burst_host_exposes_burst_parameters(monkeypatch):
+    class _SSPData:
+        ssp_lgmet = np.array([-2.0, -1.5, -1.0, -0.5])
+        ssp_lg_age_gyr = np.array([-1.0, -0.5, 0.0, 0.5])
+        ssp_wave = np.array([900.0, 2000.0, 5000.0, 10000.0])
+        ssp_flux = np.ones((4, 4, 4))
+
+    monkeypatch.setattr("jaxsedfit.preload._load_ssp_templates", lambda fn: _SSPData())
+    monkeypatch.setattr("jaxsedfit.preload._SSP_DATA_CACHE", {})
+    cfg = _mock_config()
+    cfg.galaxy.dsps_ssp_fn = "fake-delayed-burst.h5"
+    cfg.galaxy.host_sfh_model = "delayed_burst"
+    context = build_model_context(cfg)
+    tr = trace(seed(lambda: grahsp_photometric_model(context, include_components=False), 12)).get_trace()
+
+    for name in (
+        "log_sfh_burst_fraction",
+        "log_sfh_burst_age_gyr",
+        "log_sfh_burst_tau_gyr",
+        "sfh_burst_fraction_fit",
+        "sfh_burst_age_gyr_fit",
+        "sfh_burst_tau_gyr_fit",
+    ):
+        assert name in tr
+    assert 0.0 < float(np.asarray(tr["sfh_burst_fraction_fit"]["value"])) <= 0.2
 
 
 def test_delayed_host_priors_respect_physical_and_template_support(monkeypatch):
@@ -548,6 +626,10 @@ def test_fit_nuts_reads_sampler_settings_from_config(monkeypatch):
     assert captured["mcmc_kwargs"]["num_chains"] == 2
     assert captured["mcmc_kwargs"]["progress_bar"] is False
     assert fitter.predictive is None
+
+
+def test_inference_defaults_to_dense_mass_adaptation():
+    assert InferenceConfig().dense_mass is True
 
 
 def test_fit_ns_populates_samples(monkeypatch):
