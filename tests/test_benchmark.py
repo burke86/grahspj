@@ -10,6 +10,7 @@ import pytest
 from jaxsedfit.benchmark import (
     build_chimera_fit_config,
     chimera_data_dir,
+    fit_quality_metadata,
     load_chimera_benchmark_dataset,
     run_chimera_mass_benchmark,
     select_chimera_subset,
@@ -43,6 +44,7 @@ class _FakeFitter:
         )()
         self._predictive = None
         self.samples = None
+        self.nuts_result = None
 
     def fit_map(self):
         row_id = str(self.config.observation.object_id)
@@ -68,9 +70,63 @@ class _FakeFitter:
         return self._predictive
 
 
+class _FakeMCMC:
+    def get_extra_fields(self, group_by_chain=False):
+        assert group_by_chain is False
+        return {"diverging": np.array([False, True, False, True])}
+
+
+def test_fit_quality_metadata_includes_reduced_chi2_and_divergence_fraction():
+    fitter = type(
+        "_DiagnosticFitter",
+        (),
+        {
+            "nuts_result": {"mcmc": _FakeMCMC()},
+            "predict": lambda self: {
+                "pred_fluxes": np.array([[1.2, 1.8]]),
+                "agn_fluxes": np.zeros((1, 2)),
+            },
+            "context": type(
+                "_Ctx",
+                (),
+                {
+                    "fluxes": np.array([1.0, 2.0]),
+                    "errors": np.array([0.1, 0.2]),
+                    "upper_limits": np.array([False, False]),
+                    "filters": [],
+                },
+            )(),
+            "config": type(
+                "_Cfg",
+                (),
+                {
+                    "likelihood": type(
+                        "_Likelihood",
+                        (),
+                        {
+                            "systematics_width": 0.0,
+                            "agn_systematics_width": 0.0,
+                            "variability_uncertainty": False,
+                            "attenuation_model_uncertainty": False,
+                            "lyman_break_uncertainty": False,
+                        },
+                    )()
+                },
+            )(),
+        },
+    )()
+
+    metadata = fit_quality_metadata(fitter)
+
+    assert metadata["reduced_chi2"] == pytest.approx(2.5)
+    assert metadata["n_divergent"] == 2
+    assert metadata["n_transition_samples"] == 4
+    assert metadata["divergence_fraction"] == pytest.approx(0.5)
+
+
 class _FailingFakeFitter(_FakeFitter):
     def fit_map(self):
-        if str(self.config.observation.object_id).endswith("_0.03"):
+        if str(self.config.observation.object_id).endswith("_0.0001"):
             raise RuntimeError("intentional benchmark failure")
         return super().fit_map()
 
@@ -85,7 +141,7 @@ def test_chimera_dataset_adapter_and_subset():
     assert len(dataset.rows) > 1000
     subset = select_chimera_subset(dataset)
     assert len(subset) > 200
-    assert subset[0]["id"] == "143816.78+191955.5_493880_0.03"
+    assert subset[0]["id"] == "142746.39+293038.2_736084_0.0001"
     assert all(np.isfinite(row["log_stellar_mass_truth"]) for row in subset)
     assert all(np.isfinite(row["resample_weight"]) for row in subset)
 

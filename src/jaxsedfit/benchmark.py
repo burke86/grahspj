@@ -571,6 +571,35 @@ def _reduced_chi2_for_fit(fitter: Any) -> float:
     return float(chi2 / max(1, int(np.sum(valid))))
 
 
+def fit_quality_metadata(fitter: Any) -> dict[str, Any]:
+    """Return portable fit-quality diagnostics for benchmark metadata.
+
+    ``reduced_chi2`` is chi-square per valid photometric band, matching the
+    SED plotting diagnostic. Divergence statistics are populated for NUTS
+    fits and left as unavailable for inference methods without transitions.
+    """
+    n_divergent = 0
+    n_transition_samples = 0
+    nuts_result = getattr(fitter, "nuts_result", None)
+    mcmc = nuts_result.get("mcmc") if isinstance(nuts_result, dict) else None
+    if mcmc is not None and hasattr(mcmc, "get_extra_fields"):
+        extra_fields = mcmc.get_extra_fields(group_by_chain=False)
+        diverging = np.asarray(extra_fields.get("diverging", []), dtype=bool).reshape(-1)
+        n_transition_samples = int(diverging.size)
+        n_divergent = int(np.count_nonzero(diverging))
+    divergence_fraction = (
+        float(n_divergent / n_transition_samples)
+        if n_transition_samples > 0
+        else float("nan")
+    )
+    return {
+        "reduced_chi2": _reduced_chi2_for_fit(fitter),
+        "n_divergent": n_divergent,
+        "n_transition_samples": n_transition_samples,
+        "divergence_fraction": divergence_fraction,
+    }
+
+
 def _failed_benchmark_row(task: _BenchmarkWorkerTask, exc: Exception) -> dict[str, Any]:
     """Build a NaN-filled benchmark row for one failed fit.
 
@@ -589,6 +618,9 @@ def _failed_benchmark_row(task: _BenchmarkWorkerTask, exc: Exception) -> dict[st
     enriched["log_stellar_mass_fit_err_hi"] = float("nan")
     enriched["fracAGN_5100_fit"] = float("nan")
     enriched["reduced_chi2"] = float("nan")
+    enriched["n_divergent"] = 0
+    enriched["n_transition_samples"] = 0
+    enriched["divergence_fraction"] = float("nan")
     enriched["residual"] = float("nan")
     enriched["redshift_bin"] = _redshift_bin_label(float(task.row["redshift"]), task.z_edges)
     enriched["fit_error"] = f"{type(exc).__name__}: {exc}"
@@ -625,7 +657,7 @@ def _run_single_chimera_fit(task: _BenchmarkWorkerTask, fitter_cls=None) -> tupl
     logm_samples = np.asarray(fitter.samples["log_stellar_mass"], dtype=float).reshape(-1)
     logm16, logm50, logm84 = np.percentile(logm_samples, [16.0, 50.0, 84.0])
     log_fit = float(logm50)
-    reduced_chi2 = _reduced_chi2_for_fit(fitter)
+    fit_quality = fit_quality_metadata(fitter)
     fracagn_raw = (fitter.samples or {}).get("fracAGN_5100", None)
     if fracagn_raw is None:
         pred = getattr(fitter, "predictive", None)
@@ -645,7 +677,7 @@ def _run_single_chimera_fit(task: _BenchmarkWorkerTask, fitter_cls=None) -> tupl
     enriched["log_stellar_mass_fit_err_lo"] = float(max(0.0, log_fit - logm16))
     enriched["log_stellar_mass_fit_err_hi"] = float(max(0.0, logm84 - log_fit))
     enriched["fracAGN_5100_fit"] = fracagn50
-    enriched["reduced_chi2"] = reduced_chi2
+    enriched.update(fit_quality)
     enriched["residual"] = log_fit - enriched["log_stellar_mass_truth"]
     enriched["redshift_bin"] = _redshift_bin_label(float(task.row["redshift"]), task.z_edges)
     enriched["fit_error"] = ""
@@ -676,6 +708,9 @@ def _write_artifact_table(path: Path, rows: list[dict[str, Any]]) -> None:
         "log_stellar_mass_fit_err_hi",
         "fracAGN_5100_fit",
         "reduced_chi2",
+        "n_divergent",
+        "n_transition_samples",
+        "divergence_fraction",
         "residual",
         "fit_error",
     ]

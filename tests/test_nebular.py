@@ -59,6 +59,7 @@ def _patch_ssp(monkeypatch):
 
 
 def test_nebular_config_validates_escape_and_dust_fraction():
+    assert np.isclose(NebularConfig().zgas, 0.019)
     NebularConfig(enabled=True, f_esc=0.2, f_dust=0.3).validate()
     for kwargs in ({"f_esc": -0.1}, {"f_dust": 1.2}, {"f_esc": 0.7, "f_dust": 0.4}):
         cfg = NebularConfig(enabled=True, **kwargs)
