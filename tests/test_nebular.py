@@ -2,6 +2,7 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 import numpyro.distributions as dist
+import pytest
 from numpyro.handlers import seed, substitute, trace
 from pathlib import Path
 
@@ -18,7 +19,12 @@ from jaxsedfit.config import (
     Observation,
     PhotometryData,
 )
-from jaxsedfit.model import _cigale_nebular_correction, _trilinear_nebular_grid, grahsp_photometric_model
+from jaxsedfit.model import (
+    _cigale_nebular_correction,
+    _flux_conserving_line_gaussians,
+    _trilinear_nebular_grid,
+    grahsp_photometric_model,
+)
 from jaxsedfit.preload import _load_nebular_templates_jax, build_model_context
 
 
@@ -71,10 +77,64 @@ def test_nebular_config_validates_escape_and_dust_fraction():
             raise AssertionError(f"NebularConfig accepted invalid values: {kwargs}")
 
 
-def test_cigale_nebular_correction_limits():
-    assert np.isclose(float(_cigale_nebular_correction(0.0, 0.0)), 1.0)
-    assert np.isclose(float(_cigale_nebular_correction(1.0, 0.0)), 0.0)
-    assert 0.0 < float(_cigale_nebular_correction(0.2, 0.1)) < 1.0
+def test_default_galaxy_metallicity_policy_matches_nebular_default():
+    cfg = GalaxyConfig()
+    assert cfg.tie_stellar_nebular_metallicity is True
+    assert cfg.stellar_metallicity == pytest.approx(NebularConfig().zgas)
+    assert cfg.stellar_metallicity_scatter == pytest.approx(0.0)
+
+
+def test_nebular_correction_matches_cigale_v2025_1_static_reference():
+    f_esc = jnp.asarray([0.0, 0.2, 0.05, 0.8, 1.0])
+    f_dust = jnp.asarray([0.0, 0.1, 0.4, 0.15, 0.0])
+    expected = np.asarray(
+        [1.0, 0.5936883629191322, 0.43354720439963335, 0.03190699975265889, 0.0]
+    )
+
+    correction = np.asarray(_cigale_nebular_correction(f_esc, f_dust))
+
+    np.testing.assert_allclose(correction, expected, rtol=2.0e-12, atol=0.0)
+
+
+def test_nebular_line_profile_matches_cigale_v2025_1_static_reference():
+    """Match CIGALE's FWHM Gaussian after converting nm^-1 to Angstrom^-1."""
+    wave = np.asarray(
+        [
+            4984.989615716083,
+            4988.742211787062,
+            4992.494807858042,
+            4996.247403929021,
+            5000.0,
+            5003.752596070979,
+            5007.505192141958,
+            5011.257788212938,
+            5015.010384283917,
+        ]
+    )
+    expected = np.asarray(
+        [
+            8.196692533032661e-12,
+            4.517114260988172e-7,
+            1.100141448899796e-3,
+            1.1841344008339208e-1,
+            5.632724218363989e-1,
+            1.1841344008339208e-1,
+            1.100141448899796e-3,
+            4.517114260988172e-7,
+            8.196692533032661e-12,
+        ]
+    )
+
+    profile = np.asarray(
+        _flux_conserving_line_gaussians(
+            wave,
+            jnp.asarray([5000.0]),
+            jnp.asarray([3.0]),
+            300.0,
+        )
+    )
+
+    np.testing.assert_allclose(profile, expected, rtol=5.0e-12, atol=1.0e-18)
 
 
 def test_vendored_nebular_resources_are_cigale_v2025_1():
@@ -261,6 +321,18 @@ def test_fixed_nebular_line_profile_cache_matches_dynamic_path(monkeypatch):
         rtol=2.0e-10,
         atol=1.0e-30,
     )
+
+
+def test_tied_sampled_stellar_metallicity_disables_fixed_nebular_cache(monkeypatch):
+    _patch_ssp(monkeypatch)
+    cfg = _mock_config()
+    cfg.nebular = NebularConfig(enabled=True, zgas=0.019)
+    cfg.galaxy.tie_stellar_nebular_metallicity = True
+    cfg.prior_config.host.gal_lgmet = dist.Normal(np.log10(0.019), 0.2)
+
+    context = build_model_context(cfg)
+
+    assert context.fixed_nebular_line_profile_jax is None
 
 
 def test_fixed_nebular_line_profile_skips_dynamic_gaussian(monkeypatch):

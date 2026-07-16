@@ -2,6 +2,7 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 import numpyro.distributions as dist
+import pytest
 from numpyro.handlers import seed, substitute, trace
 
 from jaxsedfit.config import (
@@ -322,13 +323,68 @@ def test_positive_geometry_parameters_are_sampled_in_log_space(monkeypatch):
         ("log_ebv_gal", "ebv_gal"),
         ("log_ebv_agn", "ebv_agn"),
         ("log_hot_fcov", "hot_fcov"),
-        ("log_gal_lgmet_scatter", "gal_lgmet_scatter"),
     ):
         assert log_key in tr
         assert value_key in tr
         assert tr[log_key]["type"] == "sample"
         assert tr[value_key]["type"] == "deterministic"
         np.testing.assert_allclose(_site(tr, value_key), np.exp(_site(tr, log_key)))
+
+    assert "log_gal_lgmet_scatter" not in tr
+    assert _site(tr, "gal_lgmet_scatter_fit") == pytest.approx(0.0)
+
+
+def test_default_stellar_and_nebular_metallicity_are_fixed_and_tied(monkeypatch):
+    _patch_ssp(monkeypatch)
+    cfg = _cfg()
+    context = build_model_context(cfg)
+    tr = _deterministic_trace(context, _fixed_component_data())
+
+    assert cfg.galaxy.tie_stellar_nebular_metallicity is True
+    assert "gal_lgmet" not in tr
+    assert "nebular_zgas" not in tr
+    assert _site(tr, "nebular_zgas_fit") == pytest.approx(0.02)
+    assert _site(tr, "gal_lgmet_fit") == pytest.approx(np.log10(0.02))
+    assert _site(tr, "gal_lgmet_scatter_fit") == pytest.approx(0.0)
+
+
+def test_sampled_nebular_metallicity_is_shared_with_host_when_tied(monkeypatch):
+    _patch_ssp(monkeypatch)
+    cfg = _cfg()
+    cfg.prior_config.nebular.zgas = dist.Normal(0.02, 0.005)
+    context = build_model_context(cfg)
+    data = {**_fixed_component_data(), "nebular_zgas": np.array(0.012)}
+    tr = _deterministic_trace(context, data)
+
+    assert tr["nebular_zgas"]["type"] == "sample"
+    assert _site(tr, "nebular_zgas_fit") == pytest.approx(0.012)
+    assert _site(tr, "gal_lgmet_fit") == pytest.approx(np.log10(0.012))
+
+
+def test_sampled_stellar_metallicity_is_shared_with_nebular_when_tied(monkeypatch):
+    _patch_ssp(monkeypatch)
+    cfg = _cfg()
+    cfg.prior_config.host.gal_lgmet = dist.Normal(np.log10(0.019), 0.2)
+    context = build_model_context(cfg)
+    data = {**_fixed_component_data(), "gal_lgmet": np.array(np.log10(0.012))}
+    tr = _deterministic_trace(context, data)
+
+    assert tr["gal_lgmet"]["type"] == "sample"
+    assert _site(tr, "gal_lgmet_fit") == pytest.approx(np.log10(0.012))
+    assert _site(tr, "nebular_zgas_fit") == pytest.approx(0.012)
+
+
+def test_untied_stellar_and_nebular_metallicity_can_differ(monkeypatch):
+    _patch_ssp(monkeypatch)
+    cfg = _cfg()
+    cfg.galaxy.tie_stellar_nebular_metallicity = False
+    cfg.galaxy.stellar_metallicity = 0.019
+    cfg.nebular.zgas = 0.02
+    context = build_model_context(cfg)
+    tr = _deterministic_trace(context, _fixed_component_data())
+
+    assert _site(tr, "nebular_zgas_fit") == pytest.approx(0.02)
+    assert _site(tr, "gal_lgmet_fit") == pytest.approx(np.log10(0.019))
 
 
 def test_default_extinction_priors_match_grahsp_log_uniform_support(monkeypatch):
@@ -432,6 +488,21 @@ def test_component_rest_and_observed_seds_sum_to_total(monkeypatch):
     assert np.allclose(_site(tr, "agn_obs_sed"), agn_obs_parts, rtol=2.0e-10, atol=1.0e-40)
     assert np.allclose(_site(tr, "host_total_obs_sed"), host_obs_parts, rtol=2.0e-10, atol=1.0e-40)
     assert np.allclose(_site(tr, "total_obs_sed"), total_obs_parts, rtol=2.0e-10, atol=1.0e-40)
+
+
+def test_native_balmer_amplitude_scales_with_grahsp_agn_5100_normalization(monkeypatch):
+    _patch_ssp(monkeypatch)
+    context = build_model_context(_cfg(fit_balmer_continuum=True))
+    low_data = _fixed_component_data()
+    high_data = _fixed_component_data()
+    low_data["log_agn_amp"] = np.array(np.log(1.0e33))
+    high_data["log_agn_amp"] = np.array(np.log(1.0e34))
+
+    low = _site(_deterministic_trace(context, low_data), "balmer_rest_sed")
+    high = _site(_deterministic_trace(context, high_data), "balmer_rest_sed")
+
+    assert np.any(low > 0.0)
+    np.testing.assert_allclose(high, 10.0 * low, rtol=2.0e-10, atol=1.0e-30)
 
 
 def test_torus_component_gets_host_but_not_additional_agn_extinction(monkeypatch):

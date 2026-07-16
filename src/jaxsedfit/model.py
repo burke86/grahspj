@@ -1,14 +1,19 @@
 from __future__ import annotations
 
-# Portions of this file are derived from or closely based on GRAHSP/pcigale
-# model logic, translated into JAX/NumPyro for jaxsedfit.
-# Relevant upstream sources include:
+# Portions of this file are derived from or closely based on CIGALE and
+# GRAHSP/pcigale model logic, translated into JAX/NumPyro for jaxsedfit.
+# Relevant GRAHSP upstream sources include:
 # - pcigale/creation_modules/activate.py
 # - pcigale/creation_modules/activategtorus.py
 # - pcigale/creation_modules/activatelines.py
 # - pcigale/creation_modules/biattenuation.py
 # - pcigale/creation_modules/redshifting.py
 # - pcigale/creation_modules/galdale2014.py
+# Relevant CIGALE v2025.1 sources include:
+# - pcigale/sed_modules/sfhdelayed.py
+# - pcigale/sed_modules/nebular.py
+# - pcigale/sed_modules/redshifting.py
+# - pcigale/sed_modules/dale2014.py
 # Upstream license: CeCILL v2. See LICENSES/CeCILL-v2.txt and
 # LICENSES/THIRD_PARTY_NOTICES.md.
 
@@ -527,6 +532,83 @@ def _gal_lgmet_to_absolute_z(
     return jnp.power(10.0, absolute_logz)
 
 
+def _absolute_z_to_gal_lgmet(
+    metallicity,
+    *,
+    metallicity_coordinate: str = "absolute_log10_z",
+    solar_metallicity: float = DSPS_SOLAR_METALLICITY,
+):
+    """Convert an absolute metal mass fraction to the SSP-grid coordinate."""
+    metallicity = jnp.maximum(jnp.asarray(metallicity, dtype=jnp.float64), 1.0e-30)
+    coordinate = str(metallicity_coordinate).strip().lower()
+    if coordinate == "absolute_log10_z":
+        return jnp.log10(metallicity)
+    if coordinate == "log10_z_over_zsun":
+        return jnp.log10(metallicity / jnp.asarray(solar_metallicity, dtype=jnp.float64))
+    raise ValueError(f"Unsupported SSP metallicity coordinate: {metallicity_coordinate!r}.")
+
+
+def _resolve_tied_metallicity(context: ModelContext, prior_config: dict[str, Any]):
+    """Return one shared absolute Z and SSP-coordinate Z when tying is enabled.
+
+    An explicit stellar-metallicity prior takes precedence as the shared
+    parameter. Otherwise an explicit nebular-metallicity prior is sampled.
+    With neither prior, the configured nebular value is fixed and propagated
+    to the host; if it is ``None``, the configured stellar value is used.
+    """
+    galaxy_cfg = context.fit_config.galaxy
+    if not (galaxy_cfg.fit_host and galaxy_cfg.tie_stellar_nebular_metallicity):
+        return None, None
+
+    ssp_lgmet = context.host_basis_jax.ssp_lgmet
+    if "gal_lgmet" in prior_config:
+        gal_lgmet = _sample_bounded_normal(
+            prior_config,
+            "gal_lgmet",
+            float(
+                _absolute_z_to_gal_lgmet(
+                    galaxy_cfg.stellar_metallicity,
+                    metallicity_coordinate=galaxy_cfg.ssp_metallicity_coordinate,
+                    solar_metallicity=galaxy_cfg.ssp_solar_metallicity,
+                )
+            ),
+            0.5,
+            jnp.min(ssp_lgmet),
+            jnp.max(ssp_lgmet),
+        )
+        shared_z = _gal_lgmet_to_absolute_z(
+            gal_lgmet,
+            metallicity_coordinate=galaxy_cfg.ssp_metallicity_coordinate,
+            solar_metallicity=galaxy_cfg.ssp_solar_metallicity,
+        )
+        return shared_z, gal_lgmet
+
+    nebular_cfg = context.fit_config.nebular
+    default_z = (
+        float(nebular_cfg.zgas)
+        if nebular_cfg.zgas is not None
+        else float(galaxy_cfg.stellar_metallicity)
+    )
+    if "nebular_zgas" in prior_config:
+        templates = context.nebular_templates_jax
+        shared_z = _sample_optional_truncnorm(
+            prior_config,
+            "nebular_zgas",
+            default_z,
+            0.01,
+            templates.z_grid[0],
+            templates.z_grid[-1],
+        )
+    else:
+        shared_z = jnp.asarray(default_z, dtype=jnp.float64)
+    gal_lgmet = _absolute_z_to_gal_lgmet(
+        shared_z,
+        metallicity_coordinate=galaxy_cfg.ssp_metallicity_coordinate,
+        solar_metallicity=galaxy_cfg.ssp_solar_metallicity,
+    )
+    return shared_z, gal_lgmet
+
+
 def _default_gal_lgmet_loc(
     ssp_lgmet,
     metallicity_coordinate: str = "absolute_log10_z",
@@ -585,6 +667,73 @@ def _cumulative_trapezoid(y, x):
     dx = jnp.diff(x)
     area = 0.5 * (y[1:] + y[:-1]) * dx
     return jnp.concatenate([jnp.zeros((1,), dtype=jnp.result_type(y, x)), jnp.cumsum(area)])
+
+
+def _cigale_delayed_sfh_shape(elapsed_gyr, tau_gyr, age_gyr):
+    """Return the no-burst CIGALE v2025.1 delayed-tau SFH shape.
+
+    This is the continuous-grid equivalent of ``sfhdelayed.py`` in CIGALE
+    v2025.1, where ``SFR(t) = t exp(-t / tau) / tau**2``. CIGALE evaluates
+    the expression on a 1 Myr grid; jaxsedfit evaluates the same expression on
+    its JAX SFH grid and normalizes it to the requested formed stellar mass.
+
+    Upstream source:
+    https://gitlab.lam.fr/cigale/cigale/-/blob/v2025.1/pcigale/sed_modules/sfhdelayed.py
+
+    Parameters
+    ----------
+    elapsed_gyr : object
+        Time since the onset of star formation in Gyr.
+    tau_gyr : object
+        Delayed-SFH e-folding time in Gyr.
+    age_gyr : object
+        Maximum elapsed time supported by the model in Gyr.
+    """
+    elapsed_gyr = jnp.asarray(elapsed_gyr, dtype=jnp.float64)
+    tau_gyr = jnp.maximum(jnp.asarray(tau_gyr, dtype=jnp.float64), 1.0e-12)
+    age_gyr = jnp.asarray(age_gyr, dtype=jnp.float64)
+    shape = elapsed_gyr * jnp.exp(-elapsed_gyr / tau_gyr) / (tau_gyr * tau_gyr)
+    return jnp.where((elapsed_gyr > 0.0) & (elapsed_gyr <= age_gyr), shape, 0.0)
+
+
+def _cigale_delayed_burst_sfh_shape(
+    elapsed_gyr,
+    tau_gyr,
+    age_gyr,
+    burst_fraction,
+    burst_age_gyr,
+    burst_tau_gyr,
+):
+    """Return CIGALE ``sfhdelayed`` with its optional exponential burst.
+
+    ``burst_fraction`` is the fraction of total formed mass in the recent
+    component.  CIGALE scales the exponential burst so that its time integral
+    relative to the main delayed component is ``f_burst / (1 - f_burst)``.
+    This continuous-grid implementation applies the same normalization using
+    trapezoidal integration on the JAXSEDFIT SFH grid.
+    """
+    elapsed_gyr = jnp.asarray(elapsed_gyr, dtype=jnp.float64)
+    age_gyr = jnp.asarray(age_gyr, dtype=jnp.float64)
+    burst_fraction = jnp.clip(jnp.asarray(burst_fraction, dtype=jnp.float64), 0.0, 1.0 - 1.0e-8)
+    burst_age_gyr = jnp.clip(jnp.asarray(burst_age_gyr, dtype=jnp.float64), 1.0e-6, age_gyr)
+    burst_tau_gyr = jnp.maximum(jnp.asarray(burst_tau_gyr, dtype=jnp.float64), 1.0e-12)
+
+    main = _cigale_delayed_sfh_shape(elapsed_gyr, tau_gyr, age_gyr)
+    burst_elapsed = elapsed_gyr - (age_gyr - burst_age_gyr)
+    burst = jnp.where(
+        (burst_elapsed >= 0.0) & (burst_elapsed <= burst_age_gyr),
+        jnp.exp(-burst_elapsed / burst_tau_gyr),
+        0.0,
+    )
+    main_integral = jnp.trapezoid(main, elapsed_gyr)
+    burst_integral = jnp.trapezoid(burst, elapsed_gyr)
+    burst_scale = (
+        burst_fraction
+        / jnp.maximum(1.0 - burst_fraction, 1.0e-8)
+        * main_integral
+        / jnp.maximum(burst_integral, 1.0e-30)
+    )
+    return main + burst_scale * burst
 
 
 def _mass_metallicity_relation_logprior(
@@ -964,7 +1113,12 @@ def _cigale_nebular_correction(f_esc, f_dust):
 
 
 def _balmer_continuum_jax(wave, balmer_norm, balmer_te, balmer_tau, balmer_vel):
-    """Evaluate the broadened Balmer continuum template.
+    """Evaluate the GRAHSP ``activatelines`` Balmer continuum template.
+
+    The analytic edge broadening follows GRAHSP commit
+    ``7d35f5232ac9918a785e8dfe75dff693ab246daf`` after converting nm to
+    Angstrom. ``balmer_norm`` is the absolute L-lambda normalization; the
+    caller converts GRAHSP's dimensionless ``ABC`` strength into that unit.
 
     Parameters
     ----------
@@ -980,13 +1134,26 @@ def _balmer_continuum_jax(wave, balmer_norm, balmer_te, balmer_tau, balmer_vel):
         balmer_vel value.
     """
     lam_be = 3646.0
-    h_c_per_k_B = 1.4388e8
+    h_c_per_k_B = 1.439e8
     bb = (wave**-5) / jnp.expm1(jnp.clip(h_c_per_k_B / (balmer_te * wave), 1e-9, 700.0))
     bb0 = (lam_be**-5) / jnp.expm1(jnp.clip(h_c_per_k_B / (balmer_te * lam_be), 1e-9, 700.0))
-    tau = balmer_tau * (wave / lam_be) ** 3
-    bc = balmer_norm * (1.0 - jnp.exp(-tau)) * bb / jnp.maximum(bb0, 1e-30)
-    bc = jnp.where(wave <= lam_be, bc, 0.0)
-    return _shift_and_broaden_single_spectrum_lnlam(jnp.log(wave), bc, 0.0, balmer_vel)
+    wave_ratio = wave / lam_be
+    truncation = -jnp.expm1(-balmer_tau * wave_ratio**3)
+    truncation0 = -jnp.expm1(-balmer_tau)
+
+    # GRAHSP analytically convolves a linear approximation to the Balmer edge.
+    alpha = 1.8
+    beta = -0.8
+    sigma = jnp.maximum(balmer_vel / C_KMS, 1.0e-12)
+    z = (wave_ratio - 1.0) / (jnp.sqrt(2.0) * sigma)
+    term_b = 0.5 * (1.0 - jax.lax.erf(z))
+    term_a1 = 0.5 * wave_ratio
+    term_a2 = -0.5 * wave_ratio * jax.lax.erf(z)
+    term_a3 = -sigma / jnp.sqrt(2.0 * jnp.pi) * jnp.exp(-(z**2))
+    convolved = (beta * term_b + alpha * (term_a1 + term_a2 + term_a3)) * truncation0
+    truncation_broadened = jnp.where(wave > 2500.0, convolved, truncation)
+    bc = balmer_norm * bb / jnp.maximum(bb0, 1.0e-30) * truncation_broadened / jnp.maximum(truncation0, 1.0e-30)
+    return jnp.where(wave <= lam_be, bc, 0.0)
 
 
 def _attenuation_curve(wave_rest, opt_index, nir_index, norm, lam_break):
@@ -1644,7 +1811,59 @@ def _lnu_lsun_per_hz_to_llambda_w_per_a(wave_a, lnu_lsun_per_hz):
     return lnu_w_per_hz * C_MS / (wave_m * wave_m) * 1.0e-10
 
 
-def _build_diffstar_host(context: ModelContext, prior_config: dict[str, Any], *, full_output: bool = True):
+def _host_metallicity_parameters(
+    context: ModelContext,
+    prior_config: dict[str, Any],
+    shared_gal_lgmet=None,
+):
+    """Return host mean metallicity and MDF scatter under the configured policy."""
+    galaxy_cfg = context.fit_config.galaxy
+    ssp_lgmet = context.host_basis_jax.ssp_lgmet
+    if shared_gal_lgmet is not None:
+        gal_lgmet = shared_gal_lgmet
+    elif "gal_lgmet" in prior_config:
+        gal_lgmet = _sample_bounded_normal(
+            prior_config,
+            "gal_lgmet",
+            float(
+                _absolute_z_to_gal_lgmet(
+                    galaxy_cfg.stellar_metallicity,
+                    metallicity_coordinate=galaxy_cfg.ssp_metallicity_coordinate,
+                    solar_metallicity=galaxy_cfg.ssp_solar_metallicity,
+                )
+            ),
+            0.5,
+            jnp.min(ssp_lgmet),
+            jnp.max(ssp_lgmet),
+        )
+    else:
+        gal_lgmet = _absolute_z_to_gal_lgmet(
+            galaxy_cfg.stellar_metallicity,
+            metallicity_coordinate=galaxy_cfg.ssp_metallicity_coordinate,
+            solar_metallicity=galaxy_cfg.ssp_solar_metallicity,
+        )
+
+    if "gal_lgmet_scatter" in prior_config or "log_gal_lgmet_scatter" in prior_config:
+        gal_lgmet_scatter = _sample_positive_distribution(
+            prior_config,
+            value_key="gal_lgmet_scatter",
+            log_key="log_gal_lgmet_scatter",
+            default_value_distribution=dist.LogNormal(np.log(0.15), 0.8),
+            default_log_distribution=dist.Normal(np.log(0.15), 0.8),
+            default_to_log=True,
+        )
+    else:
+        gal_lgmet_scatter = jnp.asarray(galaxy_cfg.stellar_metallicity_scatter, dtype=jnp.float64)
+    return gal_lgmet, gal_lgmet_scatter
+
+
+def _build_diffstar_host(
+    context: ModelContext,
+    prior_config: dict[str, Any],
+    *,
+    full_output: bool = True,
+    shared_gal_lgmet=None,
+):
     """Build the host-galaxy SED from Diffstar SFH and a precomputed SSP basis.
 
     Parameters
@@ -1680,25 +1899,10 @@ def _build_diffstar_host(context: ModelContext, prior_config: dict[str, Any], *,
         return_smh=True,
     )
 
-    gal_lgmet = _sample_bounded_normal(
+    gal_lgmet, gal_lgmet_scatter = _host_metallicity_parameters(
+        context,
         prior_config,
-        "gal_lgmet",
-        _default_gal_lgmet_loc(
-            ssp_lgmet,
-            galaxy_cfg.ssp_metallicity_coordinate,
-            galaxy_cfg.ssp_solar_metallicity,
-        ),
-        0.5,
-        jnp.min(ssp_lgmet),
-        jnp.max(ssp_lgmet),
-    )
-    gal_lgmet_scatter = _sample_positive_distribution(
-        prior_config,
-        value_key="gal_lgmet_scatter",
-        log_key="log_gal_lgmet_scatter",
-        default_value_distribution=dist.LogNormal(np.log(0.15), 0.8),
-        default_log_distribution=dist.Normal(np.log(0.15), 0.8),
-        default_to_log=True,
+        shared_gal_lgmet,
     )
     mmr_logprior = _mass_metallicity_relation_logprior(
         log_stellar_mass,
@@ -1763,7 +1967,13 @@ def _build_diffstar_host(context: ModelContext, prior_config: dict[str, Any], *,
     return state
 
 
-def _build_delayed_host(context: ModelContext, prior_config: dict[str, Any], *, full_output: bool = True):
+def _build_delayed_host(
+    context: ModelContext,
+    prior_config: dict[str, Any],
+    *,
+    full_output: bool = True,
+    shared_gal_lgmet=None,
+):
     """Build the host-galaxy SED from a CIGALE-like delayed-tau SFH.
 
     Parameters
@@ -1835,28 +2045,56 @@ def _build_delayed_host(context: ModelContext, prior_config: dict[str, Any], *, 
     tau_gyr = jnp.exp(log_tau_gyr)
     stellar_age_gyr = jnp.maximum(t_obs_gyr - gal_t_table, 0.0)
     sfh_age_gyr = age_gyr - stellar_age_gyr
-    base_sfh = jnp.where((sfh_age_gyr > 0.0) & (sfh_age_gyr <= age_gyr), sfh_age_gyr * jnp.exp(-sfh_age_gyr / tau_gyr), 0.0)
+    model_name = str(cfg.host_sfh_model).lower()
+    use_burst = model_name in {"delayed_burst", "sfhdelayed_burst", "delayed-burst"}
+    if use_burst:
+        log_burst_fraction = numpyro.sample(
+            "log_sfh_burst_fraction",
+            _prior_distribution(
+                prior_config,
+                "log_sfh_burst_fraction",
+                dist.Uniform(np.log(1.0e-4), np.log(0.2)),
+            ),
+        )
+        burst_fraction = jnp.exp(log_burst_fraction)
+        burst_age_upper = jnp.minimum(age_gyr, 0.5)
+        log_burst_age_gyr = numpyro.sample(
+            "log_sfh_burst_age_gyr",
+            _prior_distribution(
+                prior_config,
+                "log_sfh_burst_age_gyr",
+                dist.Uniform(np.log(0.01), jnp.log(burst_age_upper)),
+            ),
+        )
+        burst_age_gyr = jnp.exp(log_burst_age_gyr)
+        log_burst_tau_gyr = numpyro.sample(
+            "log_sfh_burst_tau_gyr",
+            _prior_distribution(
+                prior_config,
+                "log_sfh_burst_tau_gyr",
+                dist.Uniform(np.log(0.01), np.log(0.2)),
+            ),
+        )
+        burst_tau_gyr = jnp.exp(log_burst_tau_gyr)
+        base_sfh = _cigale_delayed_burst_sfh_shape(
+            sfh_age_gyr,
+            tau_gyr,
+            age_gyr,
+            burst_fraction,
+            burst_age_gyr,
+            burst_tau_gyr,
+        )
+    else:
+        burst_fraction = jnp.asarray(0.0, dtype=jnp.float64)
+        burst_age_gyr = jnp.asarray(0.0, dtype=jnp.float64)
+        burst_tau_gyr = jnp.asarray(0.0, dtype=jnp.float64)
+        base_sfh = _cigale_delayed_sfh_shape(sfh_age_gyr, tau_gyr, age_gyr)
     base_smh = _cumulative_trapezoid(base_sfh, gal_t_table) * 1.0e9
 
-    gal_lgmet = _sample_bounded_normal(
+    gal_lgmet, gal_lgmet_scatter = _host_metallicity_parameters(
+        context,
         prior_config,
-        "gal_lgmet",
-        _default_gal_lgmet_loc(
-            ssp_lgmet,
-            cfg.ssp_metallicity_coordinate,
-            cfg.ssp_solar_metallicity,
-        ),
-        0.5,
-        jnp.min(ssp_lgmet),
-        jnp.max(ssp_lgmet),
-    )
-    gal_lgmet_scatter = _sample_positive_distribution(
-        prior_config,
-        value_key="gal_lgmet_scatter",
-        log_key="log_gal_lgmet_scatter",
-        default_value_distribution=dist.LogNormal(np.log(0.15), 0.8),
-        default_log_distribution=dist.Normal(np.log(0.15), 0.8),
-        default_to_log=True,
+        shared_gal_lgmet,
     )
     mmr_logprior = _mass_metallicity_relation_logprior(
         log_stellar_mass,
@@ -1904,6 +2142,9 @@ def _build_delayed_host(context: ModelContext, prior_config: dict[str, Any], *, 
         "ssp_lgmet": ssp_lgmet,
         "sfh_age_gyr": age_gyr,
         "sfh_tau_gyr": tau_gyr,
+        "sfh_burst_fraction": burst_fraction,
+        "sfh_burst_age_gyr": burst_age_gyr,
+        "sfh_burst_tau_gyr": burst_tau_gyr,
     }
     if not full_output:
         return state
@@ -1919,7 +2160,13 @@ def _build_delayed_host(context: ModelContext, prior_config: dict[str, Any], *, 
     return state
 
 
-def _build_host_state(context: ModelContext, prior_config: dict[str, Any], *, full_output: bool = True):
+def _build_host_state(
+    context: ModelContext,
+    prior_config: dict[str, Any],
+    *,
+    full_output: bool = True,
+    shared_gal_lgmet=None,
+):
     """Dispatch to the configured host SFH model.
 
     Parameters
@@ -1932,11 +2179,29 @@ def _build_host_state(context: ModelContext, prior_config: dict[str, Any], *, fu
         full_output value.
     """
     model_name = str(context.fit_config.galaxy.host_sfh_model).lower()
-    if model_name in {"delayed", "sfhdelayed", "delayed_tau", "delayed-tau"}:
-        return _build_delayed_host(context, prior_config, full_output=full_output)
+    if model_name in {
+        "delayed",
+        "sfhdelayed",
+        "delayed_tau",
+        "delayed-tau",
+        "delayed_burst",
+        "sfhdelayed_burst",
+        "delayed-burst",
+    }:
+        return _build_delayed_host(
+            context,
+            prior_config,
+            full_output=full_output,
+            shared_gal_lgmet=shared_gal_lgmet,
+        )
     if model_name in {"diffstar", "dsps_diffstar"}:
-        return _build_diffstar_host(context, prior_config, full_output=full_output)
-    raise ValueError("galaxy.host_sfh_model must be one of: 'delayed', 'diffstar'.")
+        return _build_diffstar_host(
+            context,
+            prior_config,
+            full_output=full_output,
+            shared_gal_lgmet=shared_gal_lgmet,
+        )
+    raise ValueError("galaxy.host_sfh_model must be one of: 'delayed', 'delayed_burst', 'diffstar'.")
 
 
 def _host_rest_on_basis(host_state: dict[str, Any], host_basis_jax):
@@ -1996,6 +2261,7 @@ def _build_nebular_components(
     prior_config: dict[str, Any],
     *,
     build_line_sed: bool = True,
+    shared_zgas=None,
 ):
     """Build CIGALE/GRAHSP-style host nebular absorption, lines, and continuum.
 
@@ -2025,7 +2291,16 @@ def _build_nebular_components(
             "ly_lum_young": jnp.asarray(0.0, dtype=jnp.float64),
             "ly_lum_old": jnp.asarray(0.0, dtype=jnp.float64),
             "logU": jnp.asarray(float(cfg.logU), dtype=jnp.float64),
-            "zgas": jnp.asarray(float(cfg.zgas) if cfg.zgas is not None else 0.02, dtype=jnp.float64),
+            "zgas": (
+                jnp.asarray(shared_zgas, dtype=jnp.float64)
+                if shared_zgas is not None
+                else jnp.asarray(
+                    float(cfg.zgas)
+                    if cfg.zgas is not None
+                    else float(context.fit_config.galaxy.stellar_metallicity),
+                    dtype=jnp.float64,
+                )
+            ),
             "ne": jnp.asarray(float(cfg.ne), dtype=jnp.float64),
             "f_esc": jnp.asarray(float(cfg.f_esc), dtype=jnp.float64),
             "f_dust": jnp.asarray(float(cfg.f_dust), dtype=jnp.float64),
@@ -2044,23 +2319,26 @@ def _build_nebular_components(
         templates.logu_grid[0],
         templates.logu_grid[-1],
     )
-    default_zgas = float(cfg.zgas) if cfg.zgas is not None else None
-    galaxy_cfg = context.fit_config.galaxy
-    host_zgas = _gal_lgmet_to_absolute_z(
-        host_state["gal_lgmet"],
-        metallicity_coordinate=galaxy_cfg.ssp_metallicity_coordinate,
-        solar_metallicity=galaxy_cfg.ssp_solar_metallicity,
-    )
-    zgas_default = host_zgas if default_zgas is None else jnp.asarray(default_zgas, dtype=jnp.float64)
-    zgas = _sample_optional_truncnorm(
-        prior_config,
-        "nebular_zgas",
-        float(default_zgas) if default_zgas is not None else 0.02,
-        0.01,
-        templates.z_grid[0],
-        templates.z_grid[-1],
-    )
-    zgas = jnp.where(default_zgas is None and "nebular_zgas" not in prior_config, zgas_default, zgas)
+    if shared_zgas is not None:
+        zgas = shared_zgas
+    else:
+        default_zgas = float(cfg.zgas) if cfg.zgas is not None else None
+        galaxy_cfg = context.fit_config.galaxy
+        host_zgas = _gal_lgmet_to_absolute_z(
+            host_state["gal_lgmet"],
+            metallicity_coordinate=galaxy_cfg.ssp_metallicity_coordinate,
+            solar_metallicity=galaxy_cfg.ssp_solar_metallicity,
+        )
+        zgas_default = host_zgas if default_zgas is None else jnp.asarray(default_zgas, dtype=jnp.float64)
+        zgas = _sample_optional_truncnorm(
+            prior_config,
+            "nebular_zgas",
+            float(default_zgas) if default_zgas is not None else float(context.fit_config.galaxy.stellar_metallicity),
+            0.01,
+            templates.z_grid[0],
+            templates.z_grid[-1],
+        )
+        zgas = jnp.where(default_zgas is None and "nebular_zgas" not in prior_config, zgas_default, zgas)
     ne = _sample_optional_truncnorm(
         prior_config,
         "nebular_ne",
@@ -2824,8 +3102,14 @@ def evaluate_photometric_state(
         and context.spec_rest_wave_jax.size == context.spec_wave_obs.size
         and not cfg.observation.fits_redshift
     )
+    shared_zgas, shared_gal_lgmet = _resolve_tied_metallicity(context, prior_config)
     host_state = (
-        _build_host_state(context, prior_config, full_output=include_components or needs_spec_host_basis)
+        _build_host_state(
+            context,
+            prior_config,
+            full_output=include_components or needs_spec_host_basis,
+            shared_gal_lgmet=shared_gal_lgmet,
+        )
         if fit_host
         else _empty_host_state(context)
     )
@@ -3105,7 +3389,13 @@ def evaluate_photometric_state(
             feii_shift = jnp.asarray(0.0, dtype=jnp.float64)
             feii_rest = jnp.zeros_like(rest_wave)
         balmer_rest = (
-            _balmer_continuum_jax(rest_wave, balmer_norm, 15000.0, balmer_tau, balmer_vel)
+            _balmer_continuum_jax(
+                rest_wave,
+                l_agn_lambda_5100 * balmer_norm,
+                15000.0,
+                balmer_tau,
+                balmer_vel,
+            )
             if balmer_enabled
             else jnp.zeros_like(rest_wave)
         )
@@ -3237,6 +3527,7 @@ def evaluate_photometric_state(
         host_rest,
         prior_config,
         build_line_sed=not skip_coarse_nebular_line_grid,
+        shared_zgas=shared_zgas,
     )
     host_with_nebular_rest = host_rest + nebular["absorption_rest"] + nebular["emission_rest"]
     agn_attenuated_input_rest = disk_rest + feii_rest + line_rest + balmer_rest
@@ -3949,6 +4240,9 @@ def evaluate_photometric_state(
     numpyro.deterministic("mass_metallicity_relation_logprior", host_state["mass_metallicity_relation_logprior"])
     numpyro.deterministic("sfh_age_gyr_fit", host_state["sfh_age_gyr"])
     numpyro.deterministic("sfh_tau_gyr_fit", host_state["sfh_tau_gyr"])
+    numpyro.deterministic("sfh_burst_fraction_fit", host_state.get("sfh_burst_fraction", 0.0))
+    numpyro.deterministic("sfh_burst_age_gyr_fit", host_state.get("sfh_burst_age_gyr", 0.0))
+    numpyro.deterministic("sfh_burst_tau_gyr_fit", host_state.get("sfh_burst_tau_gyr", 0.0))
     numpyro.deterministic("log_dust_luminosity_fit", _safe_log10(dust_luminosity))
     numpyro.deterministic("dust_alpha_fit", dust_alpha)
     numpyro.deterministic("nebular_logU_fit", nebular["logU"])

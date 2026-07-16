@@ -1,6 +1,7 @@
 import numpy as np
 import pytest
 import jax
+import jax.numpy as jnp
 import numpyro.distributions as dist
 from types import SimpleNamespace
 from numpyro.handlers import seed, substitute, trace
@@ -114,6 +115,8 @@ def test_observation_rejects_invalid_redshift(redshift):
         {"rest_wave_min": 1000.0, "rest_wave_max": 1000.0},
         {"n_wave": 1},
         {"sfh_n_steps": 1},
+        {"stellar_metallicity": 0.0},
+        {"stellar_metallicity_scatter": -0.1},
     ],
 )
 def test_galaxy_rejects_invalid_internal_grids(kwargs):
@@ -847,30 +850,48 @@ def test_balmer_continuum_has_3646_angstrom_edge_and_blueward_emission():
     assert np.all(np.isfinite(balmer))
 
 
-def test_balmer_continuum_planck_factor_uses_angstrom_kelvin_constant():
+def test_balmer_continuum_planck_factor_uses_grahsp_angstrom_kelvin_constant():
     wave = np.linspace(1000.0, 3646.0, 2647)
-    balmer = np.asarray(_balmer_continuum_jax(wave, balmer_norm=1.0, balmer_te=15000.0, balmer_tau=1.0, balmer_vel=0.0))
+    balmer = np.asarray(
+        _balmer_continuum_jax(
+            wave,
+            balmer_norm=1.0,
+            balmer_te=15000.0,
+            balmer_tau=1.0,
+            balmer_vel=3000.0,
+        )
+    )
 
     idx_1500 = np.argmin(np.abs(wave - 1500.0))
-    idx_3646 = np.argmin(np.abs(wave - 3646.0))
-    h_c_per_k_B_angstrom = 1.4388e8
-    ratio_wave = np.asarray([wave[idx_1500], wave[idx_3646]])
+    idx_2000 = np.argmin(np.abs(wave - 2000.0))
+    h_c_per_k_B_angstrom = 1.439e8
+    ratio_wave = np.asarray([wave[idx_1500], wave[idx_2000]])
     tau = (ratio_wave / 3646.0) ** 3
     bb = (ratio_wave**-5) / np.expm1(h_c_per_k_B_angstrom / (15000.0 * ratio_wave))
     bb0 = (3646.0**-5) / np.expm1(h_c_per_k_B_angstrom / (15000.0 * 3646.0))
-    expected = (1.0 - np.exp(-tau)) * bb / bb0
+    expected = (1.0 - np.exp(-tau)) * bb / bb0 / (1.0 - np.exp(-1.0))
 
-    assert balmer[idx_1500] / balmer[idx_3646] == pytest.approx(expected[0] / expected[1], rel=1.0e-6)
+    assert balmer[idx_1500] / balmer[idx_2000] == pytest.approx(expected[0] / expected[1], rel=1.0e-6)
 
 
-def test_redshift_projection_uses_luminosity_distance_and_one_plus_z():
-    rest_wave = np.asarray([1000.0, 2000.0, 3000.0])
-    rest_lum = np.asarray([4.0, 4.0, 4.0])
-    obs_wave = rest_wave * 2.0
-    d_l = 10.0
-    obs = np.asarray(_redshift_to_obs(rest_wave, rest_lum, obs_wave, redshift=1.0, luminosity_distance_m=d_l))
+def test_redshift_projection_matches_cigale_v2025_1_static_reference():
+    """Match CIGALE redshifting.py's wavelength and energy-density scaling."""
+    rest_wave = np.asarray([1000.0, 2000.0, 5000.0])
+    rest_lum = np.asarray([2.0, 5.0, 11.0])
+    obs_wave = np.asarray([3000.0, 6000.0, 15000.0])
+    expected = np.asarray([9.431404035075278e-4, 2.3578510087688197e-3, 5.187272219291403e-3])
 
-    assert np.allclose(obs, rest_lum / (4.0 * np.pi * d_l**2 * 2.0))
+    obs = np.asarray(
+        _redshift_to_obs(
+            rest_wave,
+            rest_lum,
+            obs_wave,
+            redshift=2.0,
+            luminosity_distance_m=7.5,
+        )
+    )
+
+    np.testing.assert_allclose(obs, expected, rtol=2.0e-12, atol=0.0)
 
 
 def test_upper_limit_likelihood_uses_standard_deviation_not_variance():
@@ -2074,3 +2095,72 @@ def test_dynamic_and_fixed_igm_evaluators_match():
     dynamic = np.asarray(_igm_transmission(cache, 2.0), dtype=float)
 
     assert np.allclose(dynamic, fixed)
+
+
+def test_cigale_igm_has_finite_redshift_gradient_away_from_breaks():
+    rest_wave = np.array([400.0, 700.0, 850.0, 1000.0, 1100.0], dtype=float)
+    cache = _build_igm_cache_jax(rest_wave)
+
+    gradient = jax.grad(lambda z: jnp.sum(_igm_transmission(cache, z)))(2.3)
+
+    assert np.isfinite(float(gradient))
+    assert float(gradient) != 0.0
+
+
+@pytest.mark.parametrize(
+    ("redshift", "expected"),
+    [
+        (0.0, [1.0] * 14),
+        (
+            1.0,
+            [
+                0.9894695081807627, 0.8047814563025332, 0.469797051674372,
+                0.5006698438923702, 0.6263263010411965, 0.9170078562913831,
+                0.9712357914069667, 0.9779976377529525, 0.9794058532748684,
+                0.978099815015404, 0.9812548237094142, 0.9730320130680872,
+                1.0, 1.0,
+            ],
+        ),
+        (
+            3.0,
+            [
+                0.8393095579193087, 0.07801575335662445, 0.023072199153607205,
+                0.03328977636059566, 0.09183669868503967, 0.497414730477263,
+                0.6402215246125254, 0.7209904907133703, 0.7439335942798158,
+                0.7309904047874979, 0.781980671598943, 0.7009704533516865,
+                1.0, 1.0,
+            ],
+        ),
+        (
+            5.0,
+            [
+                0.4360492092375524, 0.0007002535973785085, 3.2500325606542065e-05,
+                7.992945118685922e-05, 0.000935517126255898, 0.052563092065358925,
+                0.0955437058706739, 0.19508756202041233, 0.23544159675752477,
+                0.21462597115802082, 0.30954036864292406, 0.15970475051041755,
+                1.0, 1.0,
+            ],
+        ),
+        (
+            8.0,
+            [
+                0.02234772395609677, 1.891743779078237e-11, 3.654617375483278e-15,
+                2.042103572067685e-14, 5.037730646286129e-12, 4.23528236670826e-08,
+                1.6112720239855764e-07, 2.5450367506636165e-05, 9.484117175650355e-05,
+                5.3359327785828654e-05, 0.000695519421210653, 1.149091850708478e-05,
+                1.0, 1.0,
+            ],
+        ),
+    ],
+)
+def test_igm_matches_cigale_v2025_1_static_reference(redshift, expected):
+    """Regression values generated by official CIGALE v2025.1 redshifting.py."""
+    rest_wave = np.array(
+        [100.0, 300.0, 500.0, 700.0, 800.0, 900.0, 912.0, 950.0,
+         1000.0, 1025.0, 1100.0, 1215.0, 1217.0, 1500.0],
+        dtype=float,
+    )
+    cache = _build_igm_cache_jax(rest_wave)
+    transmission = np.asarray(_build_fixed_igm_jax(cache, redshift), dtype=float)
+
+    np.testing.assert_allclose(transmission, expected, rtol=2.0e-12, atol=1.0e-15)

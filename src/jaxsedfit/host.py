@@ -68,6 +68,8 @@ def build_host_state(
     tau_host_prior_scale: float = 0.5,
     ssp_metallicity_coordinate: str = "absolute_log10_z",
     ssp_solar_metallicity: float = 0.019,
+    stellar_metallicity: float = 0.019,
+    stellar_metallicity_scatter: float = 0.0,
     full_output: bool = True,
 ) -> dict[str, Any]:
     """Sample/build the JAXSEDFit physical host state from a host basis.
@@ -98,6 +100,10 @@ def build_host_state(
         Coordinate used by ``host_basis_jax.ssp_lgmet``.
     ssp_solar_metallicity : float
         Absolute solar metallicity used for coordinate conversion.
+    stellar_metallicity : float
+        Fixed absolute stellar metallicity used when no metallicity prior is supplied.
+    stellar_metallicity_scatter : float
+        Fixed stellar metallicity dispersion in dex when no scatter prior is supplied.
     full_output : object
         full_output value.
     """
@@ -107,6 +113,8 @@ def build_host_state(
         tau_host_prior_scale=float(tau_host_prior_scale),
         ssp_metallicity_coordinate=str(ssp_metallicity_coordinate),
         ssp_solar_metallicity=float(ssp_solar_metallicity),
+        stellar_metallicity=float(stellar_metallicity),
+        stellar_metallicity_scatter=float(stellar_metallicity_scatter),
     )
     observation = SimpleNamespace(redshift=float(redshift))
     context = SimpleNamespace(
