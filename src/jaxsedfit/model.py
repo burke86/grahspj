@@ -3464,14 +3464,24 @@ def evaluate_photometric_state(
         else jnp.asarray(0.0, dtype=jnp.float64)
     )
     if cfg.galaxy.use_energy_balance and fit_host:
-        dust_alpha = _sample_bounded_normal(
-            prior_config,
-            "dust_alpha",
-            cfg.galaxy.dust_alpha,
-            0.4,
-            float(np.min(dust_alpha_grid)),
-            float(np.max(dust_alpha_grid)),
-        )
+        dust_alpha_low = max(0.75, float(np.min(dust_alpha_grid)))
+        dust_alpha_high = min(2.75, float(np.max(dust_alpha_grid)))
+        if "dust_alpha" in prior_config:
+            dust_alpha = _sample_bounded_normal(
+                prior_config,
+                "dust_alpha",
+                cfg.galaxy.dust_alpha,
+                0.4,
+                float(np.min(dust_alpha_grid)),
+                float(np.max(dust_alpha_grid)),
+            )
+        else:
+            # Continuous equivalent of the GRAHSP/CIGALE galdale grid, which
+            # assigns equal prior weight over alpha=0.75--2.75.
+            dust_alpha = numpyro.sample(
+                "dust_alpha",
+                dist.Uniform(dust_alpha_low, dust_alpha_high),
+            )
     else:
         dust_alpha = jnp.asarray(float(cfg.galaxy.dust_alpha), dtype=jnp.float64)
     if cfg.likelihood.fit_systematics_width:

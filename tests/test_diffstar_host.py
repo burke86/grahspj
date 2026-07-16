@@ -115,6 +115,26 @@ def test_delayed_host_model_is_default(monkeypatch):
     assert np.all(np.isfinite(np.asarray(tr["gal_smh_table"]["value"], dtype=float)))
 
 
+def test_default_dale_alpha_prior_matches_grahsp_uniform_grid(monkeypatch):
+    class _SSPData:
+        ssp_lgmet = np.array([-2.0, -1.5, -1.0, -0.5])
+        ssp_lg_age_gyr = np.array([-1.0, -0.5, 0.0, 0.5])
+        ssp_wave = np.array([900.0, 2000.0, 5000.0, 10000.0])
+        ssp_flux = np.ones((4, 4, 4))
+
+    monkeypatch.setattr("jaxsedfit.preload._load_ssp_templates", lambda fn: _SSPData())
+    monkeypatch.setattr("jaxsedfit.preload._SSP_DATA_CACHE", {})
+    cfg = _mock_config()
+    cfg.galaxy.dsps_ssp_fn = "fake-dale-alpha.h5"
+    context = build_model_context(cfg)
+    tr = trace(seed(lambda: grahsp_photometric_model(context, include_components=False), 12)).get_trace()
+
+    prior = tr["dust_alpha"]["fn"]
+    assert prior.__class__.__name__ == "Uniform"
+    assert float(np.asarray(prior.support.lower_bound)) == pytest.approx(0.75)
+    assert float(np.asarray(prior.support.upper_bound)) == pytest.approx(2.75)
+
+
 def test_delayed_sfh_matches_cigale_v2025_1_static_reference():
     """Match the normalized no-burst output of CIGALE sfhdelayed.py."""
     elapsed_gyr = np.arange(5000, dtype=float) / 1000.0

@@ -100,6 +100,8 @@ def test_likelihood_defaults_include_local_line_photometry():
     assert cfg.local_nebular_line_uncertainty_dex == pytest.approx(0.3)
     assert cfg.fit_agn_systematics_width is True
     assert cfg.agn_systematics_width_prior_scale == pytest.approx(0.20)
+    assert cfg.likelihood_family == "student_t"
+    assert cfg.student_t_df == pytest.approx(5.0)
 
 
 @pytest.mark.parametrize("redshift", [-0.1, np.nan, np.inf])
