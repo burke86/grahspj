@@ -144,7 +144,7 @@ def _fixed_component_data():
         "pl_bend_loc": np.array(GRAHSP_PL_BEND_LOC_A),
         "pl_bend_width": np.array(GRAHSP_PL_BEND_WIDTH),
         "pl_cutoff": np.array(GRAHSP_PL_CUTOFF_A),
-        "log_fcov": _log_positive(0.2),
+        "fcov": np.array(0.2),
         "si": np.array(0.0),
         "cool_lam": np.array(17.0),
         "cool_width": np.array(0.45),
@@ -321,7 +321,6 @@ def test_positive_geometry_parameters_are_sampled_in_log_space(monkeypatch):
     for log_key, value_key in (
         ("log_ebv_gal", "ebv_gal"),
         ("log_ebv_agn", "ebv_agn"),
-        ("log_fcov", "fcov"),
         ("log_hot_fcov", "hot_fcov"),
         ("log_gal_lgmet_scatter", "gal_lgmet_scatter"),
     ):
@@ -364,9 +363,10 @@ def test_default_torus_and_agn_feature_priors_match_grahsp_support(monkeypatch):
         np.testing.assert_allclose(np.asarray(prior.low), low)
         np.testing.assert_allclose(np.asarray(prior.high), high)
 
-    fcov_base = tr["log_fcov"]["fn"].base_dist
-    np.testing.assert_allclose(np.asarray(fcov_base.low), 0.05)
-    np.testing.assert_allclose(np.asarray(fcov_base.high), 0.95)
+    fcov = tr["fcov"]["fn"]
+    assert fcov.__class__.__name__ == "Uniform"
+    np.testing.assert_allclose(np.asarray(fcov.low), 0.05)
+    np.testing.assert_allclose(np.asarray(fcov.high), 0.95)
 
     log_hot_fcov = tr["log_hot_fcov"]["fn"]
     np.testing.assert_allclose(np.asarray(log_hot_fcov.low), np.log(0.04))
@@ -397,7 +397,7 @@ def test_component_rest_and_observed_seds_sum_to_total(monkeypatch):
             "pl_bend_loc": np.array(GRAHSP_PL_BEND_LOC_A),
             "pl_bend_width": np.array(GRAHSP_PL_BEND_WIDTH),
             "pl_cutoff": np.array(GRAHSP_PL_CUTOFF_A),
-            "log_fcov": _log_positive(0.2),
+            "fcov": np.array(0.2),
             "si": np.array(0.0),
             "cool_lam": np.array(17.0),
             "cool_width": np.array(0.45),
@@ -548,7 +548,7 @@ def test_agn_off_mode_has_zero_agn_components_and_no_total_leak(monkeypatch):
 def test_host_off_mode_has_zero_host_components_and_no_total_leak(monkeypatch):
     _patch_ssp(monkeypatch)
     context = build_model_context(_cfg(fit_host=False))
-    tr = _deterministic_trace(context, {"log_agn_amp": np.array(np.log(1.0e34)), "log_fcov": _log_positive(0.2), "si": np.array(0.0)})
+    tr = _deterministic_trace(context, {"log_agn_amp": np.array(np.log(1.0e34)), "fcov": np.array(0.2), "si": np.array(0.0)})
 
     for key in ("host_rest_sed", "host_total_rest_sed", "host_absorbed_rest_sed", "dust_rest_sed", "nebular_rest_sed"):
         assert np.allclose(_site(tr, key), 0.0)
@@ -558,15 +558,25 @@ def test_host_off_mode_has_zero_host_components_and_no_total_leak(monkeypatch):
     assert np.allclose(_site(tr, "pred_fluxes"), _site(tr, "agn_fluxes"))
 
 
-def test_agn_slope_ordering_uses_positive_delta_without_hard_factor(monkeypatch):
+def test_agn_disk_defaults_match_grahsp_support(monkeypatch):
     _patch_ssp(monkeypatch)
     context = build_model_context(_cfg(fit_host=False))
-    tr = _deterministic_trace(context, {"log_agn_amp": np.array(np.log(1.0e34)), "log_fcov": _log_positive(0.2), "si": np.array(0.0)})
+    tr = _deterministic_trace(context, {"log_agn_amp": np.array(np.log(1.0e34)), "fcov": np.array(0.2), "si": np.array(0.0)})
 
     assert "uv_slope_gt_pl_slope" not in tr
-    assert "uv_slope_delta" in tr
-    assert _site(tr, "uv_slope_delta") > 0.0
-    assert _site(tr, "uv_slope") > _site(tr, "pl_slope")
+    assert "uv_slope_delta" not in tr
+    assert _site(tr, "uv_slope") == 0.0
+    assert _site(tr, "pl_cutoff") == GRAHSP_PL_CUTOFF_A
+
+    slope_prior = tr["pl_slope"]["fn"]
+    bend_loc_prior = tr["pl_bend_loc"]["fn"]
+    bend_width_prior = tr["pl_bend_width"]["fn"]
+    assert np.isclose(slope_prior.low, -2.7)
+    assert np.isclose(slope_prior.high, -1.0)
+    assert np.isclose(bend_loc_prior.low, 500.0)
+    assert np.isclose(bend_loc_prior.high, 1500.0)
+    assert np.isclose(bend_width_prior.low, 0.1)
+    assert np.isclose(bend_width_prior.high, 10.0)
 
 
 def test_host_kinematics_default_off_skips_broadening_call(monkeypatch):

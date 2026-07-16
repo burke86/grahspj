@@ -216,7 +216,7 @@ class NebularConfig:
     enabled: bool = True
     emission: bool = True
     logU: float = -2.0
-    zgas: float | None = None
+    zgas: float | None = 0.019
     ne: float = 100.0
     f_esc: float = 0.0
     f_dust: float = 0.0

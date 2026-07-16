@@ -279,16 +279,16 @@ continuum:
        enabled=True,
        emission=True,
        logU=-2.0,
-       zgas=None,
+       zgas=0.019,
        ne=100.0,
        f_esc=0.0,
        f_dust=0.0,
        lines_width=300.0,
    )
 
-By default, ``logU`` and ``ne`` are fixed to common values rather than sampled.
-If ``zgas=None``, the gas metallicity follows the host metallicity proxy. Set
-``zgas`` explicitly to hold the gas metallicity fixed. Only add priors for
+By default, ``logU``, ``zgas``, and ``ne`` are fixed to the GRAHSP-like values
+``-2.0``, ``0.019``, and ``100 cm^-3``, respectively. Set ``zgas=None`` to tie
+the gas metallicity to the host metallicity proxy. Only add priors for
 ``logU``, ``zgas``, or ``ne`` when the data can actually constrain them. The
 packaged nebular templates are interpolated over metallicity, ionization
 parameter, and density, so fixed or sampled off-grid values remain smooth for

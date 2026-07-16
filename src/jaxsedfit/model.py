@@ -51,6 +51,12 @@ GRAHSP_EBV_MAX = 10.0
 GRAHSP_PL_BEND_LOC_A = 1000.0
 GRAHSP_PL_BEND_WIDTH = 10.0
 GRAHSP_PL_CUTOFF_A = 100000.0
+GRAHSP_PL_SLOPE_LOW = -2.7
+GRAHSP_PL_SLOPE_HIGH = -1.0
+GRAHSP_PL_BEND_LOC_LOW_A = 500.0
+GRAHSP_PL_BEND_LOC_HIGH_A = 1500.0
+GRAHSP_PL_BEND_WIDTH_LOW = 0.1
+GRAHSP_PL_BEND_WIDTH_HIGH = 10.0
 GRAHSP_TORUS_NORM_A = 120000.0
 GRAHSP_SI_EM_LAM_A = 98410.0
 GRAHSP_SI_ABS_LAM_A = 142240.0
@@ -2858,37 +2864,42 @@ def evaluate_photometric_state(
 
     agn_type = int(cfg.agn.agn_type)
     if fit_agn:
-        pl_slope = _sample_prior(prior_config, "pl_slope", dist.TruncatedNormal(-1.8, 0.4, low=-2.5, high=-1.0))
-        uv_slope_delta = _sample_positive_distribution(
+        pl_slope = _sample_prior(
             prior_config,
-            value_key="uv_slope_delta",
-            log_key="log_uv_slope_delta",
-            default_value_distribution=dist.LogNormal(np.log(1.8), 0.4),
-            default_log_distribution=dist.Normal(np.log(1.8), 0.4),
+            "pl_slope",
+            dist.TruncatedNormal(-1.85, 0.6, low=GRAHSP_PL_SLOPE_LOW, high=GRAHSP_PL_SLOPE_HIGH),
         )
-        uv_slope = pl_slope + uv_slope_delta
+        # GRAHSP fixes the short-wavelength slope to zero. Keeping this
+        # deterministic also removes an otherwise weakly identified UV-shape
+        # degree of freedom from broadband-only fits.
+        uv_slope = jnp.asarray(0.0, dtype=jnp.float64)
         numpyro.deterministic("uv_slope", uv_slope)
         pl_bend_loc = _sample_positive_distribution(
             prior_config,
             value_key="pl_bend_loc",
             log_key="log_pl_bend_loc",
-            default_value_distribution=dist.LogNormal(np.log(GRAHSP_PL_BEND_LOC_A), 0.2),
+            default_value_distribution=dist.TruncatedNormal(
+                GRAHSP_PL_BEND_LOC_A,
+                500.0,
+                low=GRAHSP_PL_BEND_LOC_LOW_A,
+                high=GRAHSP_PL_BEND_LOC_HIGH_A,
+            ),
             default_log_distribution=dist.Normal(np.log(GRAHSP_PL_BEND_LOC_A), 0.2),
         )
         pl_bend_width = _sample_positive_distribution(
             prior_config,
             value_key="pl_bend_width",
             log_key="log_pl_bend_width",
-            default_value_distribution=dist.LogNormal(np.log(GRAHSP_PL_BEND_WIDTH), 0.4),
+            default_value_distribution=dist.TruncatedNormal(
+                5.05,
+                4.95,
+                low=GRAHSP_PL_BEND_WIDTH_LOW,
+                high=GRAHSP_PL_BEND_WIDTH_HIGH,
+            ),
             default_log_distribution=dist.Normal(np.log(GRAHSP_PL_BEND_WIDTH), 0.4),
         )
-        pl_cutoff = _sample_positive_distribution(
-            prior_config,
-            value_key="pl_cutoff",
-            log_key="log_pl_cutoff",
-            default_value_distribution=dist.LogNormal(np.log(GRAHSP_PL_CUTOFF_A), 0.6),
-            default_log_distribution=dist.Normal(np.log(GRAHSP_PL_CUTOFF_A), 0.6),
-        )
+        pl_cutoff = jnp.asarray(GRAHSP_PL_CUTOFF_A, dtype=jnp.float64)
+        numpyro.deterministic("pl_cutoff", pl_cutoff)
         disk_rest = _powerlaw_jax(rest_wave, agn_amp / 5100.0, uv_slope, pl_slope, 5100.0, pl_bend_loc, pl_bend_width, pl_cutoff)
 
         fcov = _sample_positive_distribution(
@@ -2896,11 +2907,7 @@ def evaluate_photometric_state(
             value_key="fcov",
             log_key="log_fcov",
             default_value_distribution=dist.Uniform(0.05, 0.95),
-            default_log_distribution=dist.TransformedDistribution(
-                dist.Uniform(0.05, 0.95),
-                dist.transforms.ExpTransform().inv,
-            ),
-            default_to_log=True,
+            default_log_distribution=dist.Uniform(np.log(0.05), np.log(0.95)),
         )
         si = _sample_prior(prior_config, "si", dist.Uniform(-4.0, 4.0))
         cool_lam = _sample_positive_distribution(
