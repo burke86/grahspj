@@ -3,6 +3,7 @@ import jax.numpy as jnp
 import numpy as np
 import numpyro.distributions as dist
 import pytest
+from diffstar import DEFAULT_DIFFSTAR_U_PARAMS, get_bounded_diffstar_params
 from numpyro.handlers import seed, trace
 
 from jaxsedfit.config import (
@@ -23,11 +24,13 @@ from jaxsedfit.config import (
 )
 from jaxsedfit.core import JAXSEDFit
 from jaxsedfit.model import (
+    _analytic_delayed_burst_age_weights,
     _analytic_delayed_ssp_weights,
     _cigale_delayed_burst_sfh_shape,
     _cigale_delayed_sfh_shape,
     _delayed_sfh_cumulative_mass,
     _default_gal_lgmet_loc,
+    _diffstar_ssp_age_weights,
     _mass_metallicity_relation_logprior,
     _luminosity_distance_m_jax,
     grahsp_photometric_model,
@@ -210,6 +213,85 @@ def test_delayed_burst_sfh_matches_cigale_formed_mass_fraction():
 
     assert recovered_fraction == pytest.approx(f_burst, rel=2.0e-12)
     assert np.allclose(burst[elapsed_gyr < 4.8], 0.0)
+
+
+def test_analytic_delayed_burst_weights_match_dense_bin_integrals():
+    lg_age = jnp.linspace(-3.0, jnp.log10(5.5), 80)
+    age, tau = 5.0, 2.0
+    burst_fraction, burst_age, burst_tau = 0.08, 0.2, 0.05
+    analytic = np.asarray(
+        _analytic_delayed_burst_age_weights(
+            age, tau, burst_fraction, burst_age, burst_tau, lg_age
+        )
+    )
+
+    lg_age_np = np.asarray(lg_age)
+    edges = np.concatenate(
+        (
+            [lg_age_np[0] - 0.5 * (lg_age_np[1] - lg_age_np[0])],
+            0.5 * (lg_age_np[:-1] + lg_age_np[1:]),
+            [lg_age_np[-1] + 0.5 * (lg_age_np[-1] - lg_age_np[-2])],
+        )
+    )
+    elapsed = np.linspace(0.0, age, 500_001)
+    sfh_elapsed = np.asarray(
+        _cigale_delayed_burst_sfh_shape(
+            elapsed, tau, age, burst_fraction, burst_age, burst_tau
+        )
+    )
+    stellar_age = age - elapsed[::-1]
+    sfh = sfh_elapsed[::-1]
+    cumulative = np.concatenate(
+        ([0.0], np.cumsum(0.5 * (sfh[1:] + sfh[:-1]) * np.diff(stellar_age)))
+    )
+    mass_at_edges = np.interp(np.clip(10.0**edges, 0.0, age), stellar_age, cumulative)
+    numerical = np.diff(mass_at_edges)
+    numerical /= numerical.sum()
+    np.testing.assert_allclose(analytic, numerical, rtol=2e-3, atol=3e-7)
+
+    gradient = jax.grad(
+        lambda fraction: jnp.sum(
+            _analytic_delayed_burst_age_weights(
+                age, tau, fraction, burst_age, burst_tau, lg_age
+            )
+            * 10.0**lg_age
+        )
+    )(burst_fraction)
+    assert np.isfinite(float(gradient))
+
+
+@pytest.mark.parametrize(
+    "updates",
+    [
+        {},
+        {"u_lg_qt": -2.0, "u_qlglgdt": -2.0},
+        {"u_lg_qt": 2.0, "u_qlglgdt": 2.0, "u_lg_drop": 2.0},
+        {"u_lgmcrit": -2.0, "u_lgy_at_mcrit": 2.0},
+    ],
+)
+def test_diffstar_ssp_bin_quadrature_matches_64_node_reference(updates):
+    u_params = DEFAULT_DIFFSTAR_U_PARAMS._replace(**updates)
+    bounded = get_bounded_diffstar_params(u_params)
+    lg_age = jnp.linspace(-3.5, jnp.log10(13.5), 107)
+    weights16, _ = _diffstar_ssp_age_weights(bounded, lg_age, 13.7)
+    nodes64, quad64 = np.polynomial.legendre.leggauss(64)
+    weights64, _ = _diffstar_ssp_age_weights(
+        bounded, lg_age, 13.7, quad_nodes=nodes64, quad_weights=quad64
+    )
+    np.testing.assert_allclose(np.asarray(weights16).sum(), 1.0, rtol=1e-12)
+    assert float(jnp.sum(jnp.abs(weights16 - weights64))) < 2.0e-4
+
+    gradient = jax.grad(
+        lambda lgmcrit: jnp.sum(
+            _diffstar_ssp_age_weights(
+                get_bounded_diffstar_params(u_params._replace(u_lgmcrit=lgmcrit)),
+                lg_age,
+                13.7,
+            )[0]
+            * 10.0**lg_age
+        )
+    )(u_params.u_lgmcrit)
+    assert np.isfinite(float(gradient))
 
 
 def test_delayed_burst_host_exposes_burst_parameters(monkeypatch):
