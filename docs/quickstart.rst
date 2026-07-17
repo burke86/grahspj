@@ -223,7 +223,7 @@ low-dimensional and usually the most stable choice for broadband SED fitting.
        fit_host=True,
        host_sfh_model="delayed",
        dsps_ssp_fn="tempdata.h5",
-       ssp_imf="chabrier_2003",
+       ssp_imf="kroupa_2001",
        ssp_metallicity_coordinate="absolute_log10_z",
        ssp_solar_metallicity=0.019,
        rest_wave_min=100.0,
@@ -234,7 +234,8 @@ low-dimensional and usually the most stable choice for broadband SED fitting.
 ``ssp_imf`` and ``ssp_metallicity_coordinate`` declare the provenance of the
 loaded SSP library. They do not regenerate it. The IMF declaration also selects
 the matching DSPS surviving-mass calibration, so it must describe the SSP file
-accurately. Supported IMFs are ``chabrier_2003``, ``salpeter_1955``,
+accurately. The public DSPS FSPS-v3.2 artifact used above was generated with the
+FSPS default Kroupa (2001) IMF. Supported IMFs are ``chabrier_2003``, ``salpeter_1955``,
 ``kroupa_2001``, and ``van_dokkum_2008``. Supported metallicity coordinates are
 ``absolute_log10_z`` and ``log10_z_over_zsun``. Custom IMFs require an SSP format
 that supplies its own surviving-mass fractions and are not silently approximated.

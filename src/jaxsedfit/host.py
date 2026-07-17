@@ -18,7 +18,7 @@ def build_host_basis_jax(
     rest_wave: np.ndarray,
     *,
     dsps_ssp_fn: str = "tempdata.h5",
-    ssp_imf: str = "chabrier_2003",
+    ssp_imf: str = "kroupa_2001",
     t_obs_gyr: float,
     sfh_n_steps: int = 64,
     sfh_t_min_gyr: float = 0.01,

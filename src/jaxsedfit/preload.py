@@ -1122,7 +1122,7 @@ def _surviving_fraction_for_imf(lg_age_gyr: np.ndarray, ssp_imf: str) -> np.ndar
     return np.asarray(surviving_mstar(np.asarray(lg_age_gyr, dtype=float) + 9.0, **params), dtype=float)
 
 
-def _build_host_basis(rest_wave: np.ndarray, ssp_data: SSPData, ssp_imf: str = "chabrier_2003") -> HostBasis:
+def _build_host_basis(rest_wave: np.ndarray, ssp_data: SSPData, ssp_imf: str = "kroupa_2001") -> HostBasis:
     """Precompute the SSP basis on the model rest-wave grid.
 
     Parameters

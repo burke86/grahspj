@@ -925,9 +925,7 @@ def _mass_metallicity_relation_logprior(
         redshift value.
     """
     cfg = prior_config.get("mass_metallicity_relation", None)
-    if cfg is None:
-        cfg = {}
-    if not isinstance(cfg, dict) or cfg.get("enabled", True) is False:
+    if not isinstance(cfg, dict) or cfg.get("enabled", False) is not True:
         return jnp.asarray(0.0, dtype=jnp.float64)
 
     solar_offset = (
