@@ -39,8 +39,9 @@ def stellar_gold():
 
 
 def _exact_filter_mjy(obs_wave, obs_flambda, loaded_filter):
-    wave = loaded_filter.wave
-    trans = loaded_filter.native_transmission
+    in_band = (obs_wave >= loaded_filter.wave[0]) & (obs_wave <= loaded_filter.wave[-1])
+    wave = np.unique(np.concatenate((obs_wave[in_band], loaded_filter.wave)))
+    trans = np.interp(wave, loaded_filter.wave, loaded_filter.native_transmission)
     values = np.interp(wave, obs_wave, obs_flambda, left=0.0, right=0.0)
     numerator = np.trapezoid(values * trans, x=wave)
     denominator = np.trapezoid(trans / wave**2, x=wave)
@@ -149,14 +150,12 @@ def _chimera_curves():
     return [custom.get(name, None) or load_filter_curve(name) for name in CHIMERA_FILTER_NAMES]
 
 
-def test_all_chimera_filters_match_exact_cigale_fnu_integral_through_z_half(stellar_gold):
-    """Sweep the real nine-band filter set densely through the suspicious z=0.5 region."""
+def test_all_chimera_filters_match_exact_cigale_fnu_integral_through_outlier_redshift(stellar_gold):
+    """Sweep the real nine-band filter set densely through the suspicious z=0.4 region."""
     curves = _chimera_curves()
-    for redshift in np.concatenate((np.linspace(0.0, 1.0, 11), np.linspace(0.47, 0.53, 13))):
+    for redshift in np.concatenate((np.linspace(0.0, 1.0, 11), np.linspace(0.37, 0.43, 13))):
         actual, expected = _project_one_ssp(stellar_gold, float(redshift), curves)
-        # The production projector caps direct quadrature grids at 512 points;
-        # the resulting error for the real filters remains below 0.12%.
-        np.testing.assert_allclose(actual, expected, rtol=1.5e-3, atol=1e-30)
+        np.testing.assert_allclose(actual, expected, rtol=2.0e-4, atol=1e-30)
 
 
 def _write_chimera_table(path, row, *, truth):
