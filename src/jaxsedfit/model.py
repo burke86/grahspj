@@ -1447,10 +1447,10 @@ def _redshift_scalar_to_obs(rest_wave, rest_value, obs_wave, redshift):
 def _project_filters(obs_flux, packed_filters):
     """Project an observed-frame spectrum through prepared filters.
 
-    The final f_lambda-to-mJy conversion intentionally follows the
-    GRAHSP/pcigale convention of using each filter's effective wavelength
-    squared. This is not an exact pivot-wavelength conversion, so very broad
-    filters can retain small convention-level systematics.
+    The final f_lambda-to-mJy conversion uses each filter's pivot wavelength
+    squared. Together with the energy-weighted transmission prepared by the
+    filter loader, this is algebraically identical to CIGALE's direct F_nu
+    integral.
 
     Parameters
     ----------

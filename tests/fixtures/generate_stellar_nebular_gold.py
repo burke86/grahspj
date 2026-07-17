@@ -58,6 +58,8 @@ def main() -> None:
         age_indices = np.asarray([np.argmin(np.abs(ages - age)) for age in target_ages])
         ly_mask = wave < 912.0
         fsps_full_lnu = np.asarray(handle["ssp_flux"])[metal_index, age_indices]
+        delayed_age_indices = np.unique(np.linspace(0, ages.size - 1, 25).round().astype(int))
+        delayed_full_lnu = np.asarray(handle["ssp_flux"])[metal_index, delayed_age_indices]
         fsps_wave = wave[ly_mask]
         fsps_lnu = fsps_full_lnu[:, ly_mask]
 
@@ -79,6 +81,8 @@ def main() -> None:
         fsps_lnu_lsun_per_hz=fsps_lnu,
         fsps_full_wave_a=wave,
         fsps_full_lnu_lsun_per_hz=fsps_full_lnu,
+        delayed_fsps_lg_age_gyr=ages[delayed_age_indices],
+        delayed_fsps_full_lnu_lsun_per_hz=delayed_full_lnu,
         fsps_lgmet=metallicities[metal_index],
         fsps_lg_age_gyr=ages[age_indices],
         fsps_n_ly_per_msun=n_ly,

@@ -62,7 +62,7 @@ def resolve_filter_name(filter_name: str) -> str:
 
 
 def filter_effective_wavelength(wave: Sequence[float], transmission: Sequence[float]) -> float:
-    """Compute the effective wavelength convention used by jaxsedfit filters.
+    """Compute the filter pivot wavelength used for exact f_lambda-to-f_nu conversion.
 
     Parameters
     ----------
@@ -73,10 +73,11 @@ def filter_effective_wavelength(wave: Sequence[float], transmission: Sequence[fl
     """
     wave_arr = np.asarray(wave, dtype=float)
     trans_arr = np.asarray(transmission, dtype=float)
-    denom = float(np.trapezoid(trans_arr, wave_arr))
-    if denom <= 0.0:
+    numerator = float(np.trapezoid(trans_arr, wave_arr))
+    denominator = float(np.trapezoid(trans_arr / np.maximum(wave_arr, 1.0e-30) ** 2, wave_arr))
+    if numerator <= 0.0 or denominator <= 0.0:
         return float(np.nanmean(wave_arr))
-    return float(np.trapezoid(wave_arr * trans_arr, wave_arr) / denom)
+    return float(np.sqrt(numerator / denominator))
 
 
 def normalize_filter_curve(curve: FilterCurve, name: str | None = None) -> FilterCurve:
