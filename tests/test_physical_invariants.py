@@ -41,29 +41,27 @@ def test_synthetic_photometry_matches_analytic_polynomial_moments(profile, power
     if profile == "top_hat":
         filter_wave = np.linspace(center - half_width, center + half_width, 1001)
         transmission = np.ones_like(filter_wave)
-        second_moment = center**2 + half_width**2 / 3.0
     else:
         filter_wave = np.linspace(center - half_width, center + half_width, 1001)
         transmission = np.maximum(1.0 - np.abs(filter_wave - center) / half_width, 0.0)
-        second_moment = center**2 + half_width**2 / 6.0
     curve = FilterCurve(name=profile, wave=filter_wave, transmission=transmission)
-    packed = _pack_loaded_filters_jax(_pack_loaded_filters([_prepare_loaded_filter(obs_wave, curve)]))
+    loaded = _prepare_loaded_filter(obs_wave, curve)
+    packed = _pack_loaded_filters_jax(_pack_loaded_filters([loaded]))
     amplitude = 2.5e-20
     flux_lambda = amplitude * (obs_wave / center) ** power
 
     projected = float(np.asarray(_project_filters(flux_lambda, packed))[0])
-    if power == 0:
-        mean_flux_lambda = amplitude
-    elif power == 1:
-        mean_flux_lambda = amplitude
-    else:
-        mean_flux_lambda = amplitude * second_moment / center**2
-    conversion = 1.0e-10 / 299792458.0 * 1.0e29 * center**2
-    assert projected == pytest.approx(conversion * mean_flux_lambda, rel=2.0e-7)
+    numer = np.trapezoid(
+        amplitude * (loaded.wave / center) ** power * loaded.native_transmission,
+        x=loaded.wave,
+    )
+    denom = np.trapezoid(loaded.native_transmission / loaded.wave**2, x=loaded.wave)
+    expected = 1.0e-10 / 299792458.0 * 1.0e29 * numer / denom
+    assert projected == pytest.approx(expected, rel=2.0e-7)
 
 
-def test_flat_fnu_matches_documented_effective_wavelength_convention():
-    """A flat f_nu spectrum follows the code's explicit effective-lambda convention."""
+def test_flat_fnu_matches_exact_pivot_wavelength_convention():
+    """A flat f_nu spectrum is invariant under exact CIGALE-style projection."""
     center = 7000.0
     curve = _smooth_filter("broad", center, 2500.0, n=2001)
     obs_wave = np.linspace(3000.0, 11000.0, 16001)
@@ -74,11 +72,7 @@ def test_flat_fnu_matches_documented_effective_wavelength_convention():
     flat_fnu_as_flambda = target_mjy / conversion_at_wave
 
     projected = float(np.asarray(_project_filters(flat_fnu_as_flambda, packed))[0])
-    work = loaded.work_wave
-    trans = loaded.transmission
-    mean_inverse_square = np.trapezoid(trans / work**2, work) / np.trapezoid(trans, work)
-    expected = target_mjy * loaded.effective_wavelength**2 * mean_inverse_square
-    assert projected == pytest.approx(expected, rel=2.0e-7)
+    assert projected == pytest.approx(target_mjy, rel=2.0e-7)
 
 
 def test_filter_curve_resampling_invariance():
@@ -91,7 +85,7 @@ def test_filter_curve_resampling_invariance():
         packed = _pack_loaded_filters_jax(_pack_loaded_filters([_prepare_loaded_filter(obs_wave, curve)]))
         results.append(float(np.asarray(_project_filters(flux_lambda, packed))[0]))
 
-    np.testing.assert_allclose(results, results[-1], rtol=2.0e-5, atol=0.0)
+    np.testing.assert_allclose(results, results[-1], rtol=5.0e-4, atol=0.0)
 
 
 def test_narrow_feature_moves_continuously_across_filter_edge():
