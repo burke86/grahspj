@@ -1,3 +1,5 @@
+import jax
+import jax.numpy as jnp
 import numpy as np
 import numpyro.distributions as dist
 import pytest
@@ -21,8 +23,10 @@ from jaxsedfit.config import (
 )
 from jaxsedfit.core import JAXSEDFit
 from jaxsedfit.model import (
+    _analytic_delayed_ssp_weights,
     _cigale_delayed_burst_sfh_shape,
     _cigale_delayed_sfh_shape,
+    _delayed_sfh_cumulative_mass,
     _default_gal_lgmet_loc,
     _mass_metallicity_relation_logprior,
     _luminosity_distance_m_jax,
@@ -155,6 +159,35 @@ def test_delayed_sfh_matches_cigale_v2025_1_static_reference():
     np.testing.assert_allclose(normalized_sfr[sample_indices], expected, rtol=2.0e-12, atol=0.0)
     assert np.sum(normalized_sfr) * 1.0e6 == pytest.approx(1.0, rel=2.0e-12)
     assert float(_cigale_delayed_sfh_shape(5.001, 2.0, 5.0)) == 0.0
+
+
+def test_delayed_sfh_analytic_integral_matches_dense_quadrature():
+    elapsed = jnp.linspace(0.0, 3.7, 200_001)
+    numerical = jnp.trapezoid(_cigale_delayed_sfh_shape(elapsed, 0.8, 3.7), elapsed)
+    analytic = _delayed_sfh_cumulative_mass(3.7, 0.8)
+    np.testing.assert_allclose(analytic, numerical, rtol=1e-9, atol=1e-11)
+
+
+def test_analytic_delayed_ssp_weights_are_normalized_and_differentiable():
+    lg_age = jnp.linspace(-4.0, 1.1, 107)
+    lgmet = jnp.linspace(-2.0, -1.0, 12)
+
+    def mean_stellar_age(age, tau):
+        weights, met_weights, age_weights = _analytic_delayed_ssp_weights(
+            age, tau, -1.7, 0.1, lgmet, lg_age
+        )
+        assert weights.shape == (12, 107)
+        return (
+            jnp.sum(age_weights * 10.0**lg_age),
+            (jnp.sum(weights), jnp.sum(met_weights), jnp.sum(age_weights)),
+        )
+
+    (value, sums), gradients = jax.value_and_grad(mean_stellar_age, argnums=(0, 1), has_aux=True)(
+        3.7, 0.8
+    )
+    np.testing.assert_allclose(np.asarray(sums), 1.0, rtol=1e-12)
+    assert np.isfinite(float(value))
+    assert np.all(np.isfinite(np.asarray(gradients)))
 
 
 def test_delayed_burst_sfh_matches_cigale_formed_mass_fraction():

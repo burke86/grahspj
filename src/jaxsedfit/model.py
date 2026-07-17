@@ -27,6 +27,7 @@ from diffmah.diffmah_kernels import DEFAULT_MAH_PARAMS
 from diffstar import DEFAULT_DIFFSTAR_U_PARAMS, DiffstarUParams, calc_sfh_singlegal, get_bounded_diffstar_params
 from diffstar.defaults import FB as DIFFSTAR_FB
 from diffstar.defaults import LGT0 as DIFFSTAR_LGT0
+from dsps.sed.metallicity_weights import calc_lgmet_weights_from_lognormal_mdf
 from dsps.sed.ssp_weights import calc_ssp_weights_sfh_table_lognormal_mdf
 import numpyro
 import numpyro.distributions as dist
@@ -694,6 +695,53 @@ def _cigale_delayed_sfh_shape(elapsed_gyr, tau_gyr, age_gyr):
     age_gyr = jnp.asarray(age_gyr, dtype=jnp.float64)
     shape = elapsed_gyr * jnp.exp(-elapsed_gyr / tau_gyr) / (tau_gyr * tau_gyr)
     return jnp.where((elapsed_gyr > 0.0) & (elapsed_gyr <= age_gyr), shape, 0.0)
+
+
+def _ssp_log_age_bin_edges(ssp_lg_age_gyr):
+    """Return logarithmic bin edges centered on the tabulated SSP ages."""
+    lg_age = jnp.asarray(ssp_lg_age_gyr, dtype=jnp.float64)
+    interior = 0.5 * (lg_age[:-1] + lg_age[1:])
+    first = lg_age[0] - 0.5 * (lg_age[1] - lg_age[0])
+    last = lg_age[-1] + 0.5 * (lg_age[-1] - lg_age[-2])
+    return jnp.concatenate((first[None], interior, last[None]))
+
+
+def _delayed_sfh_cumulative_mass(elapsed_gyr, tau_gyr):
+    """Integral from zero to ``elapsed_gyr`` of the delayed-tau SFH shape."""
+    elapsed_gyr = jnp.maximum(jnp.asarray(elapsed_gyr, dtype=jnp.float64), 0.0)
+    tau_gyr = jnp.maximum(jnp.asarray(tau_gyr, dtype=jnp.float64), 1.0e-12)
+    x = elapsed_gyr / tau_gyr
+    return -jnp.expm1(-x) - x * jnp.exp(-x)
+
+
+def _analytic_delayed_ssp_weights(
+    age_gyr,
+    tau_gyr,
+    gal_lgmet,
+    gal_lgmet_scatter,
+    ssp_lgmet,
+    ssp_lg_age_gyr,
+):
+    """Exact delayed-SFH mass weights in the native SSP stellar-age bins.
+
+    The delayed SFH has an analytic antiderivative, so its mass contribution
+    to each SSP age bin does not require an auxiliary cosmic-time grid.
+    """
+    age_gyr = jnp.maximum(jnp.asarray(age_gyr, dtype=jnp.float64), 0.0)
+    age_edges_gyr = 10.0 ** _ssp_log_age_bin_edges(ssp_lg_age_gyr)
+    # Stellar age increases in the opposite direction to formation time.
+    elapsed_lo = jnp.clip(age_gyr - age_edges_gyr[1:], 0.0, age_gyr)
+    elapsed_hi = jnp.clip(age_gyr - age_edges_gyr[:-1], 0.0, age_gyr)
+    bin_mass = _delayed_sfh_cumulative_mass(elapsed_hi, tau_gyr) - _delayed_sfh_cumulative_mass(
+        elapsed_lo, tau_gyr
+    )
+    age_weights = bin_mass / jnp.maximum(jnp.sum(bin_mass), 1.0e-30)
+    lgmet_weights = calc_lgmet_weights_from_lognormal_mdf(
+        gal_lgmet, gal_lgmet_scatter, ssp_lgmet
+    )
+    weights = lgmet_weights[:, None] * age_weights[None, :]
+    weights = weights / jnp.maximum(jnp.sum(weights), 1.0e-30)
+    return weights, lgmet_weights, age_weights
 
 
 def _cigale_delayed_burst_sfh_shape(
@@ -2090,6 +2138,12 @@ def _build_delayed_host(
         burst_tau_gyr = jnp.asarray(0.0, dtype=jnp.float64)
         base_sfh = _cigale_delayed_sfh_shape(sfh_age_gyr, tau_gyr, age_gyr)
     base_smh = _cumulative_trapezoid(base_sfh, gal_t_table) * 1.0e9
+    if not use_burst:
+        # Keep the reported cumulative mass history consistent with the exact
+        # integral used for the SSP weights and formed-mass normalization.
+        base_smh = _delayed_sfh_cumulative_mass(
+            jnp.clip(sfh_age_gyr, 0.0, age_gyr), tau_gyr
+        ) * 1.0e9
 
     gal_lgmet, gal_lgmet_scatter = _host_metallicity_parameters(
         context,
@@ -2106,20 +2160,35 @@ def _build_delayed_host(
         solar_metallicity=cfg.ssp_solar_metallicity,
     )
     numpyro.factor("mass_metallicity_relation_prior", mmr_logprior)
-    host_weights_info = calc_ssp_weights_sfh_table_lognormal_mdf(
-        gal_t_table,
-        base_sfh,
-        gal_lgmet,
-        gal_lgmet_scatter,
-        ssp_lgmet,
-        ssp_lg_age_gyr,
-        t_obs_gyr,
-    )
-    host_weights = host_weights_info.weights
-    surviving_mass_fraction = jnp.clip(jnp.sum(host_weights_info.age_weights * surviving_frac_by_age), 1e-12, 1.0)
+    if use_burst:
+        host_weights_info = calc_ssp_weights_sfh_table_lognormal_mdf(
+            gal_t_table,
+            base_sfh,
+            gal_lgmet,
+            gal_lgmet_scatter,
+            ssp_lgmet,
+            ssp_lg_age_gyr,
+            t_obs_gyr,
+        )
+        host_weights = host_weights_info.weights
+        lgmet_weights = host_weights_info.lgmet_weights
+        age_weights = host_weights_info.age_weights
+        base_formed_mass = jnp.clip(base_smh[-1], 1e-30, 1.0e40)
+    else:
+        host_weights, lgmet_weights, age_weights = _analytic_delayed_ssp_weights(
+            age_gyr,
+            tau_gyr,
+            gal_lgmet,
+            gal_lgmet_scatter,
+            ssp_lgmet,
+            ssp_lg_age_gyr,
+        )
+        base_formed_mass = jnp.maximum(
+            _delayed_sfh_cumulative_mass(age_gyr, tau_gyr) * 1.0e9, 1.0e-30
+        )
+    surviving_mass_fraction = jnp.clip(jnp.sum(age_weights * surviving_frac_by_age), 1e-12, 1.0)
     target_surviving_mass = 10.0**log_stellar_mass
     target_formed_mass = target_surviving_mass / surviving_mass_fraction
-    base_formed_mass = jnp.clip(base_smh[-1], 1e-30, 1.0e40)
     sfh_scale = target_formed_mass / base_formed_mass
     host_rest = target_formed_mass * jnp.tensordot(
         host_weights,
@@ -2135,8 +2204,8 @@ def _build_delayed_host(
         "gal_lgmet": gal_lgmet,
         "gal_lgmet_scatter": gal_lgmet_scatter,
         "mass_metallicity_relation_logprior": mmr_logprior,
-        "host_age_weights": host_weights_info.age_weights,
-        "host_lgmet_weights": host_weights_info.lgmet_weights,
+        "host_age_weights": age_weights,
+        "host_lgmet_weights": lgmet_weights,
         "host_ssp_weights": host_weights,
         "ssp_lg_age_gyr": ssp_lg_age_gyr,
         "ssp_lgmet": ssp_lgmet,
@@ -2150,8 +2219,8 @@ def _build_delayed_host(
         return state
     state.update(
         {
-            "host_age_weights": host_weights_info.age_weights,
-            "host_lgmet_weights": host_weights_info.lgmet_weights,
+            "host_age_weights": age_weights,
+            "host_lgmet_weights": lgmet_weights,
             "host_ssp_weights": host_weights,
             "gal_sfr_table": base_sfh * sfh_scale,
             "gal_smh_table": base_smh * sfh_scale,
