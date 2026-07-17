@@ -168,7 +168,9 @@ class GalaxyConfig:
     fit_host_kinematics: bool = False
     host_sfh_model: str = "delayed"
     dsps_ssp_fn: str = "tempdata.h5"
-    ssp_imf: str = "chabrier_2003"
+    # The public DSPS FSPS-v3.2 SSP artifact recommended by jaxsedfit is
+    # generated with the FSPS default IMF (imf_type=2; Kroupa 2001).
+    ssp_imf: str = "kroupa_2001"
     ssp_metallicity_coordinate: str = "absolute_log10_z"
     ssp_solar_metallicity: float = 0.019
     # GRAHSP-like default: use one solar-metallicity SSP and the same
@@ -568,8 +570,7 @@ class RedshiftPriorConfig:
 @dataclass
 class MassMetallicityPriorConfig:
     """Soft stellar mass-metallicity prior for host metallicity."""
-    configured: bool = False
-    enabled: bool = True
+    enabled: bool = False
     pivot_mass: float = 10.0
     pivot_logzsol: float = -0.15
     pivot_lgmet: float | None = None
@@ -584,8 +585,6 @@ class MassMetallicityPriorConfig:
 
     def to_mapping(self) -> dict[str, Any]:
         """Convert the mass-metallicity relation prior into model settings."""
-        if not self.configured:
-            return {}
         out: dict[str, Any] = {
             "enabled": bool(self.enabled),
             "pivot_mass": float(self.pivot_mass),

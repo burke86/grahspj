@@ -336,7 +336,7 @@ def test_prior_config_object_exposes_flat_mapping():
     prior = PriorConfig(
         redshift=RedshiftPriorConfig(z_grid=[0.1, 0.2, 0.3], pdf=[0.2, 0.6, 0.2]),
         stellar_mass=dist.Uniform(8.0, 12.0),
-        mass_metallicity=MassMetallicityPriorConfig(configured=True, enabled=False),
+        mass_metallicity=MassMetallicityPriorConfig(enabled=False),
     )
     prior.agn.log_amp = dist.Normal(44.0, 1.0)
     prior.agn.log_broad_line_width_kms = dist.TruncatedNormal(
@@ -604,6 +604,10 @@ def test_removed_fsps_generation_fields_are_not_galaxy_runtime_options(field):
 @pytest.mark.parametrize("ssp_imf", ["chabrier_2003", "salpeter_1955", "kroupa_2001", "van_dokkum_2008"])
 def test_galaxy_accepts_supported_ssp_imf_provenance(ssp_imf):
     GalaxyConfig(ssp_imf=ssp_imf).validate()
+
+
+def test_default_ssp_imf_matches_public_dsps_fsps_artifact():
+    assert GalaxyConfig().ssp_imf == "kroupa_2001"
 
 
 def test_galaxy_rejects_ambiguous_ssp_provenance():
