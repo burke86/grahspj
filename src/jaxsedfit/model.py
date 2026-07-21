@@ -567,12 +567,10 @@ def _resolve_tied_metallicity(context: ModelContext, prior_config: dict[str, Any
         gal_lgmet = _sample_bounded_normal(
             prior_config,
             "gal_lgmet",
-            float(
-                _absolute_z_to_gal_lgmet(
-                    galaxy_cfg.stellar_metallicity,
-                    metallicity_coordinate=galaxy_cfg.ssp_metallicity_coordinate,
-                    solar_metallicity=galaxy_cfg.ssp_solar_metallicity,
-                )
+            _absolute_z_to_gal_lgmet(
+                galaxy_cfg.stellar_metallicity,
+                metallicity_coordinate=galaxy_cfg.ssp_metallicity_coordinate,
+                solar_metallicity=galaxy_cfg.ssp_solar_metallicity,
             ),
             0.5,
             jnp.min(ssp_lgmet),
@@ -1963,12 +1961,10 @@ def _host_metallicity_parameters(
         gal_lgmet = _sample_bounded_normal(
             prior_config,
             "gal_lgmet",
-            float(
-                _absolute_z_to_gal_lgmet(
-                    galaxy_cfg.stellar_metallicity,
-                    metallicity_coordinate=galaxy_cfg.ssp_metallicity_coordinate,
-                    solar_metallicity=galaxy_cfg.ssp_solar_metallicity,
-                )
+            _absolute_z_to_gal_lgmet(
+                galaxy_cfg.stellar_metallicity,
+                metallicity_coordinate=galaxy_cfg.ssp_metallicity_coordinate,
+                solar_metallicity=galaxy_cfg.ssp_solar_metallicity,
             ),
             0.5,
             jnp.min(ssp_lgmet),
