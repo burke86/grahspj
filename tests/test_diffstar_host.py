@@ -33,6 +33,7 @@ from jaxsedfit.model import (
     _diffstar_ssp_age_weights,
     _mass_metallicity_relation_logprior,
     _luminosity_distance_m_jax,
+    _ssp_log_age_bin_edges,
     grahsp_photometric_model,
 )
 from jaxsedfit.preload import build_model_context
@@ -197,8 +198,8 @@ def test_analytic_delayed_ssp_weights_are_normalized_and_differentiable():
     assert np.all(np.isfinite(np.asarray(gradients)))
 
 
-def test_delayed_burst_sfh_matches_cigale_formed_mass_fraction():
-    """The optional exponential component has CIGALE's requested mass fraction."""
+def test_smooth_delayed_burst_sfh_preserves_requested_formed_mass_fraction():
+    """The smooth exponential component preserves CIGALE's mass fraction."""
     elapsed_gyr = np.linspace(0.0, 5.0, 5001)
     f_burst = 0.08
     main = np.asarray(_cigale_delayed_sfh_shape(elapsed_gyr, 2.0, 5.0))
@@ -216,7 +217,8 @@ def test_delayed_burst_sfh_matches_cigale_formed_mass_fraction():
     recovered_fraction = np.trapezoid(burst, elapsed_gyr) / np.trapezoid(combined, elapsed_gyr)
 
     assert recovered_fraction == pytest.approx(f_burst, rel=2.0e-12)
-    assert np.allclose(burst[elapsed_gyr < 4.8], 0.0)
+    assert np.all(burst >= 0.0)
+    assert np.max(burst[elapsed_gyr < 4.78]) < 5.0e-5 * np.max(burst)
 
 
 def test_analytic_delayed_burst_weights_match_dense_bin_integrals():
@@ -262,6 +264,30 @@ def test_analytic_delayed_burst_weights_match_dense_bin_integrals():
         )
     )(burst_fraction)
     assert np.isfinite(float(gradient))
+
+
+def test_delayed_burst_age_gradient_is_smooth_across_ssp_bin_edge():
+    lg_age = jnp.linspace(-3.0, jnp.log10(5.5), 80)
+    stellar_ages = 10.0**lg_age
+    edge_index = int(np.argmin(np.abs(np.asarray(stellar_ages) - 0.2)))
+    edges = 10.0 ** _ssp_log_age_bin_edges(lg_age)
+    burst_age_at_edge = edges[edge_index]
+
+    def mean_stellar_age(burst_age):
+        weights = _analytic_delayed_burst_age_weights(
+            5.0, 2.0, 0.08, burst_age, 0.05, lg_age
+        )
+        return jnp.sum(weights * stellar_ages)
+
+    gradient = jax.grad(mean_stellar_age)
+    epsilon = 1.0e-7
+    left = gradient(burst_age_at_edge - epsilon)
+    center = gradient(burst_age_at_edge)
+    right = gradient(burst_age_at_edge + epsilon)
+    curvature = jax.grad(gradient)(burst_age_at_edge)
+
+    assert np.all(np.isfinite(np.asarray([left, center, right, curvature])))
+    np.testing.assert_allclose(left, right, rtol=2.0e-3, atol=1.0e-8)
 
 
 @pytest.mark.parametrize(

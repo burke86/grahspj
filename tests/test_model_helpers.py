@@ -45,6 +45,7 @@ from jaxsedfit.model import (
     _attenuation_curve,
     _apply_biattenuation,
     _apply_extended_capture,
+    _agn_variability_nev,
     _balmer_continuum_jax,
     _chi2_upper_limit,
     _default_log_agn_amp_prior,
@@ -91,6 +92,25 @@ from jaxsedfit.preload import (
     _mw_pixel_attenuation_factor,
     _load_vendored_dale2014_templates,
 )
+
+
+def test_agn_variability_cap_is_smooth_and_positive():
+    max_nev = 0.1
+    # Put the empirical relation at the configured cap, where a hard minimum
+    # previously introduced a derivative discontinuity.
+    crossing_lbol_w = 10.0 ** ((-1.43 - np.log10(max_nev)) / 0.74 + 45.0) / 1.0e7
+
+    def capped_nev(log_lbol_w):
+        return _agn_variability_nev(jnp.exp(log_lbol_w), max_nev)
+
+    log_crossing = jnp.log(crossing_lbol_w)
+    value = capped_nev(log_crossing)
+    gradient = jax.grad(capped_nev)(log_crossing)
+    curvature = jax.grad(jax.grad(capped_nev))(log_crossing)
+    assert float(value) > 0.0
+    assert float(value) <= max_nev
+    assert np.isfinite(float(gradient))
+    assert np.isfinite(float(curvature))
 
 
 def test_likelihood_defaults_include_local_line_photometry():

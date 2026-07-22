@@ -52,6 +52,7 @@ DEFAULT_NARROW_LINES_STRENGTH = 1.0
 DEFAULT_FEII_STRENGTH = 5.0
 DEFAULT_BALMER_CONTINUUM_STRENGTH = 1.0e-3
 _SSP_BIN_QUAD_NODES, _SSP_BIN_QUAD_WEIGHTS = np.polynomial.legendre.leggauss(16)
+BURST_RISE_GYR = 0.002
 GRAHSP_BIATTENUATION_BREAK_A = 11000.0
 GRAHSP_EBV_MIN = 0.01
 GRAHSP_EBV_MAX = 10.0
@@ -722,7 +723,12 @@ def _analytic_delayed_burst_age_weights(
     burst_tau_gyr,
     ssp_lg_age_gyr,
 ):
-    """Exact SSP age weights for CIGALE's delayed plus exponential burst SFH."""
+    """Smooth SSP age weights for a delayed SFH plus exponential burst.
+
+    The recent burst has a short logistic rise rather than a discontinuous
+    Heaviside onset. Its analytic smooth cumulative mass keeps derivatives
+    continuous as the burst onset moves across SSP bin edges.
+    """
     age_gyr = jnp.maximum(jnp.asarray(age_gyr, dtype=jnp.float64), 0.0)
     burst_fraction = jnp.clip(
         jnp.asarray(burst_fraction, dtype=jnp.float64), 0.0, 1.0 - 1.0e-8
@@ -740,15 +746,13 @@ def _analytic_delayed_burst_age_weights(
     main_bin_mass = _delayed_sfh_cumulative_mass(
         elapsed_hi, tau_gyr
     ) - _delayed_sfh_cumulative_mass(elapsed_lo, tau_gyr)
-    burst_start = age_gyr - burst_age_gyr
-    burst_lo = jnp.clip(elapsed_lo, burst_start, age_gyr)
-    burst_hi = jnp.clip(elapsed_hi, burst_start, age_gyr)
-    burst_bin_mass = burst_tau_gyr * (
-        jnp.exp(-(burst_lo - burst_start) / burst_tau_gyr)
-        - jnp.exp(-(burst_hi - burst_start) / burst_tau_gyr)
+    burst_bin_mass = _exponential_burst_cumulative_mass(
+        elapsed_hi, age_gyr, burst_age_gyr, burst_tau_gyr
+    ) - _exponential_burst_cumulative_mass(
+        elapsed_lo, age_gyr, burst_age_gyr, burst_tau_gyr
     )
     main_total = _delayed_sfh_cumulative_mass(age_gyr, tau_gyr)
-    burst_total = burst_tau_gyr * (-jnp.expm1(-burst_age_gyr / burst_tau_gyr))
+    burst_total = jnp.sum(burst_bin_mass)
     burst_scale = (
         burst_fraction
         / jnp.maximum(1.0 - burst_fraction, 1.0e-8)
@@ -760,10 +764,37 @@ def _analytic_delayed_burst_age_weights(
 
 
 def _exponential_burst_cumulative_mass(elapsed_gyr, age_gyr, burst_age_gyr, burst_tau_gyr):
-    """Integral of the unit-amplitude recent exponential burst from its onset."""
+    """Smooth cumulative mass of the unit-amplitude exponential burst."""
     burst_start = age_gyr - burst_age_gyr
-    duration = jnp.clip(elapsed_gyr - burst_start, 0.0, burst_age_gyr)
+    rise_gyr = jnp.asarray(BURST_RISE_GYR, dtype=jnp.float64)
+    duration = rise_gyr * (
+        jax.nn.softplus((elapsed_gyr - burst_start) / rise_gyr)
+        - jax.nn.softplus(-burst_start / rise_gyr)
+    )
     return burst_tau_gyr * (-jnp.expm1(-duration / burst_tau_gyr))
+
+
+def _smooth_exponential_burst_shape(
+    elapsed_gyr,
+    age_gyr,
+    burst_age_gyr,
+    burst_tau_gyr,
+    rise_gyr=BURST_RISE_GYR,
+):
+    """Return an exponential burst with a smooth, positive logistic onset."""
+    elapsed_gyr = jnp.asarray(elapsed_gyr, dtype=jnp.float64)
+    burst_start = jnp.asarray(age_gyr, dtype=jnp.float64) - jnp.asarray(
+        burst_age_gyr, dtype=jnp.float64
+    )
+    burst_tau_gyr = jnp.maximum(jnp.asarray(burst_tau_gyr, dtype=jnp.float64), 1.0e-12)
+    rise_gyr = jnp.asarray(rise_gyr, dtype=jnp.float64)
+    since_start = elapsed_gyr - burst_start
+    smooth_duration = rise_gyr * (
+        jax.nn.softplus(since_start / rise_gyr)
+        - jax.nn.softplus(-burst_start / rise_gyr)
+    )
+    log_shape = jax.nn.log_sigmoid(since_start / rise_gyr) - smooth_duration / burst_tau_gyr
+    return jnp.exp(log_shape)
 
 
 def _diffstar_ssp_age_weights(
@@ -823,11 +854,11 @@ def _cigale_delayed_burst_sfh_shape(
     burst_tau_gyr = jnp.maximum(jnp.asarray(burst_tau_gyr, dtype=jnp.float64), 1.0e-12)
 
     main = _cigale_delayed_sfh_shape(elapsed_gyr, tau_gyr, age_gyr)
-    burst_elapsed = elapsed_gyr - (age_gyr - burst_age_gyr)
-    burst = jnp.where(
-        (burst_elapsed >= 0.0) & (burst_elapsed <= burst_age_gyr),
-        jnp.exp(-burst_elapsed / burst_tau_gyr),
-        0.0,
+    burst = _smooth_exponential_burst_shape(
+        elapsed_gyr,
+        age_gyr,
+        burst_age_gyr,
+        burst_tau_gyr,
     )
     main_integral = jnp.trapezoid(main, elapsed_gyr)
     burst_integral = jnp.trapezoid(burst, elapsed_gyr)
@@ -2643,7 +2674,16 @@ def _agn_variability_nev(agn_bol_lum_w, max_nev):
     log_lbol_erg_s = jnp.log10(agn_bol_lum_w * ERG_PER_WATT)
     l45 = log_lbol_erg_s - 45.0
     simm_nev = 10.0 ** (-1.43 - 0.74 * l45)
-    return jnp.minimum(max_nev, simm_nev)
+    # Smooth generalized minimum: close to the smaller input without the kink
+    # in the likelihood geometry at simm_nev == max_nev.
+    smoothness = jnp.asarray(8.0, dtype=jnp.float64)
+    return jnp.exp(
+        -jnp.logaddexp(
+            -smoothness * jnp.log(max_nev),
+            -smoothness * jnp.log(simm_nev),
+        )
+        / smoothness
+    )
 
 
 def _host_capture_fraction(effective_radius_arcsec, host_size_arcsec):
@@ -2955,8 +2995,17 @@ def _photometric_agn_line_mask(context: ModelContext, cfg: FitConfig, line_wave,
     spec_max = jnp.max(jnp.where(valid, spec_wave, -jnp.inf))
     margin = jnp.asarray(max(float(jqf_cfg.line_coverage_margin_kms), 0.0) / C_KMS, dtype=jnp.float64)
     line_obs = jnp.asarray(line_wave, dtype=jnp.float64) * jnp.maximum(1.0 + redshift, 1.0e-8)
-    covered = (line_obs >= spec_min * (1.0 - margin)) & (line_obs <= spec_max * (1.0 + margin))
-    return jnp.where(covered, 0.0, 1.0)
+    coverage_min = spec_min * (1.0 - margin)
+    coverage_max = spec_max * (1.0 + margin)
+    if not cfg.observation.fits_redshift:
+        covered = (line_obs >= coverage_min) & (line_obs <= coverage_max)
+        return jnp.where(covered, 0.0, 1.0)
+
+    transition = jnp.maximum(margin * 0.5 * (spec_min + spec_max) / 6.0, 1.0e-3)
+    covered_weight = jax.nn.sigmoid((line_obs - coverage_min) / transition) * jax.nn.sigmoid(
+        (coverage_max - line_obs) / transition
+    )
+    return 1.0 - covered_weight
 
 
 def _integrated_spectral_flux_proxy(wave_obs, flux_mjy, mask):
@@ -3139,13 +3188,32 @@ def _project_jaxqsofit_smooth_state_filters(
     sed_feii = sed_feii_scale * _simple_feii_fnu_shape(
         feature_wave, redshift, feii_template_wave, feii_template_flux
     )
-    if coverage_rest is None:
-        covered = jnp.ones_like(feature_wave, dtype=bool)
+    if coverage_rest is None and context.fit_config.observation.fits_redshift:
+        spec_wave = jnp.asarray(context.spec_wave_obs, dtype=jnp.float64)
+        spec_mask = jnp.asarray(context.spec_mask, dtype=bool)
+        valid = spec_mask & jnp.isfinite(spec_wave) & (spec_wave > 0.0)
+        spec_min = jnp.min(jnp.where(valid, spec_wave, jnp.inf))
+        spec_max = jnp.max(jnp.where(valid, spec_wave, -jnp.inf))
+        margin = max(
+            float(context.fit_config.spectroscopy_config.jaxqsofit.line_coverage_margin_kms),
+            0.0,
+        ) / C_KMS
+        coverage_min = spec_min * (1.0 - margin)
+        coverage_max = spec_max * (1.0 + margin)
+        transition = jnp.maximum(margin * 0.5 * (spec_min + spec_max) / 6.0, 1.0e-3)
+        covered = jax.nn.sigmoid((feature_wave - coverage_min) / transition) * jax.nn.sigmoid(
+            (coverage_max - feature_wave) / transition
+        )
+    elif coverage_rest is None:
+        covered = jnp.ones_like(feature_wave)
     else:
         feature_wave_rest = feature_wave / jnp.maximum(1.0 + redshift, 1.0e-8)
-        covered = (feature_wave_rest >= coverage_rest[0]) & (feature_wave_rest <= coverage_rest[1])
-    feii_grid = jnp.where(covered, rendered["feii"], 0.0)
-    extrapolated_feii_grid = jnp.where(covered, 0.0, sed_feii)
+        covered = (
+            (feature_wave_rest >= coverage_rest[0])
+            & (feature_wave_rest <= coverage_rest[1])
+        ).astype(jnp.float64)
+    feii_grid = covered * rendered["feii"]
+    extrapolated_feii_grid = (1.0 - covered) * sed_feii
 
     def _interpolate_one(wave):
         return (
