@@ -589,11 +589,14 @@ def test_host_capture_scales_energy_balance_dust(monkeypatch):
             "log_ebv_gal": _log_positive(0.5),
             "dust_alpha": np.array(2.0),
             "log_host_capture_scale_arcsec": np.log(3.0),
-            "log_host_capture_slope": np.log(2.0),
         },
     )
 
     capture = _site(tr, "host_capture_fraction_fluxes")
+    np.testing.assert_allclose(capture, 0.25**2 / (0.25**2 + 3.0**2))
+    assert float(_site(tr, "host_capture_slope_fit")) == 2.0
+    assert "host_capture_slope" not in tr
+    assert "log_host_capture_slope" not in tr
     assert np.all(capture < 1.0)
     uncaptured_host_source = _site(tr, "host_total_fluxes") + _site(tr, "dust_fluxes")
     captured_host_source = _site(tr, "host_capture_source_fluxes") * capture
@@ -811,12 +814,23 @@ def test_jaxqsofit_backend_owns_feii_and_balmer_components(monkeypatch):
         raise AssertionError("Native jaxsedfit Balmer continuum should be skipped when jaxqsofit owns spectral Balmer")
 
     def _stub_jaxqsofit_backend(wave_obs, redshift, continuum_mjy, cfg, *args, **kwargs):
+        from jaxqsofit.components import SpectralComponentConfig
+
         assert cfg.spectroscopy_config.jaxqsofit.use_spectral_feii is True
         assert cfg.spectroscopy_config.jaxqsofit.use_spectral_balmer_continuum is True
+        np.testing.assert_allclose(np.asarray(args[1]), context.templates.feii_wave)
         return {
             "total": continuum_mjy,
             "line_broad": np.zeros_like(np.asarray(wave_obs, dtype=float)),
             "line_narrow": np.zeros_like(np.asarray(wave_obs, dtype=float)),
+            "feii": np.zeros_like(np.asarray(wave_obs, dtype=float)),
+            "balmer": np.zeros_like(np.asarray(wave_obs, dtype=float)),
+            "state": {},
+            "component_config": SpectralComponentConfig(
+                use_lines=False,
+                use_feii=True,
+                use_balmer_continuum=True,
+            ),
         }
 
     monkeypatch.setattr("jaxsedfit.model._feii_component", _raise_native_feii)

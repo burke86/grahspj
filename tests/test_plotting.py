@@ -6,7 +6,26 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pytest
 
-from jaxsedfit.plotting import plot_corner, plot_fit_sed, plot_trace
+from jaxsedfit.plotting import (
+    _bridged_jaxsedfit_agn_lines,
+    plot_corner,
+    plot_fit_sed,
+    plot_trace,
+)
+
+
+def test_joint_line_bridge_rescales_native_jaxsedfit_shape():
+    pred = {
+        "line_bl_obs_sed": np.array([[1.0, 2.0, 1.0]]),
+        "line_nl_obs_sed": np.array([[0.5, 0.5, 0.5]]),
+        "line_fluxes": np.array([[1.0, 1.0]]),
+        "feii_fluxes": np.zeros((1, 2)),
+        "jqf_line_photometry": np.array([[2.0, 4.0]]),
+    }
+
+    bridged = _bridged_jaxsedfit_agn_lines(pred)
+
+    np.testing.assert_allclose(bridged, 3.0 * np.array([[1.5, 2.5, 1.5]]))
 
 
 def test_plot_fit_sed_writes_output(tmp_path):
@@ -32,7 +51,17 @@ def test_plot_fit_sed_writes_output(tmp_path):
 
     class _Fitter:
         config = _Cfg()
-        context = type("_Context", (), {"filters": [_Filter(1200.0), _Filter(2500.0), _Filter(6000.0)]})()
+        context = type(
+            "_Context",
+            (),
+            {
+                "filters": [_Filter(1200.0), _Filter(2500.0), _Filter(6000.0)],
+                "spec_wave_obs": np.array([1800.0, 2200.0, 2600.0]),
+                "spec_fluxes": np.array([1.2, 1.4, 1.3]),
+                "spec_mask": np.array([True, False, True]),
+                "spec_spectrum_index": np.array([0, 0, 0]),
+            },
+        )()
 
         def predict(self, posterior="latest"):
             return {
@@ -50,11 +79,27 @@ def test_plot_fit_sed_writes_output(tmp_path):
                 "balmer_obs_sed": (0.03 * flux)[None, :],
                 "agn_obs_sed": (0.4 * flux)[None, :],
                 "total_obs_sed": flux[None, :],
+                "spectrum_scale_fit": np.array([0.5]),
+                "spec_wave_obs": np.array([[1800.0, 2200.0, 2600.0]]),
+                "jqf_line_model_aperture": np.array([[0.2, 0.3, 0.4]]),
+                "jqf_feii_model": np.array([[0.1, 0.1, 0.1]]),
             }
 
     output = tmp_path / "sed_plot.png"
     fig = plot_fit_sed(_Fitter(), output_path=output)
     assert fig is not None
+    spectrum_lines = [
+        line
+        for line in fig.axes[0].lines
+        if line.get_label() == "Observed spectrum"
+    ]
+    assert len(spectrum_lines) == 1
+    assert spectrum_lines[0].get_color() == "#c53030"
+    assert np.array_equal(spectrum_lines[0].get_xdata(), np.array([1800.0, 2600.0]))
+    assert np.array_equal(spectrum_lines[0].get_ydata(), np.array([2.4, 2.6]))
+    agn_line_curves = [line for line in fig.axes[0].lines if line.get_label() == "AGN lines"]
+    assert len(agn_line_curves) == 1
+    assert np.array_equal(agn_line_curves[0].get_xdata(), wave)
     assert output.exists()
     assert output.stat().st_size > 0
 

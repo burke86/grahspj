@@ -27,7 +27,7 @@ from jaxsedfit.config import (
     SpectroscopyData,
     fit_config_from_mapping,
 )
-from jaxsedfit.core import JAXSEDFit
+from jaxsedfit.core import JAXSEDFit, _joint_dense_mass_blocks
 from jaxsedfit.model import (
     GRAHSP_BIATTENUATION_BREAK_A,
     GRAHSP_PL_BEND_LOC_A,
@@ -58,6 +58,7 @@ from jaxsedfit.model import (
     _evaluate_jaxqsofit_backend,
     _powerlaw_jax,
     _project_local_nebular_line_filters,
+    _project_jaxqsofit_line_state_filters,
     _project_filters,
     _redshift_to_obs,
     _sample_bounded_normal,
@@ -158,6 +159,43 @@ def test_photometry_method_is_normalized_metadata_only():
         bad.validate()
 
 
+def test_total_flux_photometry_bypasses_host_capture_scale(monkeypatch):
+    class _SSPData:
+        ssp_lgmet = np.array([-1.0, 0.0])
+        ssp_lg_age_gyr = np.array([-1.0, 0.0])
+        ssp_wave = np.array([900.0, 2000.0, 5000.0, 10000.0])
+        ssp_flux = np.ones((2, 2, 4))
+
+    monkeypatch.setattr("jaxsedfit.preload._load_ssp_templates", lambda fn: _SSPData())
+    methods = ["psf", "aperture", "fiber", "profile", "auto", "model", "cmodel", "petrosian", "catalog"]
+    cfg = FitConfig(
+        observation=Observation(object_id="obj", redshift=0.1),
+        photometry=PhotometryData(
+            filter_names=[f"f{i}" for i in range(len(methods))],
+            fluxes=np.ones(len(methods)),
+            errors=np.full(len(methods), 0.1),
+            psf_fwhm_arcsec=np.full(len(methods), 2.0),
+            photometry_method=methods,
+        ),
+        filters=FilterSet(
+            curves=[
+                FilterCurve(name=f"f{i}", wave=[1000.0, 2000.0, 3000.0], transmission=[0.0, 1.0, 0.0])
+                for i in range(len(methods))
+            ]
+        ),
+        galaxy=GalaxyConfig(dsps_ssp_fn="fake.h5", n_wave=64),
+        agn=AGNConfig(),
+        likelihood=LikelihoodConfig(use_host_capture_model=True),
+        inference=InferenceConfig(map_steps=2),
+    )
+
+    context = build_model_context(cfg)
+
+    assert context.photometry_total_capture.tolist() == [
+        False, False, False, True, True, True, True, True, False
+    ]
+
+
 def _local_projection_context(filter_wave, filter_trans):
     filter_wave = np.asarray(filter_wave, dtype=float)
     filter_trans = np.asarray(filter_trans, dtype=float)
@@ -173,6 +211,37 @@ def _local_projection_context(filter_wave, filter_trans):
         ),
         filter_effective_wavelength_jax=jax.numpy.asarray([eff_wave], dtype=jax.numpy.float64),
     )
+
+
+def test_jaxqsofit_line_state_filter_projection_conserves_flux():
+    wave = np.linspace(4800.0, 5200.0, 401)
+    transmission = np.ones_like(wave)
+    context = SimpleNamespace(
+        packed_filter_curves_jax=PackedFilterCurvesJax(
+            wave=jnp.asarray(wave[None, :]),
+            transmission=jnp.asarray(transmission[None, :]),
+            denom=jnp.asarray([np.trapezoid(transmission, wave)]),
+            valid_mask=jnp.ones((1, wave.size), dtype=bool),
+        ),
+        filter_effective_wavelength_jax=jnp.asarray([5000.0]),
+    )
+    sigma_ln = 0.002
+    state = {
+        "line_amp_per_component": jnp.asarray([1.0]),
+        "line_mu_per_component": jnp.asarray([np.log(5000.0)]),
+        "line_sig_per_component": jnp.asarray([sigma_ln]),
+        "line_broad_mask_per_component": jnp.asarray([1.0]),
+    }
+
+    projected = float(_project_jaxqsofit_line_state_filters(context, state, 0.0)[0])
+    dense_wave = np.linspace(4700.0, 5300.0, 200_001)
+    fnu = np.exp(-0.5 * ((np.log(dense_wave) - np.log(5000.0)) / sigma_ln) ** 2)
+    conversion = 1.0e-10 / 299792458.0 * 1.0e29
+    flambda = fnu / (conversion * dense_wave**2)
+    inside = (dense_wave >= wave[0]) & (dense_wave <= wave[-1])
+    expected = conversion * 5000.0**2 * np.trapezoid(flambda[inside], dense_wave[inside]) / (wave[-1] - wave[0])
+
+    assert projected == pytest.approx(expected, rel=2.0e-3)
 
 
 def _dense_nebular_line_filter_flux(context, *, line_wave, line_lumin, width_kms, luminosity_distance_m=1.0e20):
@@ -269,9 +338,12 @@ def test_local_nebular_line_projection_matches_dense_edge_cases(
 
 def test_jaxqsofit_config_broadening_convolution_default_and_validation():
     assert JaxQSOFitConfig().broadening_convolution == "fft"
+    assert JaxQSOFitConfig().photometric_feature_grid_size == 2048
     assert JaxQSOFitConfig(broadening_convolution="direct").broadening_convolution == "direct"
     with pytest.raises(ValueError, match="broadening_convolution"):
         JaxQSOFitConfig(broadening_convolution="scipy")
+    with pytest.raises(ValueError, match="photometric_feature_grid_size"):
+        JaxQSOFitConfig(photometric_feature_grid_size=128)
 
 
 def test_photometry_method_is_normalized_metadata_only():
@@ -1346,7 +1418,10 @@ def test_context_accepts_multiple_spectra(monkeypatch):
 
     assert context.spec_wave_obs.tolist() == [4000.0, 5000.0, 7000.0]
     assert context.spec_spectrum_index.tolist() == [0, 0, 1]
-    assert context.spec_effective_spatial_scale_arcsec.tolist() == [3.0, 1.5]
+    np.testing.assert_allclose(
+        context.spec_effective_spatial_scale_arcsec,
+        [1.5, np.sqrt(2.0) * 1.5 / 2.354820045],
+    )
     assert context.spec_aperture_diameter_arcsec.tolist()[0] == 3.0
     assert np.isnan(context.spec_aperture_diameter_arcsec.tolist()[1])
     assert context.spec_instruments == ("sdss", "desi")
@@ -1897,13 +1972,35 @@ def test_jaxsedfit_jaxqsofit_backend_uses_nested_tied_line_config(monkeypatch):
     assert "jqf_line_sig_group" in tr
     assert "jqf_line_amp_group" in tr
     assert "jqf_line_model_broad" in tr
-    assert "jqf_broad_to_sed_broad_line_prior" in tr
-    assert "jqf_narrow_to_sed_narrow_line_prior" in tr
-    assert "jqf_broad_line_flux_proxy" in tr
-    assert "sed_broad_line_flux_proxy" in tr
-    assert "jqf_narrow_line_flux_proxy" in tr
-    assert "sed_narrow_line_flux_proxy" in tr
+    assert "jqf_broad_to_sed_broad_line_prior" not in tr
+    assert "jqf_narrow_to_sed_narrow_line_prior" not in tr
+    assert np.asarray(tr["jqf_line_photometry"]["value"]).shape == (1,)
+    assert np.asarray(tr["jqf_extrapolated_broad_photometry"]["value"]).shape == (1,)
+    assert np.asarray(tr["jqf_extrapolated_narrow_photometry"]["value"]).shape == (1,)
     assert np.asarray(tr["pred_spectrum_fluxes"]["value"]).shape == (3,)
+    assert context.jaxqsofit_prior_config["standardize_active_priors"] is True
+    standardized_amplitudes = [
+        name
+        for name, site in tr.items()
+        if name.startswith("jqf_line_amp_")
+        and name.endswith("_std")
+        and site.get("type") == "sample"
+    ]
+    assert standardized_amplitudes
+    latent_values = {
+        name: np.asarray(site["value"])
+        for name, site in tr.items()
+        if site.get("type") == "sample" and not site.get("is_observed", False)
+    }
+    blocks = _joint_dense_mass_blocks(latent_values, context=context)
+    line_blocks = [block for block in blocks if any(name.startswith("jqf_line_") for name in block)]
+    assert (
+        "jqf_line_amp_Hb_std",
+        "jqf_line_broad_center_0_std",
+        "jqf_line_broad_relative_offsets_0_std",
+        "jqf_line_ordered_width_logits_Hb_std",
+    ) in line_blocks
+    assert all(set(block) <= set(latent_values) for block in line_blocks)
 
 
 def test_jaxsedfit_jaxqsofit_tied_line_backend_runs_svi_jit(monkeypatch):
@@ -1955,10 +2052,11 @@ def test_jaxsedfit_jaxqsofit_tied_line_backend_runs_svi_jit(monkeypatch):
             enabled=True,
             backend="jaxqsofit",
             fit_scale=False,
-            jaxqsofit=JaxQSOFitConfig(
-                use_spectral_lines=True,
-                use_tied_lines=True,
-                line_table=line_table,
+                jaxqsofit=JaxQSOFitConfig(
+                    use_spectral_lines=True,
+                    use_tied_lines=True,
+                    use_spectral_feii=True,
+                    line_table=line_table,
                 line_flux_scale_mjy=0.1,
             ),
         ),

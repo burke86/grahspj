@@ -275,6 +275,7 @@ class ModelContext:
     data_mask: np.ndarray
     positive_detected_mask: np.ndarray
     effective_spatial_scale_arcsec: np.ndarray
+    photometry_total_capture: np.ndarray
     spec_wave_obs: np.ndarray
     spec_fluxes: np.ndarray
     spec_errors: np.ndarray
@@ -520,7 +521,7 @@ def _build_jaxqsofit_prior_config(cfg: FitConfig, spec_fluxes: np.ndarray, spec_
     if not bool(jqf_cfg.use_spectral_smart_priors):
         return None
     try:
-        from jaxqsofit.config import PriorConfig as JaxQSOFitPriorConfig
+        from jaxqsofit.defaults import _build_default_prior_config
     except Exception as exc:  # pragma: no cover - exercised only without optional dependency
         raise ImportError(
             "SpectroscopyConfig.backend='jaxqsofit' with smart priors requires jaxqsofit on PYTHONPATH."
@@ -532,12 +533,21 @@ def _build_jaxqsofit_prior_config(cfg: FitConfig, spec_fluxes: np.ndarray, spec_
     flux_for_priors = flux[valid]
     if flux_for_priors.size == 0:
         flux_for_priors = np.asarray([max(float(jqf_cfg.line_flux_scale_mjy), 1.0e-8)], dtype=float)
-    return JaxQSOFitPriorConfig.from_spectrum(
-        flux=flux_for_priors,
-        redshift=cfg.observation.redshift,
+    flux_rest = flux_for_priors * (1.0 + float(cfg.observation.redshift))
+    prior_config = _build_default_prior_config(
+        flux_rest,
         include_elg_narrow_lines=bool(jqf_cfg.include_elg_narrow_lines),
         include_high_ionization_lines=bool(jqf_cfg.include_high_ionization_lines),
     )
+    if hasattr(prior_config, "to_mapping"):
+        prior_config = prior_config.to_mapping()
+    else:
+        prior_config = dict(prior_config)
+    # Match the native jaxqsofit NUTS geometry: amplitudes and active width
+    # coordinates live on standardized prior coordinates before block-dense
+    # mass adaptation.
+    prior_config["standardize_active_priors"] = True
+    return prior_config
 
 
 def _load_templates(cfg: FitConfig) -> LoadedTemplates:
@@ -1853,10 +1863,24 @@ def build_model_context(cfg: FitConfig) -> ModelContext:
         cfg.photometry.aperture_diameter_arcsec if cfg.photometry.aperture_diameter_arcsec is not None else np.full_like(fluxes, np.nan, dtype=float),
         dtype=float,
     )
+    # Put circular apertures and Gaussian PSFs on the same effective-radius
+    # coordinate.  For a Gaussian, sqrt(2) * sigma encloses 1 - exp(-1) of
+    # the light, matching the characteristic radius used by the capture law.
+    psf_effective_radius_arcsec = np.sqrt(2.0) * psf_fwhm_arcsec / 2.354820045
     effective_spatial_scale_arcsec = np.where(
         np.isfinite(aperture_diameter_arcsec) & (aperture_diameter_arcsec > 0.0),
-        aperture_diameter_arcsec,
-        psf_fwhm_arcsec,
+        0.5 * aperture_diameter_arcsec,
+        psf_effective_radius_arcsec,
+    )
+    photometry_methods = np.asarray(
+        cfg.photometry.photometry_method
+        if cfg.photometry.photometry_method is not None
+        else [None] * len(fluxes),
+        dtype=object,
+    )
+    photometry_total_capture = np.isin(
+        photometry_methods,
+        ("profile", "auto", "model", "cmodel", "petrosian"),
     )
     fluxes = np.nan_to_num(fluxes, nan=0.0, posinf=1.0e30, neginf=-1.0e30)
     errors = np.nan_to_num(errors, nan=1.0e30, posinf=1.0e30, neginf=1.0e30)
@@ -1885,10 +1909,11 @@ def build_model_context(cfg: FitConfig) -> ModelContext:
         ],
         dtype=float,
     )
+    spec_psf_effective_radius_arcsec = np.sqrt(2.0) * spec_psf_fwhm_arcsec / 2.354820045
     spec_effective_spatial_scale_arcsec = np.where(
         np.isfinite(spec_aperture_diameter_arcsec) & (spec_aperture_diameter_arcsec > 0.0),
-        spec_aperture_diameter_arcsec,
-        spec_psf_fwhm_arcsec,
+        0.5 * spec_aperture_diameter_arcsec,
+        spec_psf_effective_radius_arcsec,
     )
     if spectra:
         spec_wave_chunks = []
@@ -2095,6 +2120,7 @@ def build_model_context(cfg: FitConfig) -> ModelContext:
         data_mask=data_mask,
         positive_detected_mask=positive_detected_mask,
         effective_spatial_scale_arcsec=np.asarray(effective_spatial_scale_arcsec, dtype=float),
+        photometry_total_capture=np.asarray(photometry_total_capture, dtype=bool),
         spec_wave_obs=np.asarray(spec_wave_obs, dtype=float),
         spec_fluxes=np.asarray(spec_fluxes, dtype=float),
         spec_errors=np.asarray(spec_errors, dtype=float),

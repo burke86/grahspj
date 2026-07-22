@@ -6,6 +6,7 @@ from typing import Any, Mapping
 import h5py
 import jax
 import numpy as np
+from numpyro.handlers import seed as seed_handler, trace as trace_handler
 from numpyro.infer import MCMC, NUTS, Predictive, SVI, Trace_ELBO, init_to_value
 from numpyro.infer.autoguide import AutoDelta
 
@@ -13,6 +14,154 @@ from .config import FitConfig, _coerce_prior_config, fit_config_from_mapping, se
 from .model import grahsp_photometric_model
 from .preload import ModelContext, build_model_context
 from .results import FitResult, _FitState, median_mapping
+
+
+def _joint_dense_mass_blocks(
+    latent_values: Mapping[str, Any],
+    context: ModelContext | None = None,
+) -> list[tuple[str, ...]]:
+    """Build non-overlapping dense NUTS blocks from active latent sites.
+
+    The input normally comes from the MAP guide, so custom prior choices that
+    switch between a value and its log parameterization are handled without
+    hard-coding the active variant.  Spectral groups are absent naturally for
+    SED-only fits.
+    """
+    names = set(latent_values)
+    assigned: set[str] = set()
+    blocks: list[tuple[str, ...]] = []
+
+    def add_group(candidates) -> None:
+        group = tuple(
+            sorted(
+                name
+                for name in names
+                if name not in assigned and candidates(name)
+            )
+        )
+        if not group:
+            return
+        # A single vector-valued site can still benefit from an internal dense
+        # matrix; scalar singleton blocks are equivalent to diagonal adaptation.
+        value = np.asarray(latent_values[group[0]])
+        if len(group) > 1 or value.size > 1:
+            blocks.append(group)
+            assigned.update(group)
+
+    # Reuse jaxqsofit's native line-complex geometry exactly. Its block builder
+    # understands which amplitudes and centroids must accompany ordered-width
+    # coordinates. Prefix its site names for the embedded joint backend.
+    used_native_jqf_blocks = False
+    if context is not None and context.jaxqsofit_prior_config is not None:
+        cfg = context.fit_config
+        jqf_cfg = cfg.spectroscopy_config.jaxqsofit
+        if bool(jqf_cfg.use_spectral_lines) and bool(jqf_cfg.use_tied_lines):
+            try:
+                from jaxqsofit.components import SpectralComponentConfig, build_joint_tied_line_meta
+                from jaxqsofit.geometry import line_complex_dense_mass_blocks
+                from .model import _fixed_spectral_line_coverage_rest
+
+                component_cfg = SpectralComponentConfig(
+                    use_lines=True,
+                    use_tied_lines=True,
+                    line_table=jqf_cfg.line_table,
+                    line_prior_config=context.jaxqsofit_prior_config,
+                    line_coverage_rest=_fixed_spectral_line_coverage_rest(context, cfg),
+                    include_elg_narrow_lines=bool(jqf_cfg.include_elg_narrow_lines),
+                    include_high_ionization_lines=bool(jqf_cfg.include_high_ionization_lines),
+                )
+                tied_line_meta = build_joint_tied_line_meta(component_cfg)
+                if tied_line_meta is not None:
+                    for native_block in line_complex_dense_mass_blocks(
+                        tied_line_meta,
+                        standardized_amplitudes=True,
+                    ):
+                        block = tuple(
+                            f"jqf_{site}"
+                            for site in native_block
+                            if f"jqf_{site}" in names and f"jqf_{site}" not in assigned
+                        )
+                        if block:
+                            # Preserve native jaxqsofit's structure literally,
+                            # including scalar singleton blocks (which are
+                            # numerically equivalent to diagonal adaptation).
+                            blocks.append(block)
+                            assigned.update(block)
+                    used_native_jqf_blocks = True
+            except ImportError:
+                pass
+    if not used_native_jqf_blocks:
+        add_group(lambda name: name.startswith("jqf_line_"))
+    add_group(lambda name: name.startswith(("jqf_feii_", "jqf_balmer_")))
+
+    # Joint-only normalization geometry. These parameters trade host and AGN
+    # light between the spectrum and photometry and therefore need one block.
+    joint_normalization_names = {
+        "log_agn_amp", "pl_slope", "pl_bend_loc", "log_pl_bend_loc",
+        "pl_bend_width", "log_pl_bend_width", "ebv_agn", "log_ebv_agn",
+        "log_spectrum_scale", "spectrum_scale",
+        "log_stellar_mass", "ebv_gal", "log_ebv_gal",
+        "log_host_capture_scale_arcsec", "host_capture_scale_arcsec",
+    }
+    add_group(
+        lambda name: name in joint_normalization_names
+        or name.startswith(("log_sfh_", "u_", "gal_lgmet", "log_gal_lgmet"))
+    )
+
+    torus_names = {
+        "fcov", "log_fcov", "si", "cool_lam", "log_cool_lam",
+        "cool_width", "log_cool_width", "hot_lam", "log_hot_lam",
+        "hot_width", "log_hot_width", "hot_fcov", "log_hot_fcov",
+    }
+    add_group(lambda name: name in torus_names)
+
+    native_feature_tokens = (
+        "broad_lines_strength", "narrow_lines_strength", "line_width_kms",
+        "feii_", "balmer_",
+    )
+    add_group(
+        lambda name: not name.startswith("jqf_")
+        and any(token in name for token in native_feature_tokens)
+    )
+
+    add_group(
+        lambda name: name in {"gal_v_kms", "gal_sigma_kms", "log_gal_sigma_kms"}
+    )
+    add_group(lambda name: name == "dust_alpha")
+    add_group(lambda name: "systematics_width" in name)
+    return blocks
+
+
+def _resolve_dense_mass_structure(
+    value: Any,
+    latent_values: Mapping[str, Any],
+    context: ModelContext | None = None,
+):
+    """Resolve a user/config mass-matrix setting to NumPyro's representation."""
+    if isinstance(value, str):
+        normalized = value.strip().lower().replace("-", "_")
+        if normalized in {"blocks", "block", "block_dense", "auto"}:
+            return _joint_dense_mass_blocks(latent_values, context=context)
+        if normalized in {"dense", "full", "global"}:
+            return True
+        if normalized in {"diagonal", "diag", "none"}:
+            return False
+        raise ValueError(
+            "dense_mass must be a boolean or one of 'blocks', 'dense', or 'diagonal'."
+        )
+    if isinstance(value, (list, tuple)):
+        return value
+    return bool(value)
+
+
+def _trace_latent_values(model, rng_seed: int) -> dict[str, Any]:
+    """Discover active unobserved sample sites when no MAP guide is available."""
+    model_trace = trace_handler(seed_handler(model, jax.random.PRNGKey(rng_seed))).get_trace()
+    return {
+        name: site["value"]
+        for name, site in model_trace.items()
+        if site.get("type") == "sample" and not site.get("is_observed", False)
+    }
 
 
 def _get_nested_sampler_cls():
@@ -315,6 +464,12 @@ class JAXSEDFit:
             "jqf_feii_model",
             "jqf_balmer_model",
             "jqf_total_model",
+            "jqf_line_photometry",
+            "jqf_feii_photometry",
+            "jqf_extrapolated_feii_photometry",
+            "jqf_balmer_photometry",
+            "jqf_extrapolated_broad_photometry",
+            "jqf_extrapolated_narrow_photometry",
             "rest_wave",
             "obs_wave",
             "redshift_fit",
@@ -324,6 +479,7 @@ class JAXSEDFit:
             "sfh_burst_fraction_fit",
             "sfh_burst_age_gyr_fit",
             "sfh_burst_tau_gyr_fit",
+            "log_sfr_fit",
             "nebular_logU_fit",
             "nebular_zgas_fit",
             "nebular_ne_fit",
@@ -751,7 +907,7 @@ class JAXSEDFit:
         num_samples: int | None = None,
         num_chains: int | None = None,
         target_accept_prob: float | None = None,
-        dense_mass: bool | None = None,
+        dense_mass: bool | str | list[tuple[str, ...]] | None = None,
         max_tree_depth: int | None = None,
         use_map_init: bool = True,
         progress_bar: bool = True,
@@ -768,8 +924,11 @@ class JAXSEDFit:
             num_chains value.
         target_accept_prob : object
             target_accept_prob value.
-        dense_mass : object
-            dense_mass value.
+        dense_mass : bool, str, or list of tuples, optional
+            NUTS mass-matrix structure. ``"blocks"`` adapts conditional SED
+            and spectral blocks, ``True`` uses one global dense matrix, and
+            ``False`` uses a diagonal matrix. A NumPyro block list may also be
+            supplied directly.
         max_tree_depth : object
             max_tree_depth value.
         use_map_init : object
@@ -781,27 +940,64 @@ class JAXSEDFit:
             self.fit_map(progress_bar=progress_bar)
         map_result = self.map_result
         self._fit_state = _FitState(map_result=map_result, method="nuts")
-        num_warmup = int(self.config.inference.num_warmup if num_warmup is None else num_warmup)
-        num_samples = int(self.config.inference.num_samples if num_samples is None else num_samples)
-        num_chains = int(self.config.inference.num_chains if num_chains is None else num_chains)
-        target_accept_prob = float(self.config.inference.target_accept_prob if target_accept_prob is None else target_accept_prob)
-        dense_mass = bool(self.config.inference.dense_mass if dense_mass is None else dense_mass)
-        max_tree_depth = int(self.config.inference.max_tree_depth if max_tree_depth is None else max_tree_depth)
+        inference = self.config.inference
+        num_warmup = int(inference.num_warmup if num_warmup is None else num_warmup)
+        num_samples = int(inference.num_samples if num_samples is None else num_samples)
+        num_chains = int(inference.num_chains if num_chains is None else num_chains)
+        target_accept_prob = float(
+            inference.target_accept_prob
+            if target_accept_prob is None
+            else target_accept_prob
+        )
+        dense_mass_setting = inference.dense_mass if dense_mass is None else dense_mass
+        max_tree_depth = int(
+            inference.max_tree_depth if max_tree_depth is None else max_tree_depth
+        )
         init_values = None
         if self.map_result is not None:
-            init_values = {k: np.asarray(v) for k, v in self.map_result["median"].items() if np.ndim(v) != 0 or np.isfinite(v)}
+            init_values = {
+                key: np.asarray(value)
+                for key, value in self.map_result["median"].items()
+                if np.ndim(value) != 0 or np.isfinite(value)
+            }
+        latent_values = init_values or {}
+        block_aliases = {"blocks", "block", "block_dense", "auto"}
+        use_blocks = (
+            isinstance(dense_mass_setting, str)
+            and dense_mass_setting.strip().lower().replace("-", "_") in block_aliases
+        )
+        if use_blocks and not latent_values:
+            latent_values = _trace_latent_values(self._model, inference.seed)
+        mass_matrix_structure = _resolve_dense_mass_structure(
+            dense_mass_setting,
+            latent_values,
+            context=getattr(self, "context", None),
+        )
         kernel = NUTS(
             self._model,
             init_strategy=init_to_value(values=init_values) if init_values else None,
             target_accept_prob=target_accept_prob,
-            dense_mass=dense_mass,
+            dense_mass=mass_matrix_structure,
             max_tree_depth=max_tree_depth,
         )
-        mcmc = MCMC(kernel, num_warmup=num_warmup, num_samples=num_samples, num_chains=num_chains, progress_bar=progress_bar, jit_model_args=False)
-        rng_key = jax.random.PRNGKey(self.config.inference.seed + 1)
+        mcmc = MCMC(
+            kernel,
+            num_warmup=num_warmup,
+            num_samples=num_samples,
+            num_chains=num_chains,
+            progress_bar=progress_bar,
+            jit_model_args=False,
+        )
+        rng_key = jax.random.PRNGKey(inference.seed + 1)
         mcmc.run(rng_key)
+        # NumPyro writes this directly to stdout, so it is visible both in a
+        # terminal and as captured output beneath a notebook cell.
+        mcmc.print_summary()
         samples = mcmc.get_samples()
-        self.nuts_result = {"mcmc": mcmc}
+        self.nuts_result = {
+            "mcmc": mcmc,
+            "mass_matrix_structure": mass_matrix_structure,
+        }
         self.samples = {k: np.asarray(v) for k, v in samples.items()}
         self.predictive = None
         return self._make_result(method="nuts")
