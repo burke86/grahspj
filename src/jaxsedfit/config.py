@@ -405,6 +405,7 @@ class InferenceConfig:
     map_steps: int = 1500
     staged_map: bool = True
     staged_steps: int | None = None
+    plot_init: bool = False
     num_warmup: int = 200
     num_samples: int = 200
     num_chains: int = 1
@@ -435,6 +436,7 @@ class OutputConfig:
     save_fig: bool = False
     save_result: bool = False
     show_plot: bool = False
+    plot_init: bool = False
 
 
 def _scalar_or_list(value: Any) -> Any:

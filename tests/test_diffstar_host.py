@@ -648,6 +648,7 @@ def test_fit_dispatch_methods(monkeypatch):
     assert calls[0][1]["steps"] == 7
     assert calls[0][1]["progress_bar"] is True
     assert calls[0][1]["staged"] is True
+    assert calls[0][1]["plot_init"] is False
     assert calls[1][0] == "nuts"
     assert calls[1][1]["num_warmup"] == 3
     assert calls[1][1]["num_samples"] == 4
@@ -662,7 +663,7 @@ def test_fit_dispatch_methods(monkeypatch):
     out = JAXSEDFit.fit(fitter, progress_bar=False)
     assert isinstance(out, FitResult)
     assert out.method == "optax"
-    assert calls == [("optax", {"steps": 2, "learning_rate": 1e-2, "progress_bar": False, "staged": True})]
+    assert calls == [("optax", {"steps": 2, "learning_rate": 1e-2, "progress_bar": False, "staged": True, "plot_init": False})]
 
     calls.clear()
     fitter.config.inference.method = "optax"
@@ -670,7 +671,7 @@ def test_fit_dispatch_methods(monkeypatch):
     out = JAXSEDFit.fit(fitter, progress_bar=False)
     assert isinstance(out, FitResult)
     assert out.method == "optax"
-    assert calls == [("optax", {"steps": 2, "learning_rate": 1e-2, "progress_bar": False, "staged": False})]
+    assert calls == [("optax", {"steps": 2, "learning_rate": 1e-2, "progress_bar": False, "staged": False, "plot_init": False})]
 
     calls.clear()
     fitter.config.inference.method = "nuts"
@@ -784,6 +785,43 @@ def test_inference_defaults_to_block_dense_mass_adaptation():
     assert InferenceConfig().dense_mass == "blocks"
 
 
+def test_fit_map_plot_init_plots_both_staged_map_solutions(monkeypatch):
+    fitter = JAXSEDFit.__new__(JAXSEDFit)
+    fitter.config = type(
+        "_Cfg",
+        (),
+        {
+            "inference": InferenceConfig(map_steps=3, staged_map=True, plot_init=True),
+            "output": OutputConfig(),
+        },
+    )()
+    calls = []
+
+    class _SVIResult:
+        params = {"x": np.array(0.0)}
+        losses = np.array([1.0])
+
+    medians = iter(({"stage1": np.array(1.0)}, {"stage2": np.array(2.0)}))
+    monkeypatch.setattr(
+        fitter,
+        "_run_map_svi",
+        lambda *args, **kwargs: (_SVIResult(), next(medians)),
+    )
+    monkeypatch.setattr(
+        fitter,
+        "_plot_map_initialization",
+        lambda median, **kwargs: calls.append((median, kwargs)),
+    )
+
+    fitter.fit_map(progress_bar=False)
+
+    assert [call[1]["attr_prefix"] for call in calls] == ["init_stage1", "init_stage2"]
+    assert calls[0][1]["include_sed_agn_features"] is False
+    assert calls[0][1]["include_spectral_features"] is False
+    assert calls[1][1]["include_sed_agn_features"] is True
+    assert calls[1][1]["include_spectral_features"] is True
+
+
 def test_joint_dense_mass_blocks_follow_active_sites():
     values = {
         "log_agn_amp": np.array(30.0),
@@ -807,10 +845,10 @@ def test_joint_dense_mass_blocks_follow_active_sites():
     assert (
         "log_agn_amp",
         "log_sfh_age_gyr",
-        "log_spectrum_scale",
         "log_stellar_mass",
         "pl_slope",
     ) in blocks
+    assert all("log_spectrum_scale" not in block for block in blocks)
     assert ("cool_lam", "cool_width") in blocks
     assert all("unrelated" not in block for block in blocks)
     flattened = [name for block in blocks for name in block]

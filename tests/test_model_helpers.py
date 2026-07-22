@@ -1609,7 +1609,7 @@ def test_jaxqsofit_joint_backend_builds_flux_scaled_smart_priors(monkeypatch):
         flux=np.asarray([2.0, 4.0]),
         redshift=0.1,
     ).to_mapping()
-    assert float(prior["log_cont_norm"].loc) == pytest.approx(float(expected["log_cont_norm"].loc))
+    assert float(prior["cont_norm"].loc) == pytest.approx(float(expected["cont_norm"].loc))
     line_table = prior["line"]["table"]
     assert line_table
     assert min(float(row["minsca"]) for row in line_table) >= 3.0e-4
