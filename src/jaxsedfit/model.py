@@ -37,7 +37,6 @@ from .preload import ModelContext, _build_fixed_igm_jax as _igm_transmission
 
 C_KMS = 299792.458
 C_MS = 2.99792458e8
-L_SUN_W = 3.828e26
 ERG_PER_WATT = 1.0e7
 AGN_BOLOMETRIC_CORRECTION_5100 = 9.26
 DSPS_SOLAR_METALLICITY = 0.019
@@ -377,25 +376,6 @@ def _sample_positive(
         "'exponential', 'lognormal'."
     )
 
-def _sample_optional_normal(prior_config: dict[str, Any], key: str, default: float, scale: float):
-    """Return a fixed default unless a Normal-like prior is explicitly configured.
-
-    Parameters
-    ----------
-    prior_config : object
-        prior_config value.
-    key : object
-        key value.
-    default : object
-        default value.
-    scale : object
-        scale value.
-    """
-    if key not in prior_config:
-        return jnp.asarray(default, dtype=jnp.float64)
-    return _sample_prior(prior_config, key, dist.Normal(default, scale))
-
-
 def _sample_bounded_normal(prior_config: dict[str, Any], key: str, default: float, scale: float, low, high):
     """Sample a Normal-like prior truncated to model support.
 
@@ -653,21 +633,6 @@ def _cfg_lgmet_value(
     if absolute_key is not None and absolute_key in cfg:
         return jnp.asarray(cfg[absolute_key], dtype=jnp.float64)
     return jnp.asarray(cfg.get(solar_relative_key, default_logzsol), dtype=jnp.float64) + solar_offset
-
-
-def _cumulative_trapezoid(y, x):
-    """Return cumulative trapezoidal integral with an initial zero element.
-
-    Parameters
-    ----------
-    y : object
-        y value.
-    x : object
-        x value.
-    """
-    dx = jnp.diff(x)
-    area = 0.5 * (y[1:] + y[:-1]) * dx
-    return jnp.concatenate([jnp.zeros((1,), dtype=jnp.result_type(y, x)), jnp.cumsum(area)])
 
 
 def _cigale_delayed_sfh_shape(elapsed_gyr, tau_gyr, age_gyr):
@@ -1423,24 +1388,6 @@ def _redshift_to_obs(rest_wave, rest_lum, obs_wave, redshift, luminosity_distanc
     return jnp.interp(obs_wave, wave_obs, flux_obs, left=0.0, right=0.0)
 
 
-def _redshift_scalar_to_obs(rest_wave, rest_value, obs_wave, redshift):
-    """Interpolate a scalar rest-frame quantity onto the observed wavelength grid.
-
-    Parameters
-    ----------
-    rest_wave : object
-        rest_wave value.
-    rest_value : object
-        rest_value value.
-    obs_wave : object
-        obs_wave value.
-    redshift : object
-        redshift value.
-    """
-    wave_obs = rest_wave * (1.0 + redshift)
-    return jnp.interp(obs_wave, wave_obs, rest_value, left=0.0, right=0.0)
-
-
 def _project_filters(obs_flux, packed_filters):
     """Project an observed-frame spectrum through prepared filters.
 
@@ -1506,19 +1453,6 @@ def _project_rest_luminosity_filters(context: ModelContext, rest_lum):
     return context.fixed_filter_projection_jax @ rest_lum
 
 
-def _project_rest_scalar_filters(context: ModelContext, rest_value):
-    """Project fixed-redshift scalar rest quantity through filters like legacy code.
-
-    Parameters
-    ----------
-    context : object
-        context value.
-    rest_value : object
-        rest_value value.
-    """
-    return context.fixed_scalar_filter_projection_jax @ rest_value
-
-
 def _interp_redshift_projection_matrix(redshift, grid, matrices):
     """Linearly interpolate a redshift-tabulated projection matrix.
 
@@ -1573,23 +1507,6 @@ def _project_redshift_luminosity_filters(context: ModelContext, rest_lum, redshi
     cache = context.redshift_projection_cache_jax
     matrix = _interp_redshift_projection_matrix(redshift, cache.redshift_grid, cache.filter_projection)
     return matrix @ rest_lum
-
-
-def _project_redshift_scalar_filters(context: ModelContext, rest_value, redshift):
-    """Project rest-frame scalar values through redshift-interpolated matrices.
-
-    Parameters
-    ----------
-    context : object
-        context value.
-    rest_value : object
-        rest_value value.
-    redshift : object
-        redshift value.
-    """
-    cache = context.redshift_projection_cache_jax
-    matrix = _interp_redshift_projection_matrix(redshift, cache.redshift_grid, cache.scalar_projection)
-    return matrix @ rest_value
 
 
 def _local_line_gaussian_grid(line_wave, line_lumin, width_kms, *, n_local: int = 9):
@@ -1908,21 +1825,6 @@ def _project_fixed_cached_local_nebular_line_filters(context: ModelContext, line
     return jnp.sum(projection_weight * line_flux_density[None, :, :], axis=(1, 2))
 
 
-def _interp_rest_sed(target_wave, source_wave, source_sed):
-    """Interpolate one rest-frame SED onto a new wavelength grid.
-
-    Parameters
-    ----------
-    target_wave : object
-        target_wave value.
-    source_wave : object
-        source_wave value.
-    source_sed : object
-        source_sed value.
-    """
-    return jnp.interp(target_wave, source_wave, source_sed, left=0.0, right=0.0)
-
-
 def _interp_dale_template(alpha, alpha_grid, dust_lumin_grid):
     """Interpolate the Dale 2014 host-dust grid in alpha.
 
@@ -1954,21 +1856,6 @@ def _host_dust_emission(context: ModelContext, dust_luminosity, dust_alpha):
     dust_template = _interp_dale_template(dust_alpha, context.dust_alpha_grid_jax, context.dust_lumin_rest_jax)
     dust_rest_native = jnp.clip(dust_luminosity, 0.0, None) * jnp.clip(dust_template, 0.0, None)
     return dust_rest_native
-
-
-def _lnu_lsun_per_hz_to_llambda_w_per_a(wave_a, lnu_lsun_per_hz):
-    """Convert DSPS `Lnu` in Lsun/Hz to `Llambda` in W/Angstrom.
-
-    Parameters
-    ----------
-    wave_a : object
-        wave_a value.
-    lnu_lsun_per_hz : object
-        lnu_lsun_per_hz value.
-    """
-    wave_m = jnp.maximum(wave_a, 1e-12) * 1.0e-10
-    lnu_w_per_hz = lnu_lsun_per_hz * L_SUN_W
-    return lnu_w_per_hz * C_MS / (wave_m * wave_m) * 1.0e-10
 
 
 def _host_metallicity_parameters(
@@ -3123,6 +3010,7 @@ def _evaluate_jaxqsofit_backend(
     line_coverage_rest=None,
     fixed_narrow_fwhm_kms=None,
     fixed_narrow_amp_scale=None,
+    feature_amplitude_scale=1.0,
 ):
     """Evaluate optional jaxqsofit spectral components inside jaxsedfit.
 
@@ -3148,6 +3036,9 @@ def _evaluate_jaxqsofit_backend(
         fixed_narrow_fwhm_kms value.
     fixed_narrow_amp_scale : object
         fixed_narrow_amp_scale value.
+    feature_amplitude_scale : object
+        Calibration scale defining the observed-spectrum coordinate system for
+        sampled line, Fe II, and Balmer amplitudes.
     """
     try:
         from jaxqsofit.components import SpectralComponentConfig, evaluate_joint_spectral_components
@@ -3185,6 +3076,7 @@ def _evaluate_jaxqsofit_backend(
         feii_template_wave_rest=rest_wave,
         feii_template_flux=feii_template_flux,
         site_prefix="jqf",
+        feature_amplitude_scale=feature_amplitude_scale,
     )
     result["component_config"] = component_cfg
     return result
@@ -4187,6 +4079,7 @@ def evaluate_photometric_state(
     spec_torus_model_fluxes = jnp.zeros_like(spec_fluxes)
     spec_continuum_model_fluxes = jnp.zeros_like(spec_fluxes)
     spectrum_scale = jnp.asarray(1.0, dtype=jnp.float64)
+    feature_amplitude_scale = jnp.asarray(1.0, dtype=jnp.float64)
     spec_likelihood_weight = jnp.asarray(1.0, dtype=jnp.float64)
     jqf_line_photometry = jnp.zeros_like(pred_fluxes)
     jqf_feii_photometry = jnp.zeros_like(pred_fluxes)
@@ -4196,6 +4089,32 @@ def evaluate_photometric_state(
     jqf_extrapolated_narrow_photometry = jnp.zeros_like(pred_fluxes)
     jqf_photometry_adjustment = jnp.zeros_like(pred_fluxes)
     if spectroscopy_enabled:
+        if cfg.spectroscopy_config.fit_scale:
+            scale_prior = _prior_distribution(
+                prior_config,
+                "log_spectrum_scale",
+                dist.Normal(0.0, np.log(10.0) * cfg.spectroscopy_config.scale_prior_sigma_dex),
+            )
+            n_spectra = len(context.spec_instruments)
+            if n_spectra > 1:
+                log_spectrum_scale = numpyro.sample(
+                    "log_spectrum_scale",
+                    scale_prior.expand([n_spectra]).to_event(1),
+                )
+                spectrum_scale = jnp.exp(log_spectrum_scale)
+            else:
+                log_spectrum_scale = numpyro.sample(
+                    "log_spectrum_scale",
+                    scale_prior,
+                )
+                spectrum_scale = jnp.exp(log_spectrum_scale)
+        else:
+            log_spectrum_scale = jnp.asarray(0.0, dtype=jnp.float64)
+        feature_amplitude_scale = (
+            spectrum_scale[0]
+            if jnp.ndim(spectrum_scale) > 0
+            else spectrum_scale
+        )
         backend = str(cfg.spectroscopy_config.backend).lower()
         if backend == "jaxqsofit":
             use_spec_resolution_continuum = bool(
@@ -4315,6 +4234,7 @@ def evaluate_photometric_state(
                 feii_template_wave_native,
                 feii_template_flux_native,
                 line_coverage_rest=jaxqsofit_line_coverage_rest,
+                feature_amplitude_scale=feature_amplitude_scale,
             )
             jqf_cfg = cfg.spectroscopy_config.jaxqsofit
             if host_capture_enabled and bool(jqf_cfg.use_spectral_lines):
@@ -4508,29 +4428,10 @@ def evaluate_photometric_state(
                 numpyro.deterministic("jqf_narrow_line_flux_proxy", jqf_narrow_flux)
                 numpyro.deterministic("sed_narrow_line_flux_proxy", sed_narrow_flux)
             spec_model_fluxes = jqf_components["total"]
-        if cfg.spectroscopy_config.fit_scale:
-            scale_prior = _prior_distribution(
-                prior_config,
-                "log_spectrum_scale",
-                dist.Normal(0.0, np.log(10.0) * cfg.spectroscopy_config.scale_prior_sigma_dex),
-            )
-            n_spectra = len(context.spec_instruments)
-            if n_spectra > 1:
-                log_spectrum_scale = numpyro.sample(
-                    "log_spectrum_scale",
-                    scale_prior.expand([n_spectra]).to_event(1),
-                )
-                spectrum_scale = jnp.exp(log_spectrum_scale)
-                spec_model_fluxes = spectrum_scale[spec_spectrum_index] * spec_model_fluxes
-            else:
-                log_spectrum_scale = numpyro.sample(
-                    "log_spectrum_scale",
-                    scale_prior,
-                )
-                spectrum_scale = jnp.exp(log_spectrum_scale)
-                spec_model_fluxes = spectrum_scale * spec_model_fluxes
+        if jnp.ndim(spectrum_scale) > 0:
+            spec_model_fluxes = spectrum_scale[spec_spectrum_index] * spec_model_fluxes
         else:
-            log_spectrum_scale = jnp.asarray(0.0, dtype=jnp.float64)
+            spec_model_fluxes = spectrum_scale * spec_model_fluxes
         spec_logl = spectroscopic_loglike(
             spec_model_fluxes,
             spec_fluxes,
@@ -4723,6 +4624,7 @@ def evaluate_photometric_state(
     numpyro.deterministic("spec_torus_model_fluxes", spec_torus_model_fluxes)
     numpyro.deterministic("spectrum_scale_fit", spectrum_scale)
     numpyro.deterministic("log_spectrum_scale_fit", log_spectrum_scale)
+    numpyro.deterministic("jqf_feature_amplitude_scale", feature_amplitude_scale)
     numpyro.deterministic("spectrum_host_capture_fraction", spec_host_capture_fraction_by_spectrum)
     numpyro.deterministic("spectroscopy_likelihood_weight", spec_likelihood_weight)
     numpyro.deterministic("spectroscopy_loglike", spec_logl)

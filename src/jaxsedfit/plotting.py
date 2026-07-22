@@ -398,22 +398,6 @@ def _median_site(pred: dict[str, Any], key: str) -> np.ndarray:
     return np.median(arr, axis=0) if arr.ndim > 1 else arr
 
 
-def _percentile_site(pred: dict[str, Any], key: str, q: float) -> np.ndarray:
-    """Return one percentile across predictive draws for a site.
-
-    Parameters
-    ----------
-    pred : mapping
-        Predictive arrays keyed by deterministic site name.
-    key : str
-        Predictive site to reduce.
-    q : float
-        Percentile between 0 and 100.
-    """
-    arr = np.asarray(pred[key], dtype=float)
-    return np.percentile(arr, q, axis=0) if arr.ndim > 1 else arr
-
-
 def _site_sum(pred: dict[str, Any], keys: tuple[str, ...]) -> np.ndarray:
     """Return the per-draw sum of available predictive sites.
 
@@ -428,36 +412,6 @@ def _site_sum(pred: dict[str, Any], keys: tuple[str, ...]) -> np.ndarray:
     if not arrays:
         return np.asarray([])
     return np.sum(arrays, axis=0)
-
-
-def _median_site_sum(pred: dict[str, Any], keys: tuple[str, ...]) -> np.ndarray:
-    """Return the median draw of a summed component group.
-
-    Parameters
-    ----------
-    pred : mapping
-        Predictive arrays keyed by deterministic site name.
-    keys : tuple of str
-        Predictive sites to add before taking the median.
-    """
-    arr = _site_sum(pred, keys)
-    return np.median(arr, axis=0) if arr.ndim > 1 else arr
-
-
-def _percentile_site_sum(pred: dict[str, Any], keys: tuple[str, ...], q: float) -> np.ndarray:
-    """Return one percentile across predictive draws for a summed component group.
-
-    Parameters
-    ----------
-    pred : mapping
-        Predictive arrays keyed by deterministic site name.
-    keys : tuple of str
-        Predictive sites to add before taking the percentile.
-    q : float
-        Percentile between 0 and 100.
-    """
-    arr = _site_sum(pred, keys)
-    return np.percentile(arr, q, axis=0) if arr.ndim > 1 else arr
 
 
 def _bridged_jaxsedfit_agn_lines(pred: dict[str, Any]) -> np.ndarray | None:
@@ -577,6 +531,7 @@ def plot_fit_sed(
     posterior: str = "latest",
     show: bool = False,
     annotate_band_names: bool = True,
+    title: str | None = None,
 ):
     """Render a component SED plot for a fitted jaxsedfit object.
 
@@ -592,6 +547,8 @@ def plot_fit_sed(
         If True, display the figure interactively.
     annotate_band_names : bool, optional
         If True, label observed photometric points by filter name.
+    title : str, optional
+        Optional title for the SED panel.
     """
     pred = fitter.predict(posterior=posterior)
     obs_wave = _median_site(pred, "obs_wave")
@@ -850,6 +807,8 @@ def plot_fit_sed(
         ax_sed.set_xscale("log")
         ax_sed.set_yscale("log")
         ax_sed.set_ylabel("Flux density (mJy)")
+        if title is not None:
+            ax_sed.set_title(str(title))
         ax_resid.set_ylabel("Obs - Model (mJy)")
         ax_resid.set_xlabel("Observed-frame wavelength (Å)")
         ax_sed.legend(loc="lower right", fontsize=9, ncol=2)

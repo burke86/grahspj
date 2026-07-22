@@ -10,7 +10,7 @@ from numpyro.handlers import seed as seed_handler, trace as trace_handler
 from numpyro.infer import MCMC, NUTS, Predictive, SVI, Trace_ELBO, init_to_value
 from numpyro.infer.autoguide import AutoDelta
 
-from .config import FitConfig, _coerce_prior_config, fit_config_from_mapping, serialize_config
+from .config import FitConfig, fit_config_from_mapping, serialize_config
 from .model import grahsp_photometric_model
 from .preload import ModelContext, build_model_context
 from .results import FitResult, _FitState, median_mapping
@@ -94,12 +94,13 @@ def _joint_dense_mass_blocks(
         add_group(lambda name: name.startswith("jqf_line_"))
     add_group(lambda name: name.startswith(("jqf_feii_", "jqf_balmer_")))
 
-    # Joint-only normalization geometry. These parameters trade host and AGN
-    # light between the spectrum and photometry and therefore need one block.
+    # Joint-only astrophysical normalization geometry. Keep the instrumental
+    # spectrum scale diagonal: in real joint fits its much tighter calibration
+    # prior and direct action on every spectral pixel make the combined block
+    # poorly conditioned and can collapse the adapted NUTS step size.
     joint_normalization_names = {
         "log_agn_amp", "pl_slope", "pl_bend_loc", "log_pl_bend_loc",
         "pl_bend_width", "log_pl_bend_width", "ebv_agn", "log_ebv_agn",
-        "log_spectrum_scale", "spectrum_scale",
         "log_stellar_mass", "ebv_gal", "log_ebv_gal",
         "log_host_capture_scale_arcsec", "host_capture_scale_arcsec",
     }
@@ -339,32 +340,6 @@ class JAXSEDFit:
         """Clear cached inference and predictive state."""
         self._fit_state = _FitState()
 
-    def _apply_runtime_overrides(
-        self,
-        prior_config: dict[str, Any] | None = None,
-        dsps_ssp_fn: str | None = None,
-    ) -> None:
-        """Apply one-off fit-time overrides and rebuild context if required.
-
-        Parameters
-        ----------
-        prior_config : mapping or PriorConfig, optional
-            Replacement prior configuration for this fit call.
-        dsps_ssp_fn : str, optional
-            Replacement SSP template path. Rebuilds the static model context
-            when it differs from the configured path.
-        """
-        rebuild_context = False
-        if prior_config is not None:
-            self.config.prior_config = _coerce_prior_config(prior_config)
-            self._reset_fit_state()
-        if dsps_ssp_fn is not None and str(dsps_ssp_fn) != str(self.config.galaxy.dsps_ssp_fn):
-            self.config.galaxy.dsps_ssp_fn = str(dsps_ssp_fn)
-            rebuild_context = True
-        if rebuild_context:
-            self.context = build_model_context(self.config)
-            self._reset_fit_state()
-
     def _model(self):
         """Return the bound NumPyro model for the current context."""
         return grahsp_photometric_model(self.context, include_components=False)
@@ -377,10 +352,6 @@ class JAXSEDFit:
             include_sed_agn_features=False,
             include_spectral_features=False,
         )
-
-    def _predictive_model(self):
-        """Return the bound NumPyro model used for posterior predictive products."""
-        return grahsp_photometric_model(self.context, include_components=True)
 
     @staticmethod
     def _prediction_kind(kind: str) -> str:
@@ -447,6 +418,7 @@ class JAXSEDFit:
             "spec_spectrum_index",
             "spectrum_scale_fit",
             "log_spectrum_scale_fit",
+            "jqf_feature_amplitude_scale",
             "spectrum_host_capture_fraction",
             "spectroscopy_loglike",
             "spectroscopy_likelihood_weight",
@@ -696,6 +668,7 @@ class JAXSEDFit:
                 "steps": inference.map_steps,
                 "learning_rate": inference.learning_rate,
                 "staged": inference.staged_map,
+                "plot_init": bool(inference.plot_init or output.plot_init),
             }
             if inference.staged_steps is not None:
                 map_kwargs["staged_steps"] = inference.staged_steps
@@ -722,6 +695,7 @@ class JAXSEDFit:
                 "steps": inference.map_steps,
                 "learning_rate": inference.learning_rate,
                 "staged": inference.staged_map,
+                "plot_init": bool(inference.plot_init or output.plot_init),
             }
             if inference.staged_steps is not None:
                 map_kwargs["staged_steps"] = inference.staged_steps
@@ -782,10 +756,6 @@ class JAXSEDFit:
             if output.save_fig:
                 saved_fig_path = Path(fig_path) if fig_path is not None else None
 
-        # Lightweight test doubles may call fit() on a partially constructed object
-        # without config/context. Preserve the direct fit payload for that case only.
-        if not hasattr(self, "config"):
-            return fit_output
         return self._make_result(
             method=method,
             path=saved_result_path,
@@ -841,6 +811,7 @@ class JAXSEDFit:
         progress_bar: bool = True,
         staged: bool | None = None,
         staged_steps: int | None = None,
+        plot_init: bool | None = None,
     ):
         """Run the Optax/NumPyro MAP optimization path.
 
@@ -856,11 +827,20 @@ class JAXSEDFit:
             staged value.
         staged_steps : object
             staged_steps value.
+        plot_init : bool, optional
+            If True, plot the stage-1 continuum/host MAP solution when staged
+            optimization is enabled and the final full MAP solution. The same
+            SED plotting style used for posterior results is used here.
         """
         self._reset_fit_state()
         steps = int(self.config.inference.map_steps if steps is None else steps)
         learning_rate = float(self.config.inference.learning_rate if learning_rate is None else learning_rate)
         staged = bool(self.config.inference.staged_map if staged is None else staged)
+        plot_init = bool(
+            self.config.inference.plot_init or self.config.output.plot_init
+            if plot_init is None
+            else plot_init
+        )
         if staged_steps is None:
             staged_steps = self.config.inference.staged_steps
         stage1_result = None
@@ -876,6 +856,14 @@ class JAXSEDFit:
                 rng_seed=self.config.inference.seed,
             )
             init_values = {k: np.asarray(v) for k, v in stage1_median.items()}
+            if plot_init:
+                self._plot_map_initialization(
+                    stage1_median,
+                    stage_name="Stage 1 continuum/host MAP initialization",
+                    attr_prefix="init_stage1",
+                    include_sed_agn_features=False,
+                    include_spectral_features=False,
+                )
 
         svi_result, median = self._run_map_svi(
             self._model,
@@ -897,9 +885,62 @@ class JAXSEDFit:
                 "median": stage1_median,
                 "losses": np.asarray(getattr(stage1_result, "losses", [])),
             }
+        if plot_init:
+            self._plot_map_initialization(
+                median,
+                stage_name="Stage 2 full MAP initialization" if staged else "Full MAP initialization",
+                attr_prefix="init_stage2" if staged else "init_map",
+                include_sed_agn_features=True,
+                include_spectral_features=True,
+            )
         self.samples = {k: np.asarray(v)[None, ...] for k, v in median.items()}
         self.predictive = None
         return self._make_result(method="map")
+
+    def _plot_map_initialization(
+        self,
+        median: Mapping[str, Any],
+        *,
+        stage_name: str,
+        attr_prefix: str,
+        include_sed_agn_features: bool,
+        include_spectral_features: bool,
+    ):
+        """Plot and retain one MAP solution using the standard SED figure.
+
+        The temporary predictive state is isolated from the fit state so that
+        plotting a warm start cannot alter the MAP point passed to NUTS.
+        """
+        samples = {key: np.asarray(value)[None, ...] for key, value in median.items()}
+        model = lambda: grahsp_photometric_model(
+            self.context,
+            include_components=True,
+            include_sed_agn_features=include_sed_agn_features,
+            include_spectral_features=include_spectral_features,
+        )
+        pred = Predictive(
+            model,
+            posterior_samples=samples,
+            return_sites=self._predictive_return_sites("plot"),
+        )(jax.random.PRNGKey(self.config.inference.seed + 16))
+        predictive = {key: np.asarray(value) for key, value in pred.items()}
+
+        previous_state = self._fit_state
+        try:
+            self._fit_state = _FitState(
+                method="map_init",
+                samples=samples,
+                predictive=predictive,
+                predictive_cache={"plot:all": predictive},
+            )
+            fig = self.plot_sed(show=True, title=stage_name)
+        finally:
+            self._fit_state = previous_state
+
+        setattr(self, f"{attr_prefix}_samples", samples)
+        setattr(self, f"{attr_prefix}_predictive", predictive)
+        setattr(self, f"{attr_prefix}_figure", fig)
+        return fig
 
     def fit_nuts(
         self,
@@ -1568,6 +1609,7 @@ class JAXSEDFit:
         posterior: str = "latest",
         show: bool = False,
         annotate_band_names: bool = True,
+        title: str | None = None,
     ):
         """Plot the fitted SED using the package plotting helper.
 
@@ -1582,6 +1624,8 @@ class JAXSEDFit:
             If True, display the Matplotlib figure interactively.
         annotate_band_names : bool, optional
             If True, label observed photometric points with their filter names.
+        title : str, optional
+            Optional title for the SED panel.
 
         Returns
         -------
@@ -1596,6 +1640,7 @@ class JAXSEDFit:
             posterior=posterior,
             show=show,
             annotate_band_names=annotate_band_names,
+            title=title,
         )
 
     def plot_corner(

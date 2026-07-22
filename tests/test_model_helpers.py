@@ -1480,6 +1480,7 @@ def test_jaxqsofit_backend_does_not_fix_narrow_width_without_explicit_override(m
 
     def fake_evaluate_joint_spectral_components(wave_obs, redshift, continuum_mjy, *, config, **kwargs):
         captured["config"] = config
+        captured["feature_amplitude_scale"] = kwargs["feature_amplitude_scale"]
         zeros = np.zeros_like(np.asarray(wave_obs, dtype=float))
         return {
             "total": np.asarray(continuum_mjy, dtype=float),
@@ -1516,12 +1517,14 @@ def test_jaxqsofit_backend_does_not_fix_narrow_width_without_explicit_override(m
         {"line": {"table": []}},
         wave,
         np.zeros_like(wave),
+        feature_amplitude_scale=2.0,
     )
 
     assert np.allclose(out["total"], 1.0)
     assert captured["config"].fixed_narrow_fwhm_kms is None
     assert captured["config"].fixed_narrow_amp_scale is None
     assert captured["config"].narrow_fwhm_kms_default == pytest.approx(500.0)
+    assert captured["feature_amplitude_scale"] == pytest.approx(2.0)
 
 
 def test_fit_config_mapping_coerces_agn_template_config():
@@ -1606,7 +1609,7 @@ def test_jaxqsofit_joint_backend_builds_flux_scaled_smart_priors(monkeypatch):
         flux=np.asarray([2.0, 4.0]),
         redshift=0.1,
     ).to_mapping()
-    assert float(prior["log_cont_norm"].loc) == pytest.approx(float(expected["log_cont_norm"].loc))
+    assert float(prior["cont_norm"].loc) == pytest.approx(float(expected["cont_norm"].loc))
     line_table = prior["line"]["table"]
     assert line_table
     assert min(float(row["minsca"]) for row in line_table) >= 3.0e-4
