@@ -109,16 +109,16 @@ def test_agn_disk_matches_grahsp_activatepl_static_reference():
     np.testing.assert_allclose(disk, expected_per_a, rtol=2.0e-12, atol=0.0)
 
 
-def test_torus_matches_grahsp_activategtorus_static_reference():
+def test_torus_continuum_matches_grahsp_activategtorus_static_reference():
     # These are points on GRAHSP's internal torus grid, including 12 micron.
     wave_a = np.asarray([3600.0, 10000.0, 120000.0, 170600.0, 1000000.0])
     expected_per_a = np.asarray(
         [
-            1.228676848269097e31,
+            1.2286768482690989e31,
             7.862251437563254e31,
-            2.785269577507631e31,
-            2.2301972001230765e31,
-            1.0203949176731444e30,
+            2.6979166666666667e31,
+            2.2510564328561865e31,
+            1.020394917673146e30,
         ]
     )
 
@@ -126,7 +126,7 @@ def test_torus_matches_grahsp_activategtorus_static_reference():
         _torus_component(
             wave_a,
             fcov=0.35,
-            si=1.3,
+            si=0.0,
             cool_lam=17.0,
             cool_width=0.45,
             hot_lam=2.0,

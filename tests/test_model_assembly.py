@@ -400,14 +400,13 @@ def test_default_extinction_priors_match_grahsp_log_uniform_support(monkeypatch)
         np.testing.assert_allclose(np.asarray(prior.high), np.log(10.0))
 
 
-def test_default_torus_and_agn_feature_priors_match_grahsp_support(monkeypatch):
+def test_default_torus_and_agn_feature_priors(monkeypatch):
     _patch_ssp(monkeypatch)
     context = build_model_context(_cfg())
 
     tr = _deterministic_trace(context, _fixed_component_data())
 
     linear_uniform_bounds = {
-        "si": (-4.0, 4.0),
         "cool_lam": (10.0, 30.0),
         "cool_width": (0.2, 0.65),
         "hot_lam": (1.0, 5.5),
@@ -418,6 +417,11 @@ def test_default_torus_and_agn_feature_priors_match_grahsp_support(monkeypatch):
         assert prior.__class__.__name__ == "Uniform"
         np.testing.assert_allclose(np.asarray(prior.low), low)
         np.testing.assert_allclose(np.asarray(prior.high), high)
+
+    si = tr["si"]["fn"]
+    assert si.__class__.__name__ == "Normal"
+    np.testing.assert_allclose(np.asarray(si.loc), 0.0)
+    np.testing.assert_allclose(np.asarray(si.scale), 1.0)
 
     fcov = tr["fcov"]["fn"]
     assert fcov.__class__.__name__ == "Uniform"
