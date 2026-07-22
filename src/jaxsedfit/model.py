@@ -3123,6 +3123,7 @@ def _evaluate_jaxqsofit_backend(
     line_coverage_rest=None,
     fixed_narrow_fwhm_kms=None,
     fixed_narrow_amp_scale=None,
+    feature_amplitude_scale=1.0,
 ):
     """Evaluate optional jaxqsofit spectral components inside jaxsedfit.
 
@@ -3148,6 +3149,9 @@ def _evaluate_jaxqsofit_backend(
         fixed_narrow_fwhm_kms value.
     fixed_narrow_amp_scale : object
         fixed_narrow_amp_scale value.
+    feature_amplitude_scale : object
+        Calibration scale defining the observed-spectrum coordinate system for
+        sampled line, Fe II, and Balmer amplitudes.
     """
     try:
         from jaxqsofit.components import SpectralComponentConfig, evaluate_joint_spectral_components
@@ -3185,6 +3189,7 @@ def _evaluate_jaxqsofit_backend(
         feii_template_wave_rest=rest_wave,
         feii_template_flux=feii_template_flux,
         site_prefix="jqf",
+        feature_amplitude_scale=feature_amplitude_scale,
     )
     result["component_config"] = component_cfg
     return result
@@ -4187,6 +4192,7 @@ def evaluate_photometric_state(
     spec_torus_model_fluxes = jnp.zeros_like(spec_fluxes)
     spec_continuum_model_fluxes = jnp.zeros_like(spec_fluxes)
     spectrum_scale = jnp.asarray(1.0, dtype=jnp.float64)
+    feature_amplitude_scale = jnp.asarray(1.0, dtype=jnp.float64)
     spec_likelihood_weight = jnp.asarray(1.0, dtype=jnp.float64)
     jqf_line_photometry = jnp.zeros_like(pred_fluxes)
     jqf_feii_photometry = jnp.zeros_like(pred_fluxes)
@@ -4196,6 +4202,32 @@ def evaluate_photometric_state(
     jqf_extrapolated_narrow_photometry = jnp.zeros_like(pred_fluxes)
     jqf_photometry_adjustment = jnp.zeros_like(pred_fluxes)
     if spectroscopy_enabled:
+        if cfg.spectroscopy_config.fit_scale:
+            scale_prior = _prior_distribution(
+                prior_config,
+                "log_spectrum_scale",
+                dist.Normal(0.0, np.log(10.0) * cfg.spectroscopy_config.scale_prior_sigma_dex),
+            )
+            n_spectra = len(context.spec_instruments)
+            if n_spectra > 1:
+                log_spectrum_scale = numpyro.sample(
+                    "log_spectrum_scale",
+                    scale_prior.expand([n_spectra]).to_event(1),
+                )
+                spectrum_scale = jnp.exp(log_spectrum_scale)
+            else:
+                log_spectrum_scale = numpyro.sample(
+                    "log_spectrum_scale",
+                    scale_prior,
+                )
+                spectrum_scale = jnp.exp(log_spectrum_scale)
+        else:
+            log_spectrum_scale = jnp.asarray(0.0, dtype=jnp.float64)
+        feature_amplitude_scale = (
+            spectrum_scale[0]
+            if jnp.ndim(spectrum_scale) > 0
+            else spectrum_scale
+        )
         backend = str(cfg.spectroscopy_config.backend).lower()
         if backend == "jaxqsofit":
             use_spec_resolution_continuum = bool(
@@ -4315,6 +4347,7 @@ def evaluate_photometric_state(
                 feii_template_wave_native,
                 feii_template_flux_native,
                 line_coverage_rest=jaxqsofit_line_coverage_rest,
+                feature_amplitude_scale=feature_amplitude_scale,
             )
             jqf_cfg = cfg.spectroscopy_config.jaxqsofit
             if host_capture_enabled and bool(jqf_cfg.use_spectral_lines):
@@ -4508,29 +4541,10 @@ def evaluate_photometric_state(
                 numpyro.deterministic("jqf_narrow_line_flux_proxy", jqf_narrow_flux)
                 numpyro.deterministic("sed_narrow_line_flux_proxy", sed_narrow_flux)
             spec_model_fluxes = jqf_components["total"]
-        if cfg.spectroscopy_config.fit_scale:
-            scale_prior = _prior_distribution(
-                prior_config,
-                "log_spectrum_scale",
-                dist.Normal(0.0, np.log(10.0) * cfg.spectroscopy_config.scale_prior_sigma_dex),
-            )
-            n_spectra = len(context.spec_instruments)
-            if n_spectra > 1:
-                log_spectrum_scale = numpyro.sample(
-                    "log_spectrum_scale",
-                    scale_prior.expand([n_spectra]).to_event(1),
-                )
-                spectrum_scale = jnp.exp(log_spectrum_scale)
-                spec_model_fluxes = spectrum_scale[spec_spectrum_index] * spec_model_fluxes
-            else:
-                log_spectrum_scale = numpyro.sample(
-                    "log_spectrum_scale",
-                    scale_prior,
-                )
-                spectrum_scale = jnp.exp(log_spectrum_scale)
-                spec_model_fluxes = spectrum_scale * spec_model_fluxes
+        if jnp.ndim(spectrum_scale) > 0:
+            spec_model_fluxes = spectrum_scale[spec_spectrum_index] * spec_model_fluxes
         else:
-            log_spectrum_scale = jnp.asarray(0.0, dtype=jnp.float64)
+            spec_model_fluxes = spectrum_scale * spec_model_fluxes
         spec_logl = spectroscopic_loglike(
             spec_model_fluxes,
             spec_fluxes,
@@ -4723,6 +4737,7 @@ def evaluate_photometric_state(
     numpyro.deterministic("spec_torus_model_fluxes", spec_torus_model_fluxes)
     numpyro.deterministic("spectrum_scale_fit", spectrum_scale)
     numpyro.deterministic("log_spectrum_scale_fit", log_spectrum_scale)
+    numpyro.deterministic("jqf_feature_amplitude_scale", feature_amplitude_scale)
     numpyro.deterministic("spectrum_host_capture_fraction", spec_host_capture_fraction_by_spectrum)
     numpyro.deterministic("spectroscopy_likelihood_weight", spec_likelihood_weight)
     numpyro.deterministic("spectroscopy_loglike", spec_logl)

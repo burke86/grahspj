@@ -1480,6 +1480,7 @@ def test_jaxqsofit_backend_does_not_fix_narrow_width_without_explicit_override(m
 
     def fake_evaluate_joint_spectral_components(wave_obs, redshift, continuum_mjy, *, config, **kwargs):
         captured["config"] = config
+        captured["feature_amplitude_scale"] = kwargs["feature_amplitude_scale"]
         zeros = np.zeros_like(np.asarray(wave_obs, dtype=float))
         return {
             "total": np.asarray(continuum_mjy, dtype=float),
@@ -1516,12 +1517,14 @@ def test_jaxqsofit_backend_does_not_fix_narrow_width_without_explicit_override(m
         {"line": {"table": []}},
         wave,
         np.zeros_like(wave),
+        feature_amplitude_scale=2.0,
     )
 
     assert np.allclose(out["total"], 1.0)
     assert captured["config"].fixed_narrow_fwhm_kms is None
     assert captured["config"].fixed_narrow_amp_scale is None
     assert captured["config"].narrow_fwhm_kms_default == pytest.approx(500.0)
+    assert captured["feature_amplitude_scale"] == pytest.approx(2.0)
 
 
 def test_fit_config_mapping_coerces_agn_template_config():
