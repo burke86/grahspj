@@ -447,6 +447,7 @@ class JAXSEDFit:
             "spec_spectrum_index",
             "spectrum_scale_fit",
             "log_spectrum_scale_fit",
+            "jqf_feature_amplitude_scale",
             "spectrum_host_capture_fraction",
             "spectroscopy_loglike",
             "spectroscopy_likelihood_weight",
