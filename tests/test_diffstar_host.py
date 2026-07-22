@@ -22,7 +22,7 @@ from jaxsedfit.config import (
     PhotometryData,
     RedshiftPriorConfig,
 )
-from jaxsedfit.core import JAXSEDFit
+from jaxsedfit.core import JAXSEDFit, _joint_dense_mass_blocks, _resolve_dense_mass_structure
 from jaxsedfit.model import (
     _analytic_delayed_burst_age_weights,
     _analytic_delayed_ssp_weights,
@@ -80,6 +80,7 @@ def test_diffstar_host_model_exposes_log_stellar_mass(monkeypatch):
     assert np.all(np.isfinite(np.asarray(tr["host_age_weights"]["value"])))
     assert np.all(np.isfinite(np.asarray(tr["host_lgmet_weights"]["value"])))
     assert np.isfinite(float(np.asarray(tr["formed_stellar_mass"]["value"])))
+    assert np.isfinite(float(np.asarray(tr["log_sfr_fit"]["value"])))
     assert np.isfinite(float(np.asarray(tr["log_dust_luminosity_fit"]["value"])))
     assert np.all(np.isfinite(np.asarray(tr["host_absorbed_rest_sed"]["value"])))
     assert np.all(np.isfinite(np.asarray(tr["dust_rest_sed"]["value"])))
@@ -120,6 +121,9 @@ def test_delayed_host_model_is_default(monkeypatch):
     assert np.isfinite(float(np.asarray(tr["sfh_tau_gyr_fit"]["value"])))
     assert np.all(np.isfinite(np.asarray(tr["gal_sfr_table"]["value"], dtype=float)))
     assert np.all(np.isfinite(np.asarray(tr["gal_smh_table"]["value"], dtype=float)))
+    assert float(np.asarray(tr["log_sfr_fit"]["value"])) == pytest.approx(
+        np.log10(float(np.asarray(tr["gal_sfr_table"]["value"])[-1]))
+    )
 
 
 def test_default_dale_alpha_prior_matches_grahsp_uniform_grid(monkeypatch):
@@ -740,6 +744,9 @@ def test_fit_nuts_reads_sampler_settings_from_config(monkeypatch):
         def run(self, rng_key):
             captured["rng_key"] = rng_key
 
+        def print_summary(self):
+            captured["print_summary_called"] = True
+
         def get_samples(self):
             return {"log_stellar_mass": np.array([10.0, 10.2])}
 
@@ -769,11 +776,54 @@ def test_fit_nuts_reads_sampler_settings_from_config(monkeypatch):
     assert captured["mcmc_kwargs"]["num_samples"] == 12
     assert captured["mcmc_kwargs"]["num_chains"] == 2
     assert captured["mcmc_kwargs"]["progress_bar"] is False
+    assert captured["print_summary_called"] is True
     assert fitter.predictive is None
 
 
-def test_inference_defaults_to_dense_mass_adaptation():
-    assert InferenceConfig().dense_mass is True
+def test_inference_defaults_to_block_dense_mass_adaptation():
+    assert InferenceConfig().dense_mass == "blocks"
+
+
+def test_joint_dense_mass_blocks_follow_active_sites():
+    values = {
+        "log_agn_amp": np.array(30.0),
+        "pl_slope": np.array(-1.8),
+        "log_spectrum_scale": np.array(0.0),
+        "cool_lam": np.array(17.0),
+        "cool_width": np.array(0.4),
+        "log_stellar_mass": np.array(10.0),
+        "log_sfh_age_gyr": np.array(0.5),
+        "jqf_line_amp_group": np.ones(3),
+        "jqf_line_sig_group": np.ones(3),
+        "jqf_feii_norm": np.array(1.0),
+        "jqf_feii_fwhm": np.array(3000.0),
+        "unrelated": np.array(0.0),
+    }
+
+    blocks = _joint_dense_mass_blocks(values)
+
+    assert ("jqf_line_amp_group", "jqf_line_sig_group") in blocks
+    assert ("jqf_feii_fwhm", "jqf_feii_norm") in blocks
+    assert (
+        "log_agn_amp",
+        "log_sfh_age_gyr",
+        "log_spectrum_scale",
+        "log_stellar_mass",
+        "pl_slope",
+    ) in blocks
+    assert ("cool_lam", "cool_width") in blocks
+    assert all("unrelated" not in block for block in blocks)
+    flattened = [name for block in blocks for name in block]
+    assert len(flattened) == len(set(flattened))
+
+
+def test_dense_mass_structure_accepts_block_and_explicit_modes():
+    values = {"log_agn_amp": np.array(30.0), "pl_slope": np.array(-1.8)}
+    assert _resolve_dense_mass_structure("blocks", values) == [("log_agn_amp", "pl_slope")]
+    assert _resolve_dense_mass_structure("dense", values) is True
+    assert _resolve_dense_mass_structure("diagonal", values) is False
+    explicit = [("log_agn_amp", "pl_slope")]
+    assert _resolve_dense_mass_structure(explicit, values) is explicit
 
 
 def test_fit_ns_populates_samples(monkeypatch):

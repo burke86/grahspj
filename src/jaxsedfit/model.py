@@ -17,6 +17,7 @@ from __future__ import annotations
 # Upstream license: CeCILL v2. See LICENSES/CeCILL-v2.txt and
 # LICENSES/THIRD_PARTY_NOTICES.md.
 
+from dataclasses import replace
 from functools import lru_cache
 from typing import Any
 
@@ -567,12 +568,10 @@ def _resolve_tied_metallicity(context: ModelContext, prior_config: dict[str, Any
         gal_lgmet = _sample_bounded_normal(
             prior_config,
             "gal_lgmet",
-            float(
-                _absolute_z_to_gal_lgmet(
-                    galaxy_cfg.stellar_metallicity,
-                    metallicity_coordinate=galaxy_cfg.ssp_metallicity_coordinate,
-                    solar_metallicity=galaxy_cfg.ssp_solar_metallicity,
-                )
+            _absolute_z_to_gal_lgmet(
+                galaxy_cfg.stellar_metallicity,
+                metallicity_coordinate=galaxy_cfg.ssp_metallicity_coordinate,
+                solar_metallicity=galaxy_cfg.ssp_solar_metallicity,
             ),
             0.5,
             jnp.min(ssp_lgmet),
@@ -1716,7 +1715,7 @@ def _project_local_line_filters(
     )
 
 
-def _project_local_nebular_line_filters(
+def _project_integrated_local_line_filters(
     context: ModelContext,
     line_wave,
     line_lumin,
@@ -1726,7 +1725,7 @@ def _project_local_nebular_line_filters(
     luminosity_distance_m,
     igm,
 ):
-    """Project flux-conserving nebular line emission through filters using local line grids.
+    """Project integrated line luminosities through filters on local grids.
 
     Parameters
     ----------
@@ -1759,7 +1758,7 @@ def _project_local_nebular_line_filters(
     curves = context.packed_filter_curves_jax
 
     def _one_filter(filt_wave, filt_trans, denom, eff_wave):
-        """Project the local nebular line grid through one packed filter curve.
+        """Project the local line grid through one packed filter curve.
 
         Parameters
         ----------
@@ -1782,6 +1781,29 @@ def _project_local_nebular_line_filters(
         curves.transmission,
         curves.denom,
         context.filter_effective_wavelength_jax,
+    )
+
+
+def _project_local_nebular_line_filters(
+    context: ModelContext,
+    line_wave,
+    line_lumin,
+    width_kms,
+    ebv_total,
+    redshift,
+    luminosity_distance_m,
+    igm,
+):
+    """Backward-compatible nebular wrapper for integrated line projection."""
+    return _project_integrated_local_line_filters(
+        context,
+        line_wave,
+        line_lumin,
+        width_kms,
+        ebv_total,
+        redshift,
+        luminosity_distance_m,
+        igm,
     )
 
 
@@ -1963,12 +1985,10 @@ def _host_metallicity_parameters(
         gal_lgmet = _sample_bounded_normal(
             prior_config,
             "gal_lgmet",
-            float(
-                _absolute_z_to_gal_lgmet(
-                    galaxy_cfg.stellar_metallicity,
-                    metallicity_coordinate=galaxy_cfg.ssp_metallicity_coordinate,
-                    solar_metallicity=galaxy_cfg.ssp_solar_metallicity,
-                )
+            _absolute_z_to_gal_lgmet(
+                galaxy_cfg.stellar_metallicity,
+                metallicity_coordinate=galaxy_cfg.ssp_metallicity_coordinate,
+                solar_metallicity=galaxy_cfg.ssp_solar_metallicity,
             ),
             0.5,
             jnp.min(ssp_lgmet),
@@ -2091,6 +2111,7 @@ def _build_diffstar_host(
         "ssp_lgmet": ssp_lgmet,
         "sfh_age_gyr": jnp.asarray(0.0, dtype=jnp.float64),
         "sfh_tau_gyr": jnp.asarray(0.0, dtype=jnp.float64),
+        "current_sfr": base_history.sfh[-1] * sfh_scale,
     }
     if not full_output:
         return state
@@ -2314,6 +2335,7 @@ def _build_delayed_host(
         "sfh_burst_fraction": burst_fraction,
         "sfh_burst_age_gyr": burst_age_gyr,
         "sfh_burst_tau_gyr": burst_tau_gyr,
+        "current_sfr": base_sfh[-1] * sfh_scale,
     }
     if not full_output:
         return state
@@ -2418,6 +2440,7 @@ def _empty_host_state(context: ModelContext):
         "sfh_tau_gyr": jnp.asarray(0.0, dtype=jnp.float64),
         "gal_sfr_table": jnp.zeros_like(gal_t_table),
         "gal_smh_table": jnp.zeros_like(gal_t_table),
+        "current_sfr": jnp.asarray(0.0, dtype=jnp.float64),
         "ssp_lg_age_gyr": ssp_lg_age_gyr,
         "ssp_lgmet": ssp_lgmet,
     }
@@ -2736,24 +2759,27 @@ def _agn_variability_nev(agn_bol_lum_w, max_nev):
     return jnp.minimum(max_nev, simm_nev)
 
 
-def _host_capture_fraction(spatial_scale_arcsec, turnover_arcsec, slope):
-    """Map a band's effective spatial scale to the captured host-light fraction.
+def _host_capture_fraction(effective_radius_arcsec, host_size_arcsec):
+    """Map an effective measurement radius to the captured host-light fraction.
+
+    The fixed-slope relation ``r_eff**2 / (r_eff**2 + r_host**2)`` uses one
+    inferred host-size parameter. Aperture radii and Gaussian-PSF effective
+    radii are converted to this common coordinate while building the context.
+    Invalid radii represent measurements without usable spatial metadata and
+    therefore default to total capture.
 
     Parameters
     ----------
-    spatial_scale_arcsec : object
-        spatial_scale_arcsec value.
-    turnover_arcsec : object
-        turnover_arcsec value.
-    slope : object
-        slope value.
+    effective_radius_arcsec : object
+        Effective measurement radius in arcseconds.
+    host_size_arcsec : object
+        Host turnover radius in arcseconds (the 50-percent capture radius).
     """
-    spatial_scale_arcsec = jnp.asarray(spatial_scale_arcsec, dtype=jnp.float64)
-    valid = jnp.isfinite(spatial_scale_arcsec) & (spatial_scale_arcsec > 0.0)
-    turnover_arcsec = jnp.maximum(jnp.asarray(turnover_arcsec, dtype=jnp.float64), 1.0e-3)
-    slope = jnp.maximum(jnp.asarray(slope, dtype=jnp.float64), 1.0e-3)
-    safe_scale = jnp.where(valid, jnp.clip(spatial_scale_arcsec, 1.0e-3, 1.0e6), turnover_arcsec)
-    frac = jax.nn.sigmoid(slope * (jnp.log(safe_scale) - jnp.log(turnover_arcsec)))
+    effective_radius_arcsec = jnp.asarray(effective_radius_arcsec, dtype=jnp.float64)
+    valid = jnp.isfinite(effective_radius_arcsec) & (effective_radius_arcsec > 0.0)
+    host_size_arcsec = jnp.maximum(jnp.asarray(host_size_arcsec, dtype=jnp.float64), 1.0e-3)
+    safe_radius = jnp.where(valid, jnp.clip(effective_radius_arcsec, 1.0e-3, 1.0e6), host_size_arcsec)
+    frac = safe_radius**2 / (safe_radius**2 + host_size_arcsec**2)
     return jnp.where(valid, frac, 1.0)
 
 
@@ -2996,8 +3022,6 @@ def _fixed_spectral_line_coverage_rest(context: ModelContext, cfg: FitConfig) ->
         return None
     if str(cfg.spectroscopy_config.backend).lower() != "jaxqsofit":
         return None
-    if not bool(cfg.spectroscopy_config.jaxqsofit.use_spectral_lines):
-        return None
     spec_wave = np.asarray(context.spec_wave_obs, dtype=float)
     spec_mask = np.asarray(context.spec_mask, dtype=bool)
     valid = spec_mask & np.isfinite(spec_wave) & (spec_wave > 0.0)
@@ -3147,12 +3171,13 @@ def _evaluate_jaxqsofit_backend(
         include_high_ionization_lines=bool(jqf_cfg.include_high_ionization_lines),
         broad_fwhm_kms_default=DEFAULT_BROAD_LINE_WIDTH_KMS,
         feii_fwhm_kms_default=DEFAULT_BROAD_LINE_WIDTH_KMS,
+        feii_fnu_pivot_rest=4575.0,
         balmer_velocity_kms_default=DEFAULT_BROAD_LINE_WIDTH_KMS,
         broadening_convolution=jqf_cfg.broadening_convolution,
         fixed_narrow_fwhm_kms=fixed_narrow_fwhm_kms,
         fixed_narrow_amp_scale=fixed_narrow_amp_scale,
     )
-    return evaluate_joint_spectral_components(
+    result = evaluate_joint_spectral_components(
         wave_obs,
         redshift,
         continuum_mjy,
@@ -3161,6 +3186,188 @@ def _evaluate_jaxqsofit_backend(
         feii_template_flux=feii_template_flux,
         site_prefix="jqf",
     )
+    result["component_config"] = component_cfg
+    return result
+
+
+def _simple_feii_fnu_shape(wave_obs, redshift, template_wave_rest, template_flux, pivot_rest=4575.0):
+    """Return the unbroadened SED Fe II template as a fixed-pivot f-nu shape."""
+    wave_rest = jnp.asarray(wave_obs, dtype=jnp.float64) / jnp.maximum(1.0 + redshift, 1.0e-8)
+    flambda_shape = jnp.interp(
+        wave_rest,
+        jnp.asarray(template_wave_rest, dtype=jnp.float64),
+        jnp.asarray(template_flux, dtype=jnp.float64),
+        left=0.0,
+        right=0.0,
+    )
+    return flambda_shape * (wave_rest / float(pivot_rest)) ** 2
+
+
+def _project_jaxqsofit_smooth_state_filters(
+    context,
+    state,
+    redshift,
+    component_cfg,
+    feii_template_wave,
+    feii_template_flux,
+    coverage_rest,
+    sed_feii_scale,
+):
+    """Project smooth JQF features through filters from one shared log grid.
+
+    Fe II broadening and Balmer-edge smoothing are the expensive operations.
+    Rendering them independently on every packed filter curve creates a large
+    batched FFT graph.  A single log-wavelength rendering is sufficiently fine
+    for these broad components; its result is interpolated onto the native
+    filter curves before exact filter quadrature.
+    """
+    from jaxqsofit.components import render_joint_feature_state
+
+    curves = context.packed_filter_curves_jax
+    valid_filter_waves = [
+        np.asarray(filt.wave, dtype=float)
+        for filt in context.filters
+        if np.asarray(filt.wave).size > 0
+    ]
+    wave_min = min(float(np.min(wave)) for wave in valid_filter_waves)
+    wave_max = max(float(np.max(wave)) for wave in valid_filter_waves)
+    n_grid = int(context.fit_config.spectroscopy_config.jaxqsofit.photometric_feature_grid_size)
+    feature_wave = jnp.geomspace(wave_min, wave_max, n_grid)
+    # Lines have their own analytic, flux-conserving filter projection. Avoid
+    # constructing their many-component profiles in this smooth-feature pass.
+    smooth_component_cfg = replace(component_cfg, use_lines=False)
+    rendered = render_joint_feature_state(
+        feature_wave,
+        redshift,
+        state,
+        config=smooth_component_cfg,
+        feii_template_wave_rest=feii_template_wave,
+        feii_template_flux=feii_template_flux,
+    )
+    sed_feii = sed_feii_scale * _simple_feii_fnu_shape(
+        feature_wave, redshift, feii_template_wave, feii_template_flux
+    )
+    if coverage_rest is None:
+        covered = jnp.ones_like(feature_wave, dtype=bool)
+    else:
+        feature_wave_rest = feature_wave / jnp.maximum(1.0 + redshift, 1.0e-8)
+        covered = (feature_wave_rest >= coverage_rest[0]) & (feature_wave_rest <= coverage_rest[1])
+    feii_grid = jnp.where(covered, rendered["feii"], 0.0)
+    extrapolated_feii_grid = jnp.where(covered, 0.0, sed_feii)
+
+    def _interpolate_one(wave):
+        return (
+            jnp.interp(wave, feature_wave, feii_grid, left=0.0, right=0.0),
+            jnp.interp(wave, feature_wave, extrapolated_feii_grid, left=0.0, right=0.0),
+            jnp.interp(wave, feature_wave, rendered["balmer"], left=0.0, right=0.0),
+        )
+
+    feii_fnu, extrapolated_feii_fnu, balmer_fnu = jax.vmap(_interpolate_one)(curves.wave)
+    return (
+        _project_fnu_mjy_filter_curves(context, curves.wave, feii_fnu),
+        _project_fnu_mjy_filter_curves(context, curves.wave, extrapolated_feii_fnu),
+        _project_fnu_mjy_filter_curves(context, curves.wave, balmer_fnu),
+    )
+
+
+def _project_fnu_mjy_filter_curves(context: ModelContext, wave_obs, fnu_mjy):
+    """Project f-nu samples on packed native filter curves into band fluxes."""
+    curves = context.packed_filter_curves_jax
+    wave_obs = jnp.asarray(wave_obs, dtype=jnp.float64)
+    fnu_mjy = jnp.asarray(fnu_mjy, dtype=jnp.float64)
+    conversion = 1.0e-10 / 299792458.0 * 1.0e29
+    flambda = fnu_mjy / jnp.maximum(conversion * wave_obs * wave_obs, 1.0e-30)
+    weighted = jnp.where(curves.valid_mask, flambda * curves.transmission, 0.0)
+    mean_flambda = jnp.trapezoid(weighted, wave_obs, axis=1) / jnp.maximum(curves.denom, 1.0e-30)
+    return conversion * context.filter_effective_wavelength_jax**2 * mean_flambda
+
+
+def _project_jaxqsofit_line_state_filters(context: ModelContext, state, redshift, broad_only=None):
+    """Project sampled log-wavelength Gaussians using flux-conserving local grids."""
+    amps = jnp.asarray(state.get("line_amp_per_component", jnp.zeros(0)), dtype=jnp.float64)
+    n_filters = context.packed_filter_curves_jax.wave.shape[0]
+    if not amps.size:
+        return jnp.zeros((n_filters,), dtype=jnp.float64)
+    mus = jnp.asarray(state["line_mu_per_component"], dtype=jnp.float64)
+    sigs = jnp.asarray(state["line_sig_per_component"], dtype=jnp.float64)
+    broad_mask = jnp.asarray(state["line_broad_mask_per_component"], dtype=jnp.float64)
+    if broad_only is True:
+        amps = amps * broad_mask
+    elif broad_only is False:
+        amps = amps * (1.0 - broad_mask)
+    nodes = jnp.linspace(-7.0, 7.0, 33, dtype=jnp.float64)
+    rest_wave = jnp.exp(mus[:, None] + sigs[:, None] * nodes[None, :])
+    obs_line_wave = rest_wave * (1.0 + redshift)
+    fnu = amps[:, None] * jnp.exp(-0.5 * nodes[None, :] ** 2)
+    conversion = 1.0e-10 / 299792458.0 * 1.0e29
+    flambda = fnu / jnp.maximum(conversion * obs_line_wave**2, 1.0e-30)
+    curves = context.packed_filter_curves_jax
+
+    def _one_filter(filt_wave, filt_trans, denom, eff_wave):
+        trans = jax.vmap(lambda wave: jnp.interp(wave, filt_wave, filt_trans, left=0.0, right=0.0))(obs_line_wave)
+        integrated = jnp.sum(jnp.trapezoid(flambda * trans, obs_line_wave, axis=1))
+        return conversion * eff_wave**2 * integrated / jnp.maximum(denom, 1.0e-30)
+
+    return jax.vmap(_one_filter)(
+        curves.wave,
+        curves.transmission,
+        curves.denom,
+        context.filter_effective_wavelength_jax,
+    )
+
+
+def _jaxqsofit_family_extrapolation(
+    context: ModelContext,
+    cfg: FitConfig,
+    state,
+    redshift,
+    luminosity_distance_m,
+    ebv_total,
+    igm,
+    line_wave,
+    line_blagn,
+    line_narrow_template,
+):
+    """Anchor fixed-ratio out-of-coverage lines to fitted JQF family fluxes."""
+    amps = jnp.asarray(state.get("line_amp_per_component", jnp.zeros(0)), dtype=jnp.float64)
+    if not amps.size:
+        zeros = jnp.zeros_like(line_wave)
+        return zeros, zeros, jnp.asarray(DEFAULT_BROAD_LINE_WIDTH_KMS), jnp.asarray(DEFAULT_NARROW_LINE_WIDTH_KMS)
+    mus = jnp.asarray(state["line_mu_per_component"], dtype=jnp.float64)
+    sigs = jnp.asarray(state["line_sig_per_component"], dtype=jnp.float64)
+    broad_mask = jnp.asarray(state["line_broad_mask_per_component"], dtype=jnp.float64)
+    component_wave = jnp.exp(mus)
+    component_obs_wave = component_wave * (1.0 + redshift)
+    conversion = 1.0e-10 / 299792458.0 * 1.0e29
+    integrated_flux = amps * jnp.sqrt(2.0 * jnp.pi) * sigs / jnp.maximum(conversion * component_obs_wave, 1.0e-30)
+    att_curve = _attenuation_curve(component_wave, -1.2, -3.0, 1.2, GRAHSP_BIATTENUATION_BREAK_A)
+    attenuation = 10 ** (ebv_total * att_curve / -2.5)
+    intrinsic_lumin = integrated_flux * 4.0 * jnp.pi * luminosity_distance_m**2 / jnp.maximum(attenuation, 1.0e-12)
+    outside_mask = _photometric_agn_line_mask(context, cfg, line_wave, redshift)
+    covered_mask = 1.0 - outside_mask
+    broad_template_anchor = jnp.sum(line_blagn * covered_mask)
+    narrow_template_anchor = jnp.sum(line_narrow_template * covered_mask)
+    broad_norm = jnp.where(
+        broad_template_anchor > 0.0,
+        jnp.sum(intrinsic_lumin * broad_mask) / jnp.maximum(broad_template_anchor, 1.0e-30),
+        0.0,
+    )
+    narrow_norm = jnp.where(
+        narrow_template_anchor > 0.0,
+        jnp.sum(intrinsic_lumin * (1.0 - broad_mask)) / jnp.maximum(narrow_template_anchor, 1.0e-30),
+        0.0,
+    )
+    broad_lumin = broad_norm * line_blagn * outside_mask
+    narrow_lumin = narrow_norm * line_narrow_template * outside_mask
+    positive = jnp.clip(intrinsic_lumin, 0.0, None)
+    broad_weight = positive * broad_mask
+    narrow_weight = positive * (1.0 - broad_mask)
+    component_fwhm = 299792.458 * 2.354820045 * sigs
+    broad_width = jnp.exp(jnp.sum(broad_weight * jnp.log(jnp.maximum(component_fwhm, 1.0))) / jnp.maximum(jnp.sum(broad_weight), 1.0e-30))
+    narrow_width = jnp.exp(jnp.sum(narrow_weight * jnp.log(jnp.maximum(component_fwhm, 1.0))) / jnp.maximum(jnp.sum(narrow_weight), 1.0e-30))
+    broad_width = jnp.where(jnp.sum(broad_weight) > 0.0, broad_width, DEFAULT_BROAD_LINE_WIDTH_KMS)
+    narrow_width = jnp.where(jnp.sum(narrow_weight) > 0.0, narrow_width, DEFAULT_NARROW_LINE_WIDTH_KMS)
+    return broad_lumin, narrow_lumin, broad_width, narrow_width
 
 
 def evaluate_photometric_state(
@@ -3196,6 +3403,8 @@ def evaluate_photometric_state(
     rest_wave = context.rest_wave_jax
     obs_wave = context.obs_wave_jax
     feii_template_on_rest = context.feii_template_on_rest_jax
+    feii_template_wave_native = _np_to_jnp(context.templates.feii_wave)
+    feii_template_flux_native = _np_to_jnp(context.templates.feii_lumin)
     line_wave = _np_to_jnp(context.templates.line_wave)
     line_blagn = _np_to_jnp(context.templates.line_blagn)
     line_sy2 = _np_to_jnp(context.templates.line_sy2)
@@ -3215,6 +3424,7 @@ def evaluate_photometric_state(
     fit_host = bool(cfg.galaxy.fit_host)
     fit_agn = bool(cfg.agn.fit_agn)
     spatial_scale_arcsec = _np_to_jnp(context.effective_spatial_scale_arcsec)
+    photometry_total_capture = _bool_to_jnp(context.photometry_total_capture)
     spectroscopy_enabled = bool(
         cfg.spectroscopy is not None
         and cfg.spectroscopy_config.enabled
@@ -3225,6 +3435,11 @@ def evaluate_photometric_state(
     jaxqsofit_backend_enabled = bool(
         spectroscopy_enabled
         and str(cfg.spectroscopy_config.backend).lower() == "jaxqsofit"
+    )
+    shared_jaxqsofit_lines = bool(
+        jaxqsofit_backend_enabled
+        and jqf_cfg.use_spectral_lines
+        and jqf_cfg.use_photometric_lines
     )
     use_native_feii = bool(
         include_sed_agn_features
@@ -3429,42 +3644,48 @@ def evaluate_photometric_state(
         )
 
         if include_sed_agn_features:
-            broad_lines_strength = _sample_positive_distribution(
-                prior_config,
-                value_key="broad_lines_strength",
-                log_key="log_broad_lines_strength",
-                default_value_distribution=dist.LogUniform(0.3, 20.0),
-                default_log_distribution=dist.Uniform(np.log(0.3), np.log(20.0)),
-            )
-            narrow_lines_strength = _sample_positive_distribution(
-                prior_config,
-                value_key="narrow_lines_strength",
-                log_key="log_narrow_lines_strength",
-                default_value_distribution=dist.LogNormal(np.log(DEFAULT_NARROW_LINES_STRENGTH), 0.5),
-                default_log_distribution=dist.Normal(np.log(DEFAULT_NARROW_LINES_STRENGTH), 0.5),
-            )
-            broad_line_width = _sample_log_positive_from_distribution(
-                prior_config,
-                value_key="broad_line_width_kms",
-                log_key="log_broad_line_width_kms",
-                default_distribution=dist.TruncatedNormal(
-                    np.log(DEFAULT_BROAD_LINE_WIDTH_KMS),
-                    0.4,
-                    low=np.log(DEFAULT_BROAD_LINE_WIDTH_KMS_MIN),
-                    high=np.log(DEFAULT_BROAD_LINE_WIDTH_KMS_MAX),
-                ),
-            )
-            narrow_line_width = _sample_log_positive_from_distribution(
-                prior_config,
-                value_key="narrow_line_width_kms",
-                log_key="log_narrow_line_width_kms",
-                default_distribution=dist.TruncatedNormal(
-                    np.log(DEFAULT_NARROW_LINE_WIDTH_KMS),
-                    0.3,
-                    low=np.log(DEFAULT_NARROW_LINE_WIDTH_KMS_MIN),
-                    high=np.log(DEFAULT_NARROW_LINE_WIDTH_KMS_MAX),
-                ),
-            )
+            if shared_jaxqsofit_lines:
+                broad_lines_strength = jnp.asarray(1.0, dtype=jnp.float64)
+                narrow_lines_strength = jnp.asarray(DEFAULT_NARROW_LINES_STRENGTH, dtype=jnp.float64)
+                broad_line_width = jnp.asarray(DEFAULT_BROAD_LINE_WIDTH_KMS, dtype=jnp.float64)
+                narrow_line_width = jnp.asarray(DEFAULT_NARROW_LINE_WIDTH_KMS, dtype=jnp.float64)
+            else:
+                broad_lines_strength = _sample_positive_distribution(
+                    prior_config,
+                    value_key="broad_lines_strength",
+                    log_key="log_broad_lines_strength",
+                    default_value_distribution=dist.LogUniform(0.3, 20.0),
+                    default_log_distribution=dist.Uniform(np.log(0.3), np.log(20.0)),
+                )
+                narrow_lines_strength = _sample_positive_distribution(
+                    prior_config,
+                    value_key="narrow_lines_strength",
+                    log_key="log_narrow_lines_strength",
+                    default_value_distribution=dist.LogNormal(np.log(DEFAULT_NARROW_LINES_STRENGTH), 0.5),
+                    default_log_distribution=dist.Normal(np.log(DEFAULT_NARROW_LINES_STRENGTH), 0.5),
+                )
+                broad_line_width = _sample_log_positive_from_distribution(
+                    prior_config,
+                    value_key="broad_line_width_kms",
+                    log_key="log_broad_line_width_kms",
+                    default_distribution=dist.TruncatedNormal(
+                        np.log(DEFAULT_BROAD_LINE_WIDTH_KMS),
+                        0.4,
+                        low=np.log(DEFAULT_BROAD_LINE_WIDTH_KMS_MIN),
+                        high=np.log(DEFAULT_BROAD_LINE_WIDTH_KMS_MAX),
+                    ),
+                )
+                narrow_line_width = _sample_log_positive_from_distribution(
+                    prior_config,
+                    value_key="narrow_line_width_kms",
+                    log_key="log_narrow_line_width_kms",
+                    default_distribution=dist.TruncatedNormal(
+                        np.log(DEFAULT_NARROW_LINE_WIDTH_KMS),
+                        0.3,
+                        low=np.log(DEFAULT_NARROW_LINE_WIDTH_KMS_MIN),
+                        high=np.log(DEFAULT_NARROW_LINE_WIDTH_KMS_MAX),
+                    ),
+                )
             balmer_enabled = bool(use_native_balmer and cfg.agn.fit_balmer_continuum and agn_type == 1)
             if balmer_enabled:
                 balmer_norm = _sample_positive_distribution(
@@ -3913,24 +4134,20 @@ def evaluate_photometric_state(
             "log_host_capture_scale_arcsec",
             dist.Normal(np.log(3.0), 1.0),
         )
-        host_capture_slope = _sample_positive_distribution(
-            prior_config,
-            value_key="host_capture_slope",
-            log_key="log_host_capture_slope",
-            default_value_distribution=dist.LogNormal(np.log(2.0), 0.5),
-            default_log_distribution=dist.Normal(np.log(2.0), 0.5),
-        )
+        host_capture_slope = jnp.asarray(2.0, dtype=jnp.float64)
         phot_capture_raw = _host_capture_fraction(
             spatial_scale_arcsec,
             jnp.exp(log_host_capture_scale_arcsec),
-            host_capture_slope,
         )
         phot_scale_valid = jnp.isfinite(spatial_scale_arcsec) & (spatial_scale_arcsec > 0.0)
-        host_capture_fraction = jnp.where(phot_scale_valid, phot_capture_raw, 1.0)
+        host_capture_fraction = jnp.where(
+            photometry_total_capture,
+            1.0,
+            jnp.where(phot_scale_valid, phot_capture_raw, 1.0),
+        )
         spec_capture_raw = _host_capture_fraction(
             spec_spatial_scale_arcsec,
             jnp.exp(log_host_capture_scale_arcsec),
-            host_capture_slope,
         )
         spec_scale_valid = jnp.isfinite(spec_spatial_scale_arcsec) & (spec_spatial_scale_arcsec > 0.0)
         spec_host_capture_fraction_by_spectrum = jnp.where(spec_scale_valid, spec_capture_raw, 1.0)
@@ -3971,6 +4188,13 @@ def evaluate_photometric_state(
     spec_continuum_model_fluxes = jnp.zeros_like(spec_fluxes)
     spectrum_scale = jnp.asarray(1.0, dtype=jnp.float64)
     spec_likelihood_weight = jnp.asarray(1.0, dtype=jnp.float64)
+    jqf_line_photometry = jnp.zeros_like(pred_fluxes)
+    jqf_feii_photometry = jnp.zeros_like(pred_fluxes)
+    jqf_extrapolated_feii_photometry = jnp.zeros_like(pred_fluxes)
+    jqf_balmer_photometry = jnp.zeros_like(pred_fluxes)
+    jqf_extrapolated_broad_photometry = jnp.zeros_like(pred_fluxes)
+    jqf_extrapolated_narrow_photometry = jnp.zeros_like(pred_fluxes)
+    jqf_photometry_adjustment = jnp.zeros_like(pred_fluxes)
     if spectroscopy_enabled:
         backend = str(cfg.spectroscopy_config.backend).lower()
         if backend == "jaxqsofit":
@@ -4088,8 +4312,8 @@ def evaluate_photometric_state(
                 spec_model_fluxes,
                 cfg,
                 context.jaxqsofit_prior_config,
-                rest_wave,
-                feii_template_on_rest,
+                feii_template_wave_native,
+                feii_template_flux_native,
                 line_coverage_rest=jaxqsofit_line_coverage_rest,
             )
             jqf_cfg = cfg.spectroscopy_config.jaxqsofit
@@ -4114,7 +4338,105 @@ def evaluate_photometric_state(
                 }
                 numpyro.deterministic("jqf_line_model_aperture", jqf_line_model_aperture)
                 numpyro.deterministic("jqf_line_model_narrow_aperture", jqf_components["line_narrow"])
-            if bool(jqf_cfg.use_line_strength_priors) and bool(jqf_cfg.use_spectral_lines):
+            jqf_state = jqf_components["state"]
+            jqf_broad_photometry = _project_jaxqsofit_line_state_filters(
+                context, jqf_state, redshift, broad_only=True
+            )
+            jqf_narrow_photometry_total = _project_jaxqsofit_line_state_filters(
+                context, jqf_state, redshift, broad_only=False
+            )
+            jqf_narrow_photometry = jqf_narrow_photometry_total * host_capture_fraction
+            jqf_line_photometry = jqf_broad_photometry + jqf_narrow_photometry
+            simple_spec_feii_shape = _simple_feii_fnu_shape(
+                spec_wave_obs,
+                redshift,
+                feii_template_wave_native,
+                feii_template_flux_native,
+            )
+            if jaxqsofit_line_coverage_rest is None:
+                spec_feii_anchor_mask = spec_mask
+            else:
+                spec_rest_for_feii = spec_wave_obs / jnp.maximum(1.0 + redshift, 1.0e-8)
+                spec_feii_anchor_mask = (
+                    spec_mask
+                    & (spec_rest_for_feii >= jaxqsofit_line_coverage_rest[0])
+                    & (spec_rest_for_feii <= jaxqsofit_line_coverage_rest[1])
+                )
+            anchor_shape = jnp.where(spec_feii_anchor_mask, simple_spec_feii_shape, 0.0)
+            anchor_jqf = jnp.where(spec_feii_anchor_mask, jqf_components["feii"], 0.0)
+            sed_feii_scale = jnp.sum(anchor_shape * anchor_jqf) / jnp.maximum(
+                jnp.sum(anchor_shape * anchor_shape), 1.0e-30
+            )
+            jqf_feii_photometry, jqf_extrapolated_feii_photometry, jqf_balmer_photometry = _project_jaxqsofit_smooth_state_filters(
+                context,
+                jqf_state,
+                redshift,
+                jqf_components["component_config"],
+                feii_template_wave_native,
+                feii_template_flux_native,
+                jaxqsofit_line_coverage_rest,
+                sed_feii_scale,
+            )
+            if bool(jqf_cfg.use_spectral_lines) and bool(jqf_cfg.use_photometric_lines):
+                line_narrow_template = jnp.where(agn_type == 3, line_liner, line_sy2)
+                extrap_broad_lumin, extrap_narrow_lumin, extrap_broad_width, extrap_narrow_width = (
+                    _jaxqsofit_family_extrapolation(
+                        context,
+                        cfg,
+                        jqf_state,
+                        redshift,
+                        luminosity_distance_m,
+                        ebv_gal + ebv_agn,
+                        igm,
+                        line_wave,
+                        line_blagn,
+                        line_narrow_template,
+                    )
+                )
+                # ``_jaxqsofit_family_extrapolation`` returns integrated line
+                # luminosities.  The native AGN projector expects the legacy
+                # CIGALE amplitude convention (lambda L_lambda / 5100 A),
+                # which would multiply these fluxes by ~5100*sqrt(2).
+                # Use the flux-conserving integrated-luminosity projector.
+                jqf_extrapolated_broad_photometry = _project_integrated_local_line_filters(
+                    context,
+                    line_wave,
+                    extrap_broad_lumin,
+                    extrap_broad_width,
+                    ebv_gal + ebv_agn,
+                    redshift,
+                    luminosity_distance_m,
+                    igm,
+                )
+                jqf_extrapolated_narrow_total = _project_integrated_local_line_filters(
+                    context,
+                    line_wave,
+                    extrap_narrow_lumin,
+                    extrap_narrow_width,
+                    ebv_gal + ebv_agn,
+                    redshift,
+                    luminosity_distance_m,
+                    igm,
+                )
+                jqf_extrapolated_narrow_photometry = jqf_extrapolated_narrow_total * host_capture_fraction
+            shared_jqf_photometry = (
+                jqf_line_photometry
+                + jqf_feii_photometry
+                + jqf_extrapolated_feii_photometry
+                + jqf_balmer_photometry
+                + jqf_extrapolated_broad_photometry
+                + jqf_extrapolated_narrow_photometry
+            )
+            native_replaced_photometry = jnp.where(
+                bool(jqf_cfg.use_spectral_lines), local_agn_line_fluxes, jnp.zeros_like(local_agn_line_fluxes)
+            )
+            jqf_photometry_adjustment = shared_jqf_photometry - native_replaced_photometry
+            pred_fluxes = pred_fluxes + jqf_photometry_adjustment
+            if (
+                bool(jqf_cfg.use_line_strength_priors)
+                and bool(jqf_cfg.use_spectral_lines)
+                and not bool(jqf_cfg.use_photometric_lines)
+            ):
                 sed_broad_line_obs = _redshift_to_obs(
                     rest_wave,
                     line_bl_att_rest * igm,
@@ -4361,6 +4683,8 @@ def evaluate_photometric_state(
         else:
             trans_fluxes = jnp.ones_like(pred_fluxes)
 
+    if jaxqsofit_backend_enabled and include_spectral_features:
+        agn_fluxes = agn_fluxes + jqf_photometry_adjustment
     logl = photometric_loglike(
         pred_fluxes=pred_fluxes,
         obs_fluxes=obs_fluxes,
@@ -4387,6 +4711,12 @@ def evaluate_photometric_state(
         numpyro.factor("photometry_loglike", logl)
     numpyro.deterministic("pred_fluxes", pred_fluxes)
     numpyro.deterministic("pred_spectrum_fluxes", spec_model_fluxes)
+    numpyro.deterministic("jqf_line_photometry", jqf_line_photometry)
+    numpyro.deterministic("jqf_feii_photometry", jqf_feii_photometry)
+    numpyro.deterministic("jqf_extrapolated_feii_photometry", jqf_extrapolated_feii_photometry)
+    numpyro.deterministic("jqf_balmer_photometry", jqf_balmer_photometry)
+    numpyro.deterministic("jqf_extrapolated_broad_photometry", jqf_extrapolated_broad_photometry)
+    numpyro.deterministic("jqf_extrapolated_narrow_photometry", jqf_extrapolated_narrow_photometry)
     numpyro.deterministic("spec_continuum_model_fluxes", spec_continuum_model_fluxes)
     numpyro.deterministic("spec_host_model_fluxes", spec_host_model_fluxes)
     numpyro.deterministic("spec_disk_model_fluxes", spec_disk_model_fluxes)
@@ -4419,6 +4749,7 @@ def evaluate_photometric_state(
     numpyro.deterministic("mass_metallicity_relation_logprior", host_state["mass_metallicity_relation_logprior"])
     numpyro.deterministic("sfh_age_gyr_fit", host_state["sfh_age_gyr"])
     numpyro.deterministic("sfh_tau_gyr_fit", host_state["sfh_tau_gyr"])
+    numpyro.deterministic("log_sfr_fit", _safe_log10(host_state["current_sfr"]))
     numpyro.deterministic("sfh_burst_fraction_fit", host_state.get("sfh_burst_fraction", 0.0))
     numpyro.deterministic("sfh_burst_age_gyr_fit", host_state.get("sfh_burst_age_gyr", 0.0))
     numpyro.deterministic("sfh_burst_tau_gyr_fit", host_state.get("sfh_burst_tau_gyr", 0.0))

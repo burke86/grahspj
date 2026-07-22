@@ -40,10 +40,13 @@ class Observation:
 class PhotometryData:
     """Observed photometric measurements and associated metadata.
 
-    ``photometry_method`` records the measurement semantics for provenance and
-    downstream diagnostics. Aperture/PSF corrections are controlled by
-    ``psf_fwhm_arcsec``, ``aperture_diameter_arcsec``, and likelihood settings,
-    not by this label alone. Use ``psf`` for point-source/PSF-like
+    ``photometry_method`` records the measurement semantics and controls how
+    the optional host-capture model is applied. ``profile``, ``auto``,
+    ``model``, ``cmodel``, and ``petrosian`` are treated as total-flux
+    measurements and receive the full host model. ``psf``, ``aperture``, and
+    ``fiber`` measurements use their PSF/aperture scale to estimate captured
+    host light. ``catalog``, ``unknown``, and missing labels retain the legacy
+    scale-based behavior when a spatial scale is supplied. Use ``psf`` for point-source/PSF-like
     measurements, ``profile`` for profile-fit photometry, ``aperture`` for
     explicit fixed apertures, ``auto`` for Kron/AUTO-like photometry,
     ``model``/``cmodel``/``petrosian`` for extended-source model measurements,
@@ -331,10 +334,12 @@ class JaxQSOFitConfig:
     """Joint jaxqsofit spectral-feature configuration.
 
     The spectral flags control Fe II, Balmer-continuum, and line components
-    evaluated by jaxqsofit on the spectroscopic grid. Broadband photometry
-    keeps the jaxsedfit continuum/torus/dust engine; when enabled, the native
-    SED-scale AGN line template supplies only a simple global-strength
-    correction for lines outside the spectroscopic coverage.
+    sampled by jaxqsofit. The same sampled state is projected through every
+    overlapping photometric filter. Outside the spectroscopic coverage,
+    jaxsedfit's fixed-ratio broad and narrow templates are normalized
+    deterministically to the integrated covered jaxqsofit family fluxes and
+    use their flux-weighted family widths. No additional extrapolation-scatter
+    parameters are introduced.
     """
     use_spectral_lines: bool = True
     use_spectral_feii: bool = False
@@ -353,17 +358,26 @@ class JaxQSOFitConfig:
     include_high_ionization_lines: bool = False
     line_table: Sequence[Mapping[str, Any]] | None = None
     broadening_convolution: str = "fft"
+    photometric_feature_grid_size: int = 2048
 
     def __post_init__(self) -> None:
         method = str(self.broadening_convolution).lower()
         if method not in {"fft", "direct"}:
             raise ValueError("JaxQSOFitConfig.broadening_convolution must be 'fft' or 'direct'.")
         self.broadening_convolution = method
+        if int(self.photometric_feature_grid_size) < 256:
+            raise ValueError("JaxQSOFitConfig.photometric_feature_grid_size must be at least 256.")
+        self.photometric_feature_grid_size = int(self.photometric_feature_grid_size)
 
 
 @dataclass
 class SpectroscopyConfig:
-    """Spectroscopic likelihood configuration."""
+    """Spectroscopic likelihood configuration.
+
+    The residual spectrum calibration is kept near unity by default so it
+    absorbs modest flux-calibration error without replacing the shared host
+    aperture-capture model.
+    """
     enabled: bool = False
     backend: str = "jaxsedfit"
     student_t_df: float = 5.0
@@ -371,13 +385,21 @@ class SpectroscopyConfig:
     likelihood_weight_mode: str = "pixels"
     resolving_power: float | None = None
     fit_scale: bool = True
-    scale_prior_sigma_dex: float = 0.5
+    scale_prior_sigma_dex: float = 0.1
     jaxqsofit: JaxQSOFitConfig = field(default_factory=JaxQSOFitConfig)
 
 
 @dataclass
 class InferenceConfig:
-    """Inference defaults for MAP optimization, NUTS sampling, and nested sampling."""
+    """Inference defaults for MAP optimization, NUTS sampling, and nested sampling.
+
+    ``dense_mass="blocks"`` adapts dense covariance only within physically
+    related groups (host, AGN continuum, torus, and—when present—spectral
+    lines and Fe/Balmer emission).  This captures the strongest posterior
+    correlations without the adaptation and linear-algebra cost of one global
+    dense matrix.  Boolean values remain available as explicit NumPyro global
+    dense (``True``) and diagonal (``False``) overrides.
+    """
     method: str = "optax+nuts"
     learning_rate: float = 5e-3
     map_steps: int = 1500
@@ -387,7 +409,7 @@ class InferenceConfig:
     num_samples: int = 200
     num_chains: int = 1
     target_accept_prob: float = 0.85
-    dense_mass: bool = True
+    dense_mass: bool | str = "blocks"
     max_tree_depth: int = 8
     use_map_init: bool = True
     ns_num_live_points: int | None = None
@@ -789,7 +811,12 @@ class NebularPriorConfig:
 
 @dataclass
 class LikelihoodPriorConfig:
-    """Likelihood and calibration prior options."""
+    """Likelihood and calibration prior options.
+
+    ``host_capture_slope`` and ``log_host_capture_slope`` are retained only so
+    older configuration files still load; the capture-law slope is now fixed
+    to two and these settings are ignored.
+    """
     systematics_width: Any | None = None
     log_systematics_width: Any | None = None
     agn_systematics_width: Any | None = None

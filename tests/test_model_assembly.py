@@ -589,11 +589,14 @@ def test_host_capture_scales_energy_balance_dust(monkeypatch):
             "log_ebv_gal": _log_positive(0.5),
             "dust_alpha": np.array(2.0),
             "log_host_capture_scale_arcsec": np.log(3.0),
-            "log_host_capture_slope": np.log(2.0),
         },
     )
 
     capture = _site(tr, "host_capture_fraction_fluxes")
+    np.testing.assert_allclose(capture, 0.25**2 / (0.25**2 + 3.0**2))
+    assert float(_site(tr, "host_capture_slope_fit")) == 2.0
+    assert "host_capture_slope" not in tr
+    assert "log_host_capture_slope" not in tr
     assert np.all(capture < 1.0)
     uncaptured_host_source = _site(tr, "host_total_fluxes") + _site(tr, "dust_fluxes")
     captured_host_source = _site(tr, "host_capture_source_fluxes") * capture
@@ -813,15 +816,28 @@ def test_jaxqsofit_backend_owns_feii_and_balmer_components(monkeypatch):
     def _stub_jaxqsofit_backend(wave_obs, redshift, continuum_mjy, cfg, *args, **kwargs):
         assert cfg.spectroscopy_config.jaxqsofit.use_spectral_feii is True
         assert cfg.spectroscopy_config.jaxqsofit.use_spectral_balmer_continuum is True
+        np.testing.assert_allclose(np.asarray(args[1]), context.templates.feii_wave)
         return {
             "total": continuum_mjy,
             "line_broad": np.zeros_like(np.asarray(wave_obs, dtype=float)),
             "line_narrow": np.zeros_like(np.asarray(wave_obs, dtype=float)),
+            "feii": np.zeros_like(np.asarray(wave_obs, dtype=float)),
+            "balmer": np.zeros_like(np.asarray(wave_obs, dtype=float)),
+            "state": {},
+            "component_config": object(),
         }
+
+    def _stub_smooth_feature_photometry(context, *args, **kwargs):
+        zeros = jnp.zeros_like(jnp.asarray(context.fluxes))
+        return zeros, zeros, zeros
 
     monkeypatch.setattr("jaxsedfit.model._feii_component", _raise_native_feii)
     monkeypatch.setattr("jaxsedfit.model._balmer_continuum_jax", _raise_native_balmer)
     monkeypatch.setattr("jaxsedfit.model._evaluate_jaxqsofit_backend", _stub_jaxqsofit_backend)
+    monkeypatch.setattr(
+        "jaxsedfit.model._project_jaxqsofit_smooth_state_filters",
+        _stub_smooth_feature_photometry,
+    )
 
     cfg = _cfg(
         spectroscopy_enabled=True,

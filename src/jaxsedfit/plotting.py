@@ -460,6 +460,42 @@ def _percentile_site_sum(pred: dict[str, Any], keys: tuple[str, ...], q: float) 
     return np.percentile(arr, q, axis=0) if arr.ndim > 1 else arr
 
 
+def _bridged_jaxsedfit_agn_lines(pred: dict[str, Any]) -> np.ndarray | None:
+    """Return native jaxsedfit line shapes normalized to joint-fit photometry."""
+    native_sed_keys = (
+        "line_bl_obs_sed",
+        "line_nl_obs_sed",
+        "line_liner_obs_sed",
+        "feii_obs_sed",
+    )
+    native_flux_keys = ("line_fluxes", "feii_fluxes")
+    joint_flux_keys = (
+        "jqf_line_photometry",
+        "jqf_extrapolated_broad_photometry",
+        "jqf_extrapolated_narrow_photometry",
+        "jqf_feii_photometry",
+        "jqf_extrapolated_feii_photometry",
+    )
+    if not any(key in pred for key in native_sed_keys):
+        return None
+    native_sed = _site_sum(pred, native_sed_keys)
+    if not any(key in pred for key in joint_flux_keys):
+        return native_sed
+    native_flux = _site_sum(pred, native_flux_keys)
+    joint_flux = _site_sum(pred, joint_flux_keys)
+    if native_flux.size == 0 or joint_flux.size == 0:
+        return native_sed
+    native_total = np.sum(np.clip(native_flux, 0.0, None), axis=-1)
+    joint_total = np.sum(np.clip(joint_flux, 0.0, None), axis=-1)
+    scale = np.divide(
+        joint_total,
+        native_total,
+        out=np.ones_like(joint_total, dtype=float),
+        where=native_total > 0.0,
+    )
+    return native_sed * np.expand_dims(scale, axis=-1)
+
+
 def _to_display_flux_density(obs_wave: np.ndarray, sed: np.ndarray) -> np.ndarray:
     """Convert internal model spectra into displayed mJy values.
 
@@ -568,6 +604,7 @@ def plot_fit_sed(
     labels = list(fitter.config.photometry.filter_names)
     plotted_components: list[np.ndarray] = []
     legend_labels_seen: set[str] = set()
+    bridged_agn_lines = _bridged_jaxsedfit_agn_lines(pred)
 
     with use_style():
         fig, (ax_sed, ax_resid) = plt.subplots(
@@ -580,11 +617,30 @@ def plot_fit_sed(
 
         component_sums = {}
         for keys, label, color, lw in _COMPONENT_STYLE:
-            if not any(key in pred for key in keys):
+            if label == "AGN lines" and bridged_agn_lines is not None:
+                component_draws = bridged_agn_lines
+            elif any(key in pred for key in keys):
+                component_draws = _site_sum(pred, keys)
+            else:
                 continue
-            component = _to_display_flux_density(obs_wave, _median_site_sum(pred, keys))
-            comp_lo = _to_display_flux_density(obs_wave, _percentile_site_sum(pred, keys, 16.0))
-            comp_hi = _to_display_flux_density(obs_wave, _percentile_site_sum(pred, keys, 84.0))
+            component = _to_display_flux_density(
+                obs_wave,
+                np.median(component_draws, axis=0)
+                if component_draws.ndim > 1
+                else component_draws,
+            )
+            comp_lo = _to_display_flux_density(
+                obs_wave,
+                np.percentile(component_draws, 16.0, axis=0)
+                if component_draws.ndim > 1
+                else component_draws,
+            )
+            comp_hi = _to_display_flux_density(
+                obs_wave,
+                np.percentile(component_draws, 84.0, axis=0)
+                if component_draws.ndim > 1
+                else component_draws,
+            )
             finite_component = np.asarray(component, dtype=float)
             if not np.any(np.isfinite(finite_component) & (np.abs(finite_component) > 0.0)):
                 continue
@@ -704,6 +760,52 @@ def plot_fit_sed(
                     label="_nolegend_",
                     zorder=2,
                 )
+
+        spec_wave = np.asarray(
+            getattr(fitter.context, "spec_wave_obs", []), dtype=float
+        )
+        spec_flux = np.asarray(
+            getattr(fitter.context, "spec_fluxes", []), dtype=float
+        )
+        if spec_wave.size and spec_flux.shape == spec_wave.shape:
+            spec_mask = np.asarray(
+                getattr(fitter.context, "spec_mask", np.ones_like(spec_wave, dtype=bool)),
+                dtype=bool,
+            )
+            spec_index = np.asarray(
+                getattr(fitter.context, "spec_spectrum_index", np.zeros_like(spec_wave, dtype=int)),
+                dtype=int,
+            )
+            spectrum_scale = (
+                np.atleast_1d(np.asarray(_median_site(pred, "spectrum_scale_fit"), dtype=float))
+                if "spectrum_scale_fit" in pred
+                else np.ones(1, dtype=float)
+            )
+            valid_spectrum = (
+                spec_mask
+                & np.isfinite(spec_wave)
+                & np.isfinite(spec_flux)
+                & (spec_wave > 0.0)
+                & (spec_flux > 0.0)
+            )
+            spectrum_label = "Observed spectrum"
+            for index in np.unique(spec_index[valid_spectrum]):
+                selected = valid_spectrum & (spec_index == index)
+                order = np.argsort(spec_wave[selected])
+                scale_index = min(int(index), spectrum_scale.size - 1)
+                scale = spectrum_scale[scale_index]
+                scale = scale if np.isfinite(scale) and scale > 0.0 else 1.0
+                corrected_flux = spec_flux[selected] / scale
+                ax_sed.plot(
+                    spec_wave[selected][order],
+                    corrected_flux[order],
+                    color="#c53030",
+                    lw=0.8,
+                    alpha=0.75,
+                    label=spectrum_label,
+                    zorder=5,
+                )
+                spectrum_label = "_nolegend_"
 
         ax_sed.errorbar(
             phot_wave,
