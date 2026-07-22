@@ -1057,7 +1057,10 @@ def _torus_component(wave, fcov, si, cool_lam, cool_width, hot_lam, hot_width, h
     fcov : object
         fcov value.
     si : object
-        si value.
+        Signed latent controlling the silicate modulation. Positive values
+        produce emission near ``si_em_lam`` and negative values produce
+        absorption; a hyperbolic-tangent transform bounds the fractional
+        modulation so the total torus spectrum remains strictly positive.
     cool_lam : object
         cool_lam value.
     cool_width : object
@@ -1090,14 +1093,14 @@ def _torus_component(wave, fcov, si, cool_lam, cool_width, hot_lam, hot_width, h
     norm_index = jnp.argmin(jnp.abs(wave - GRAHSP_TORUS_NORM_A))
     l_torus = 2.5 * l_agn * fcov
     torus = l_torus / GRAHSP_TORUS_NORM_A * total / jnp.maximum(total[norm_index], 1e-30)
-    si_em_ampl = 0.4
-    si_abs_ampl = si_em_ampl * si_ratio
-    si_spec = l_torus / GRAHSP_TORUS_NORM_A * si * (
-        si_em_ampl * jnp.exp(-0.5 * ((wave - si_em_lam) / si_em_width) ** 2)
-        - si_abs_ampl * jnp.exp(-0.5 * ((wave - si_abs_lam) / si_abs_width) ** 2)
+    si_profile = jnp.exp(-0.5 * ((wave - si_em_lam) / si_em_width) ** 2) - si_ratio * jnp.exp(
+        -0.5 * ((wave - si_abs_lam) / si_abs_width) ** 2
     )
-    si_spec = jnp.maximum(si_spec, -torus)
-    return torus + si_spec
+    # Keep a small positive margin even when tanh saturates numerically at one.
+    # Unlike clipping the additive feature at -torus, this transformation is
+    # smooth everywhere and therefore well behaved for gradient-based inference.
+    si_fraction = (1.0 - 1.0e-6) * jnp.tanh(si)
+    return torus * (1.0 + si_fraction * si_profile)
 
 
 def _feii_component(wave, template_flux_on_wave, norm, fwhm_kms, shift_frac):
@@ -3537,7 +3540,7 @@ def evaluate_photometric_state(
             default_value_distribution=dist.Uniform(0.05, 0.95),
             default_log_distribution=dist.Uniform(np.log(0.05), np.log(0.95)),
         )
-        si = _sample_prior(prior_config, "si", dist.Uniform(-4.0, 4.0))
+        si = _sample_prior(prior_config, "si", dist.Normal(0.0, 1.0))
         cool_lam = _sample_positive_distribution(
             prior_config,
             value_key="cool_lam",

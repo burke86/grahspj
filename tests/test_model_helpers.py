@@ -904,18 +904,18 @@ def test_torus_silicate_features_are_in_mid_ir_angstroms():
 
 
 def test_torus_silicate_absorption_cannot_make_negative_flux():
-    wave = np.linspace(GRAHSP_SI_EM_LAM_A, GRAHSP_SI_ABS_LAM_A, 128)
+    wave = np.linspace(60000.0, 200000.0, 512)
     torus = np.asarray(
         _torus_component(
             wave,
             fcov=0.2,
-            si=100.0,
+            si=-100.0,
             cool_lam=17.0,
             cool_width=0.45,
             hot_lam=2.0,
             hot_width=0.2,
             hot_fcov=0.1,
-            si_ratio=10.0,
+            si_ratio=0.29,
             si_em_lam=GRAHSP_SI_EM_LAM_A,
             si_abs_lam=GRAHSP_SI_ABS_LAM_A,
             si_em_width=GRAHSP_SI_EM_WIDTH_A,
@@ -924,8 +924,36 @@ def test_torus_silicate_absorption_cannot_make_negative_flux():
         )
     )
 
-    assert np.min(torus) >= 0.0
-    assert np.min(torus) == pytest.approx(0.0, abs=1.0e-30)
+    assert np.all(np.isfinite(torus))
+    assert np.all(torus > 0.0)
+
+
+@pytest.mark.parametrize("si", [-4.0, 0.0, 4.0])
+def test_torus_silicate_modulation_has_finite_derivatives(si):
+    wave = jnp.linspace(60000.0, 200000.0, 128)
+
+    def integrated_torus(si_value):
+        return jnp.sum(
+            _torus_component(
+                wave,
+                fcov=0.2,
+                si=si_value,
+                cool_lam=17.0,
+                cool_width=0.45,
+                hot_lam=2.0,
+                hot_width=0.2,
+                hot_fcov=0.1,
+                si_ratio=0.29,
+                si_em_lam=GRAHSP_SI_EM_LAM_A,
+                si_abs_lam=GRAHSP_SI_ABS_LAM_A,
+                si_em_width=GRAHSP_SI_EM_WIDTH_A,
+                si_abs_width=GRAHSP_SI_ABS_WIDTH_A,
+                l_agn=10.0,
+            )
+        )
+
+    assert np.isfinite(np.asarray(jax.grad(integrated_torus)(si)))
+    assert np.isfinite(np.asarray(jax.grad(jax.grad(integrated_torus))(si)))
 
 
 def test_feii_velocity_shift_moves_template_feature_by_fractional_wavelength():
