@@ -43,6 +43,11 @@ OIII_WING_LINE_WIDTH = LineWidthPrior(
     initial=3e-3, minimum=NARROW_LINE_WIDTH.minimum, maximum=0.004
 )
 UV_BROAD_LINE_WIDTH = LineWidthPrior(initial=5e-3, minimum=0.002, maximum=0.05)
+CIII_BROAD_LINE_WIDTH = LineWidthPrior(
+    initial=UV_BROAD_LINE_WIDTH.initial,
+    minimum=0.003,
+    maximum=UV_BROAD_LINE_WIDTH.maximum,
+)
 INTERMEDIATE_UV_LINE_WIDTH = LineWidthPrior(
     initial=2e-3, minimum=0.001, maximum=0.01
 )
@@ -58,7 +63,12 @@ EXTENDED_INTERMEDIATE_UV_LINE_WIDTH = LineWidthPrior(
 )
 CIV_BROAD_LINE_WIDTH = LineWidthPrior(
     initial=UV_BROAD_LINE_WIDTH.initial,
-    minimum=0.001,
+    minimum=0.004,
+    maximum=UV_BROAD_LINE_WIDTH.maximum,
+)
+LYA_BROAD_LINE_WIDTH = LineWidthPrior(
+    initial=UV_BROAD_LINE_WIDTH.initial,
+    minimum=0.004,
     maximum=UV_BROAD_LINE_WIDTH.maximum,
 )
 UV_SEMIBROAD_LINE_WIDTH = LineWidthPrior(initial=5e-3, minimum=0.0025, maximum=0.02)
@@ -277,7 +287,7 @@ DEFAULT_LINE_PRIOR_ROWS: List[Dict[str, Any]] = [
     _line(2798.75, 'MgII', 'MgII_br', BROAD_LINE_WIDTH, BROAD_MAX_LOG_SHIFT, 0.05, ngauss=2),
     _line(2798.75, 'MgII', 'MgII_na', RELAXED_NARROW_LINE_WIDTH, NARROW_MAX_LOG_SHIFT, 0.002, ties=LineTies(velocity=1, width=1)),
     # CIII complex
-    _line(1908.73, 'CIII', 'CIII_br', UV_BROAD_LINE_WIDTH, UV_BROAD_MAX_LOG_SHIFT, 0.01, ties=LineTies(velocity=3), ngauss=2),
+    _line(1908.73, 'CIII', 'CIII_br', CIII_BROAD_LINE_WIDTH, UV_BROAD_MAX_LOG_SHIFT, 0.01, ties=LineTies(velocity=3), ngauss=2),
     _line(1908.73, 'CIII', 'CIII_na', RELAXED_UV_NARROW_LINE_WIDTH, NARROW_MAX_LOG_SHIFT, 0.002, ties=LineTies(velocity=4, width=4)),
     _line(1892.03, 'CIII', 'SiIII1892', EXTENDED_INTERMEDIATE_UV_LINE_WIDTH, 0.003, 0.005, ties=LineTies(velocity=1, width=1)),
     _line(1857.40, 'CIII', 'AlIII1857', EXTENDED_INTERMEDIATE_UV_LINE_WIDTH, 0.003, 0.005, ties=LineTies(velocity=1, width=1)),
@@ -297,7 +307,7 @@ DEFAULT_LINE_PRIOR_ROWS: List[Dict[str, Any]] = [
     _line(1335.30, 'SiIV', 'CII1335', EXTENDED_INTERMEDIATE_UV_LINE_WIDTH, NARROW_MAX_LOG_SHIFT, 0.001, ties=LineTies(velocity=2, width=2)),
     _line(1304.35, 'SiIV', 'OI1304', EXTENDED_INTERMEDIATE_UV_LINE_WIDTH, NARROW_MAX_LOG_SHIFT, 0.001, ties=LineTies(velocity=2, width=2)),
     # Lya complex
-    _line(1215.67, 'Lya', 'Lya_br', UV_BROAD_LINE_WIDTH, LYA_MAX_LOG_SHIFT, 0.05, ngauss=3),
+    _line(1215.67, 'Lya', 'Lya_br', LYA_BROAD_LINE_WIDTH, LYA_MAX_LOG_SHIFT, 0.05, ngauss=3),
     _line(1240.14, 'Lya', 'NV1240_br', INTERMEDIATE_UV_LINE_WIDTH, NV_MAX_LOG_SHIFT, 0.002),
 ]
 
@@ -315,8 +325,8 @@ DEFAULT_LINE_CONFIG: Dict[str, Any] = {
 # These can be appended to the default line list via
 # _build_default_prior_config(..., include_elg_narrow_lines=True).
 DEFAULT_ELG_NARROW_LINE_PRIOR_ROWS: List[Dict[str, Any]] = [
-    _line(3726.03, 'OII', 'OII3726', NARROW_LINE_WIDTH, ELG_MAX_LOG_SHIFT, 1.0, ties=LineTies(velocity=11, width=11, amplitude=31)),
-    _line(3728.82, 'OII', 'OII3729', NARROW_LINE_WIDTH, ELG_MAX_LOG_SHIFT, 1.0, ties=LineTies(velocity=11, width=11, amplitude=31)),
+    _line(3727.09, 'OII', 'OII3726', NARROW_LINE_WIDTH, ELG_MAX_LOG_SHIFT, 1.0, ties=LineTies(velocity=11, width=11, amplitude=31)),
+    _line(3729.88, 'OII', 'OII3729', NARROW_LINE_WIDTH, ELG_MAX_LOG_SHIFT, 1.0, ties=LineTies(velocity=11, width=11, amplitude=31)),
     _line(3869.86, 'NeIII', 'NeIII3869', NARROW_LINE_WIDTH, ELG_MAX_LOG_SHIFT, 0.001, ties=LineTies(velocity=11, width=11)),
     _line(3968.59, 'NeIII', 'NeIII3968', NARROW_LINE_WIDTH, ELG_MAX_LOG_SHIFT, 0.001, ties=LineTies(velocity=11, width=11)),
     _line(4102.89, 'Hd', 'Hd_na_elg', NARROW_LINE_WIDTH, ELG_MAX_LOG_SHIFT, 0.001, ties=LineTies(velocity=11, width=11)),
@@ -356,9 +366,9 @@ DEFAULT_ELG_NARROW_LINE_PRIOR_ROWS: List[Dict[str, Any]] = [
 DEFAULT_HIGH_IONIZATION_LINE_PRIOR_ROWS: List[Dict[str, Any]] = [
     _line(3346.79, 'NeV', 'NeV3346', NARROW_LINE_WIDTH, ELG_MAX_LOG_SHIFT, 1.0, ties=LineTies(velocity=12, width=12, amplitude=41)),
     _line(3426.84, 'NeV', 'NeV3426_hi', NARROW_LINE_WIDTH, ELG_MAX_LOG_SHIFT, _lnlam_peak_ratio_for_flux_ratio(2.7, 3426.84, 3346.79), ties=LineTies(velocity=12, width=12, amplitude=41)),
-    _line(5721.0, 'FeVII', 'FeVII5721', NARROW_LINE_WIDTH, RED_ELG_MAX_LOG_SHIFT, 0.001, ties=LineTies(velocity=12, width=12)),
-    _line(6087.0, 'FeVII', 'FeVII6087', NARROW_LINE_WIDTH, RED_ELG_MAX_LOG_SHIFT, 0.001, ties=LineTies(velocity=12, width=12)),
-    _line(6374.0, 'FeX', 'FeX6374', NARROW_LINE_WIDTH, RED_ELG_MAX_LOG_SHIFT, 0.001, ties=LineTies(velocity=12, width=12)),
+    _line(5722.74, 'FeVII', 'FeVII5721', NARROW_LINE_WIDTH, RED_ELG_MAX_LOG_SHIFT, 0.001, ties=LineTies(velocity=12, width=12)),
+    _line(6088.61, 'FeVII', 'FeVII6087', NARROW_LINE_WIDTH, RED_ELG_MAX_LOG_SHIFT, 0.001, ties=LineTies(velocity=12, width=12)),
+    _line(6376.27, 'FeX', 'FeX6374', NARROW_LINE_WIDTH, RED_ELG_MAX_LOG_SHIFT, 0.001, ties=LineTies(velocity=12, width=12)),
 ]
 
 
