@@ -521,7 +521,7 @@ def _build_jaxqsofit_prior_config(cfg: FitConfig, spec_fluxes: np.ndarray, spec_
     if not bool(jqf_cfg.use_spectral_smart_priors):
         return None
     try:
-        from .spectral_defaults import _build_default_prior_config
+        from .spectroscopy import build_spectral_prior_config
     except Exception as exc:  # pragma: no cover - exercised only without optional dependency
         raise ImportError(
             "Unable to load the built-in spectral smart-prior machinery."
@@ -534,7 +534,7 @@ def _build_jaxqsofit_prior_config(cfg: FitConfig, spec_fluxes: np.ndarray, spec_
     if flux_for_priors.size == 0:
         flux_for_priors = np.asarray([max(float(jqf_cfg.line_flux_scale_mjy), 1.0e-8)], dtype=float)
     flux_rest = flux_for_priors * (1.0 + float(cfg.observation.redshift))
-    prior_config = _build_default_prior_config(
+    prior_config = build_spectral_prior_config(
         flux_rest,
         include_elg_narrow_lines=bool(jqf_cfg.include_elg_narrow_lines),
         include_high_ionization_lines=bool(jqf_cfg.include_high_ionization_lines),
