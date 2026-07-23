@@ -74,53 +74,6 @@ ELG_MAX_LOG_SHIFT = 0.01
 RED_ELG_MAX_LOG_SHIFT = 0.008
 
 
-def _line_row(
-    *,
-    lam: float,
-    compname: str,
-    linename: str,
-    ngauss: int = 1,
-    inisca: float = 0.0,
-    minsca: float = MINSCA_DEFAULT,
-    maxsca: float = MAXSCA_DEFAULT,
-    inisig: float,
-    minsig: float,
-    maxsig: float,
-    voff: float,
-    vindex: int,
-    windex: int,
-    findex: int,
-    fvalue: float,
-    vary: int = 1,
-) -> PriorConfig:
-    """Build one row using the public line-table schema.
-
-    ``lam`` is the rest-frame vacuum wavelength in Angstroms. Scale fields
-    describe peak amplitude, sigma fields describe Gaussian width in
-    ln-wavelength, and ``voff`` is the maximum absolute center shift in the
-    same coordinate. Positive index values identify velocity, width, and
-    amplitude tie groups; zero means independent.
-    """
-    return {
-        "lambda": lam,
-        "compname": compname,
-        "linename": linename,
-        "ngauss": ngauss,
-        "inisca": inisca,
-        "minsca": minsca,
-        "maxsca": maxsca,
-        "inisig": inisig,
-        "minsig": minsig,
-        "maxsig": maxsig,
-        "voff": voff,
-        "vindex": vindex,
-        "windex": windex,
-        "findex": findex,
-        "fvalue": fvalue,
-        "vary": vary,
-    }
-
-
 def _line(
     lam: float,
     component: str,
@@ -131,21 +84,25 @@ def _line(
     ties: LineTies = LineTies(),
     ngauss: int = 1,
 ) -> PriorConfig:
-    """Build one compact default-table row without exposing legacy field names."""
-    return _line_row(
-        lam=lam,
-        compname=component,
-        linename=name,
-        ngauss=ngauss,
-        inisig=width.initial,
-        minsig=width.minimum,
-        maxsig=width.maximum,
-        voff=max_log_shift,
-        vindex=ties.velocity,
-        windex=ties.width,
-        findex=ties.amplitude,
-        fvalue=initial_amplitude,
-    )
+    """Build one row in the public line-table dictionary schema."""
+    return {
+        "lambda": lam,
+        "compname": component,
+        "linename": name,
+        "ngauss": ngauss,
+        "inisca": 0.0,
+        "minsca": MINSCA_DEFAULT,
+        "maxsca": MAXSCA_DEFAULT,
+        "inisig": width.initial,
+        "minsig": width.minimum,
+        "maxsig": width.maximum,
+        "voff": max_log_shift,
+        "vindex": ties.velocity,
+        "windex": ties.width,
+        "findex": ties.amplitude,
+        "fvalue": initial_amplitude,
+        "vary": 1,
+    }
 
 
 def _lnlam_peak_ratio_for_flux_ratio(
@@ -358,50 +315,50 @@ DEFAULT_LINE_CONFIG: Dict[str, Any] = {
 # These can be appended to the default line list via
 # _build_default_prior_config(..., include_elg_narrow_lines=True).
 DEFAULT_ELG_NARROW_LINE_PRIOR_ROWS: List[Dict[str, Any]] = [
-    _line_row(lam=3726.03, compname='OII', linename='OII3726', inisig=NARROW_LINE_WIDTH.initial, minsig=NARROW_LINE_WIDTH.minimum, maxsig=NARROW_LINE_WIDTH.maximum, voff=ELG_MAX_LOG_SHIFT, vindex=11, windex=11, findex=31, fvalue=1.0),
-    _line_row(lam=3728.82, compname='OII', linename='OII3729', inisig=NARROW_LINE_WIDTH.initial, minsig=NARROW_LINE_WIDTH.minimum, maxsig=NARROW_LINE_WIDTH.maximum, voff=ELG_MAX_LOG_SHIFT, vindex=11, windex=11, findex=31, fvalue=1.0),
-    _line_row(lam=3869.86, compname='NeIII', linename='NeIII3869', inisig=NARROW_LINE_WIDTH.initial, minsig=NARROW_LINE_WIDTH.minimum, maxsig=NARROW_LINE_WIDTH.maximum, voff=ELG_MAX_LOG_SHIFT, vindex=11, windex=11, findex=0, fvalue=0.001),
-    _line_row(lam=3968.59, compname='NeIII', linename='NeIII3968', inisig=NARROW_LINE_WIDTH.initial, minsig=NARROW_LINE_WIDTH.minimum, maxsig=NARROW_LINE_WIDTH.maximum, voff=ELG_MAX_LOG_SHIFT, vindex=11, windex=11, findex=0, fvalue=0.001),
-    _line_row(lam=4102.89, compname='Hd', linename='Hd_na_elg', inisig=NARROW_LINE_WIDTH.initial, minsig=NARROW_LINE_WIDTH.minimum, maxsig=NARROW_LINE_WIDTH.maximum, voff=ELG_MAX_LOG_SHIFT, vindex=11, windex=11, findex=0, fvalue=0.001),
-    _line_row(lam=4341.68, compname='Hg', linename='Hg_na_elg', inisig=NARROW_LINE_WIDTH.initial, minsig=NARROW_LINE_WIDTH.minimum, maxsig=NARROW_LINE_WIDTH.maximum, voff=ELG_MAX_LOG_SHIFT, vindex=11, windex=11, findex=0, fvalue=0.001),
-    _line_row(lam=4364.44, compname='OIII', linename='OIII4363', inisig=NARROW_LINE_WIDTH.initial, minsig=NARROW_LINE_WIDTH.minimum, maxsig=NARROW_LINE_WIDTH.maximum, voff=ELG_MAX_LOG_SHIFT, vindex=11, windex=11, findex=0, fvalue=0.001),
-    _line_row(lam=4862.68, compname='Hb', linename='Hb_na_elg', inisig=NARROW_LINE_WIDTH.initial, minsig=NARROW_LINE_WIDTH.minimum, maxsig=NARROW_LINE_WIDTH.maximum, voff=ELG_MAX_LOG_SHIFT, vindex=11, windex=11, findex=0, fvalue=0.001),
-    _line_row(lam=4687.02, compname='HeII', linename='HeII4686', inisig=NARROW_LINE_WIDTH.initial, minsig=NARROW_LINE_WIDTH.minimum, maxsig=NARROW_LINE_WIDTH.maximum, voff=RED_ELG_MAX_LOG_SHIFT, vindex=11, windex=11, findex=0, fvalue=0.001),
-    _line_row(lam=4960.30, compname='OIII', linename='OIII4959', inisig=NARROW_LINE_WIDTH.initial, minsig=NARROW_LINE_WIDTH.minimum, maxsig=NARROW_LINE_WIDTH.maximum, voff=ELG_MAX_LOG_SHIFT, vindex=11, windex=11, findex=32, fvalue=1.0),
-    _line_row(lam=5008.24, compname='OIII', linename='OIII5007', inisig=NARROW_LINE_WIDTH.initial, minsig=NARROW_LINE_WIDTH.minimum, maxsig=NARROW_LINE_WIDTH.maximum, voff=ELG_MAX_LOG_SHIFT, vindex=11, windex=11, findex=32, fvalue=_lnlam_peak_ratio_for_flux_ratio(2.98, 5008.24, 4960.30)),
-    _line_row(lam=5877.25, compname='HeI', linename='HeI5876', inisig=NARROW_LINE_WIDTH.initial, minsig=NARROW_LINE_WIDTH.minimum, maxsig=NARROW_LINE_WIDTH.maximum, voff=RED_ELG_MAX_LOG_SHIFT, vindex=11, windex=11, findex=0, fvalue=0.001),
-    _line_row(lam=6302.05, compname='OI', linename='OI6300', inisig=NARROW_LINE_WIDTH.initial, minsig=NARROW_LINE_WIDTH.minimum, maxsig=NARROW_LINE_WIDTH.maximum, voff=RED_ELG_MAX_LOG_SHIFT, vindex=11, windex=11, findex=33, fvalue=_lnlam_peak_ratio_for_flux_ratio(3.05, 6302.05, 6365.54)),
-    _line_row(lam=6365.54, compname='OI', linename='OI6363', inisig=NARROW_LINE_WIDTH.initial, minsig=NARROW_LINE_WIDTH.minimum, maxsig=NARROW_LINE_WIDTH.maximum, voff=RED_ELG_MAX_LOG_SHIFT, vindex=11, windex=11, findex=33, fvalue=1.0),
-    _line_row(lam=6549.85, compname='NII', linename='NII6548', inisig=NARROW_LINE_WIDTH.initial, minsig=NARROW_LINE_WIDTH.minimum, maxsig=NARROW_LINE_WIDTH.maximum, voff=RED_ELG_MAX_LOG_SHIFT, vindex=11, windex=11, findex=34, fvalue=1.0),
-    _line_row(lam=6564.61, compname='Ha', linename='Ha_na_elg', inisig=NARROW_LINE_WIDTH.initial, minsig=NARROW_LINE_WIDTH.minimum, maxsig=NARROW_LINE_WIDTH.maximum, voff=ELG_MAX_LOG_SHIFT, vindex=11, windex=11, findex=0, fvalue=0.001),
-    _line_row(lam=6585.28, compname='NII', linename='NII6583', inisig=NARROW_LINE_WIDTH.initial, minsig=NARROW_LINE_WIDTH.minimum, maxsig=NARROW_LINE_WIDTH.maximum, voff=RED_ELG_MAX_LOG_SHIFT, vindex=11, windex=11, findex=34, fvalue=_lnlam_peak_ratio_for_flux_ratio(3.0, 6585.28, 6549.85)),
-    _line_row(lam=6718.29, compname='SII', linename='SII6716', inisig=NARROW_LINE_WIDTH.initial, minsig=NARROW_LINE_WIDTH.minimum, maxsig=NARROW_LINE_WIDTH.maximum, voff=RED_ELG_MAX_LOG_SHIFT, vindex=11, windex=11, findex=35, fvalue=1.0),
-    _line_row(lam=6732.67, compname='SII', linename='SII6731', inisig=NARROW_LINE_WIDTH.initial, minsig=NARROW_LINE_WIDTH.minimum, maxsig=NARROW_LINE_WIDTH.maximum, voff=RED_ELG_MAX_LOG_SHIFT, vindex=11, windex=11, findex=35, fvalue=1.0),
+    _line(3726.03, 'OII', 'OII3726', NARROW_LINE_WIDTH, ELG_MAX_LOG_SHIFT, 1.0, ties=LineTies(velocity=11, width=11, amplitude=31)),
+    _line(3728.82, 'OII', 'OII3729', NARROW_LINE_WIDTH, ELG_MAX_LOG_SHIFT, 1.0, ties=LineTies(velocity=11, width=11, amplitude=31)),
+    _line(3869.86, 'NeIII', 'NeIII3869', NARROW_LINE_WIDTH, ELG_MAX_LOG_SHIFT, 0.001, ties=LineTies(velocity=11, width=11)),
+    _line(3968.59, 'NeIII', 'NeIII3968', NARROW_LINE_WIDTH, ELG_MAX_LOG_SHIFT, 0.001, ties=LineTies(velocity=11, width=11)),
+    _line(4102.89, 'Hd', 'Hd_na_elg', NARROW_LINE_WIDTH, ELG_MAX_LOG_SHIFT, 0.001, ties=LineTies(velocity=11, width=11)),
+    _line(4341.68, 'Hg', 'Hg_na_elg', NARROW_LINE_WIDTH, ELG_MAX_LOG_SHIFT, 0.001, ties=LineTies(velocity=11, width=11)),
+    _line(4364.44, 'OIII', 'OIII4363', NARROW_LINE_WIDTH, ELG_MAX_LOG_SHIFT, 0.001, ties=LineTies(velocity=11, width=11)),
+    _line(4862.68, 'Hb', 'Hb_na_elg', NARROW_LINE_WIDTH, ELG_MAX_LOG_SHIFT, 0.001, ties=LineTies(velocity=11, width=11)),
+    _line(4687.02, 'HeII', 'HeII4686', NARROW_LINE_WIDTH, RED_ELG_MAX_LOG_SHIFT, 0.001, ties=LineTies(velocity=11, width=11)),
+    _line(4960.30, 'OIII', 'OIII4959', NARROW_LINE_WIDTH, ELG_MAX_LOG_SHIFT, 1.0, ties=LineTies(velocity=11, width=11, amplitude=32)),
+    _line(5008.24, 'OIII', 'OIII5007', NARROW_LINE_WIDTH, ELG_MAX_LOG_SHIFT, _lnlam_peak_ratio_for_flux_ratio(2.98, 5008.24, 4960.30), ties=LineTies(velocity=11, width=11, amplitude=32)),
+    _line(5877.25, 'HeI', 'HeI5876', NARROW_LINE_WIDTH, RED_ELG_MAX_LOG_SHIFT, 0.001, ties=LineTies(velocity=11, width=11)),
+    _line(6302.05, 'OI', 'OI6300', NARROW_LINE_WIDTH, RED_ELG_MAX_LOG_SHIFT, _lnlam_peak_ratio_for_flux_ratio(3.05, 6302.05, 6365.54), ties=LineTies(velocity=11, width=11, amplitude=33)),
+    _line(6365.54, 'OI', 'OI6363', NARROW_LINE_WIDTH, RED_ELG_MAX_LOG_SHIFT, 1.0, ties=LineTies(velocity=11, width=11, amplitude=33)),
+    _line(6549.85, 'NII', 'NII6548', NARROW_LINE_WIDTH, RED_ELG_MAX_LOG_SHIFT, 1.0, ties=LineTies(velocity=11, width=11, amplitude=34)),
+    _line(6564.61, 'Ha', 'Ha_na_elg', NARROW_LINE_WIDTH, ELG_MAX_LOG_SHIFT, 0.001, ties=LineTies(velocity=11, width=11)),
+    _line(6585.28, 'NII', 'NII6583', NARROW_LINE_WIDTH, RED_ELG_MAX_LOG_SHIFT, _lnlam_peak_ratio_for_flux_ratio(3.0, 6585.28, 6549.85), ties=LineTies(velocity=11, width=11, amplitude=34)),
+    _line(6718.29, 'SII', 'SII6716', NARROW_LINE_WIDTH, RED_ELG_MAX_LOG_SHIFT, 1.0, ties=LineTies(velocity=11, width=11, amplitude=35)),
+    _line(6732.67, 'SII', 'SII6731', NARROW_LINE_WIDTH, RED_ELG_MAX_LOG_SHIFT, 1.0, ties=LineTies(velocity=11, width=11, amplitude=35)),
     # Red optical / far-red forbidden + He I
-    _line_row(lam=7067.17, compname='HeI', linename='HeI7065', inisig=NARROW_LINE_WIDTH.initial, minsig=NARROW_LINE_WIDTH.minimum, maxsig=NARROW_LINE_WIDTH.maximum, voff=RED_ELG_MAX_LOG_SHIFT, vindex=11, windex=11, findex=0, fvalue=0.001),
-    _line_row(lam=7137.77, compname='ArIII', linename='ArIII7138', inisig=NARROW_LINE_WIDTH.initial, minsig=NARROW_LINE_WIDTH.minimum, maxsig=NARROW_LINE_WIDTH.maximum, voff=RED_ELG_MAX_LOG_SHIFT, vindex=11, windex=11, findex=0, fvalue=0.001),
-    _line_row(lam=7322.19, compname='OII', linename='OII7320', inisig=NARROW_LINE_WIDTH.initial, minsig=NARROW_LINE_WIDTH.minimum, maxsig=NARROW_LINE_WIDTH.maximum, voff=RED_ELG_MAX_LOG_SHIFT, vindex=11, windex=11, findex=22, fvalue=0.001),
-    _line_row(lam=7332.97, compname='OII', linename='OII7330', inisig=NARROW_LINE_WIDTH.initial, minsig=NARROW_LINE_WIDTH.minimum, maxsig=NARROW_LINE_WIDTH.maximum, voff=RED_ELG_MAX_LOG_SHIFT, vindex=11, windex=11, findex=22, fvalue=0.001),
-    _line_row(lam=7753.19, compname='ArIII', linename='ArIII7751', inisig=NARROW_LINE_WIDTH.initial, minsig=NARROW_LINE_WIDTH.minimum, maxsig=NARROW_LINE_WIDTH.maximum, voff=RED_ELG_MAX_LOG_SHIFT, vindex=11, windex=11, findex=0, fvalue=0.001),
+    _line(7067.17, 'HeI', 'HeI7065', NARROW_LINE_WIDTH, RED_ELG_MAX_LOG_SHIFT, 0.001, ties=LineTies(velocity=11, width=11)),
+    _line(7137.77, 'ArIII', 'ArIII7138', NARROW_LINE_WIDTH, RED_ELG_MAX_LOG_SHIFT, 0.001, ties=LineTies(velocity=11, width=11)),
+    _line(7322.19, 'OII', 'OII7320', NARROW_LINE_WIDTH, RED_ELG_MAX_LOG_SHIFT, 0.001, ties=LineTies(velocity=11, width=11, amplitude=22)),
+    _line(7332.97, 'OII', 'OII7330', NARROW_LINE_WIDTH, RED_ELG_MAX_LOG_SHIFT, 0.001, ties=LineTies(velocity=11, width=11, amplitude=22)),
+    _line(7753.19, 'ArIII', 'ArIII7751', NARROW_LINE_WIDTH, RED_ELG_MAX_LOG_SHIFT, 0.001, ties=LineTies(velocity=11, width=11)),
     # Higher-order Paschen series (vacuum wavelengths, narrow by default).
     # The stronger Pa-epsilon through Pa-alpha lines are part of the default
     # AGN table above.
-    _line_row(lam=8752.87, compname='Paschen', linename='Pa12', inisig=NARROW_LINE_WIDTH.initial, minsig=NARROW_LINE_WIDTH.minimum, maxsig=NARROW_LINE_WIDTH.maximum, voff=RED_ELG_MAX_LOG_SHIFT, vindex=12, windex=12, findex=0, fvalue=0.001),
-    _line_row(lam=8865.22, compname='Paschen', linename='Pa11', inisig=NARROW_LINE_WIDTH.initial, minsig=NARROW_LINE_WIDTH.minimum, maxsig=NARROW_LINE_WIDTH.maximum, voff=RED_ELG_MAX_LOG_SHIFT, vindex=12, windex=12, findex=0, fvalue=0.001),
-    _line_row(lam=9017.38, compname='Paschen', linename='Pa10', inisig=NARROW_LINE_WIDTH.initial, minsig=NARROW_LINE_WIDTH.minimum, maxsig=NARROW_LINE_WIDTH.maximum, voff=RED_ELG_MAX_LOG_SHIFT, vindex=12, windex=12, findex=0, fvalue=0.001),
-    _line_row(lam=9231.55, compname='Paschen', linename='Pa9', inisig=NARROW_LINE_WIDTH.initial, minsig=NARROW_LINE_WIDTH.minimum, maxsig=NARROW_LINE_WIDTH.maximum, voff=RED_ELG_MAX_LOG_SHIFT, vindex=12, windex=12, findex=0, fvalue=0.001),
+    _line(8752.87, 'Paschen', 'Pa12', NARROW_LINE_WIDTH, RED_ELG_MAX_LOG_SHIFT, 0.001, ties=LineTies(velocity=12, width=12)),
+    _line(8865.22, 'Paschen', 'Pa11', NARROW_LINE_WIDTH, RED_ELG_MAX_LOG_SHIFT, 0.001, ties=LineTies(velocity=12, width=12)),
+    _line(9017.38, 'Paschen', 'Pa10', NARROW_LINE_WIDTH, RED_ELG_MAX_LOG_SHIFT, 0.001, ties=LineTies(velocity=12, width=12)),
+    _line(9231.55, 'Paschen', 'Pa9', NARROW_LINE_WIDTH, RED_ELG_MAX_LOG_SHIFT, 0.001, ties=LineTies(velocity=12, width=12)),
     # Strong red/NIR forbidden lines
-    _line_row(lam=9071.09, compname='SIII', linename='SIII9069', inisig=NARROW_LINE_WIDTH.initial, minsig=NARROW_LINE_WIDTH.minimum, maxsig=NARROW_LINE_WIDTH.maximum, voff=RED_ELG_MAX_LOG_SHIFT, vindex=11, windex=11, findex=23, fvalue=1.0),
-    _line_row(lam=9533.20, compname='SIII', linename='SIII9531', inisig=NARROW_LINE_WIDTH.initial, minsig=NARROW_LINE_WIDTH.minimum, maxsig=NARROW_LINE_WIDTH.maximum, voff=RED_ELG_MAX_LOG_SHIFT, vindex=11, windex=11, findex=23, fvalue=_lnlam_peak_ratio_for_flux_ratio(2.5, 9533.20, 9071.09)),
+    _line(9071.09, 'SIII', 'SIII9069', NARROW_LINE_WIDTH, RED_ELG_MAX_LOG_SHIFT, 1.0, ties=LineTies(velocity=11, width=11, amplitude=23)),
+    _line(9533.20, 'SIII', 'SIII9531', NARROW_LINE_WIDTH, RED_ELG_MAX_LOG_SHIFT, _lnlam_peak_ratio_for_flux_ratio(2.5, 9533.20, 9071.09), ties=LineTies(velocity=11, width=11, amplitude=23)),
 ]
 
 # Optional high-ionization/coronal narrow-line set.
 DEFAULT_HIGH_IONIZATION_LINE_PRIOR_ROWS: List[Dict[str, Any]] = [
-    _line_row(lam=3346.79, compname='NeV', linename='NeV3346', inisig=NARROW_LINE_WIDTH.initial, minsig=NARROW_LINE_WIDTH.minimum, maxsig=NARROW_LINE_WIDTH.maximum, voff=ELG_MAX_LOG_SHIFT, vindex=12, windex=12, findex=41, fvalue=1.0),
-    _line_row(lam=3426.84, compname='NeV', linename='NeV3426_hi', inisig=NARROW_LINE_WIDTH.initial, minsig=NARROW_LINE_WIDTH.minimum, maxsig=NARROW_LINE_WIDTH.maximum, voff=ELG_MAX_LOG_SHIFT, vindex=12, windex=12, findex=41, fvalue=_lnlam_peak_ratio_for_flux_ratio(2.7, 3426.84, 3346.79)),
-    _line_row(lam=5721.0, compname='FeVII', linename='FeVII5721', inisig=NARROW_LINE_WIDTH.initial, minsig=NARROW_LINE_WIDTH.minimum, maxsig=NARROW_LINE_WIDTH.maximum, voff=RED_ELG_MAX_LOG_SHIFT, vindex=12, windex=12, findex=0, fvalue=0.001),
-    _line_row(lam=6087.0, compname='FeVII', linename='FeVII6087', inisig=NARROW_LINE_WIDTH.initial, minsig=NARROW_LINE_WIDTH.minimum, maxsig=NARROW_LINE_WIDTH.maximum, voff=RED_ELG_MAX_LOG_SHIFT, vindex=12, windex=12, findex=0, fvalue=0.001),
-    _line_row(lam=6374.0, compname='FeX', linename='FeX6374', inisig=NARROW_LINE_WIDTH.initial, minsig=NARROW_LINE_WIDTH.minimum, maxsig=NARROW_LINE_WIDTH.maximum, voff=RED_ELG_MAX_LOG_SHIFT, vindex=12, windex=12, findex=0, fvalue=0.001),
+    _line(3346.79, 'NeV', 'NeV3346', NARROW_LINE_WIDTH, ELG_MAX_LOG_SHIFT, 1.0, ties=LineTies(velocity=12, width=12, amplitude=41)),
+    _line(3426.84, 'NeV', 'NeV3426_hi', NARROW_LINE_WIDTH, ELG_MAX_LOG_SHIFT, _lnlam_peak_ratio_for_flux_ratio(2.7, 3426.84, 3346.79), ties=LineTies(velocity=12, width=12, amplitude=41)),
+    _line(5721.0, 'FeVII', 'FeVII5721', NARROW_LINE_WIDTH, RED_ELG_MAX_LOG_SHIFT, 0.001, ties=LineTies(velocity=12, width=12)),
+    _line(6087.0, 'FeVII', 'FeVII6087', NARROW_LINE_WIDTH, RED_ELG_MAX_LOG_SHIFT, 0.001, ties=LineTies(velocity=12, width=12)),
+    _line(6374.0, 'FeX', 'FeX6374', NARROW_LINE_WIDTH, RED_ELG_MAX_LOG_SHIFT, 0.001, ties=LineTies(velocity=12, width=12)),
 ]
 
 
