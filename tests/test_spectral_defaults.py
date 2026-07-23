@@ -27,6 +27,105 @@ from jaxsedfit.spectral_defaults import (
     build_default_bal_components,
 )
 
+# Vacuum wavelengths in Angstrom. Atomic transition wavelengths were checked
+# against NIST ASD v5.12 (2024), using "Vacuum (all wavelengths)" output:
+# https://physics.nist.gov/PhysRefData/ASD/lines_form.html
+# Unresolved doublets and multiplets use the documented model centroids derived
+# from their NIST component wavelengths rather than pretending to be single
+# transitions.
+REFERENCE_VACUUM_WAVELENGTHS = {
+    "default": {
+        "Ha_br": 6564.61,
+        "Ha_na": 6564.61,
+        "NII6549": 6549.85,
+        "NII6585": 6585.28,
+        "SII6718": 6718.29,
+        "SII6732": 6732.67,
+        "Hb_br": 4862.68,
+        "Hb_na": 4862.68,
+        "OIII4959c": 4960.30,
+        "OIII5007c": 5008.24,
+        "OIII4959w": 4960.30,
+        "OIII5007w": 5008.24,
+        "Hg_br": 4341.68,
+        "Hg_na": 4341.68,
+        "Hd_br": 4102.89,
+        "Hd_na": 4102.89,
+        "OII3728": 3728.48,
+        "NeV3426": 3426.84,
+        "Pae_na": 9548.59,
+        "Pad_na": 10052.13,
+        "Pag_br": 10941.09,
+        "Pag_na": 10941.09,
+        "HeI10830_br": 10833.31,
+        "HeI10830_na": 10833.31,
+        "Pab_br": 12821.67,
+        "Pab_na": 12821.67,
+        "Paa_br": 18756.13,
+        "Paa_na": 18756.13,
+        "MgII_br": 2798.75,
+        "MgII_na": 2798.75,
+        "CIII_br": 1908.73,
+        "CIII_na": 1908.73,
+        "SiIII1892": 1892.03,
+        "AlIII1857": 1857.40,
+        "SiII1816": 1816.98,
+        "NIII1750": 1750.26,
+        "NIV1718": 1718.55,
+        "CIV_br": 1549.06,
+        "CIV_na": 1549.06,
+        "OIII1663": 1663.48,
+        "OIII1663_br": 1663.48,
+        "HeII1640": 1640.42,
+        "HeII1640_br": 1640.42,
+        "SiIV_OIV1_br": 1402.06,
+        "SiIV_OIV2_br": 1396.76,
+        "CII1335": 1335.30,
+        "OI1304": 1304.35,
+        "Lya_br": 1215.67,
+        "NV1240_br": 1240.14,
+    },
+    "elg": {
+        "OII3726": 3727.09,
+        "OII3729": 3729.88,
+        "NeIII3869": 3869.86,
+        "NeIII3968": 3968.59,
+        "Hd_na_elg": 4102.89,
+        "Hg_na_elg": 4341.68,
+        "OIII4363": 4364.44,
+        "Hb_na_elg": 4862.68,
+        "HeII4686": 4687.02,
+        "OIII4959": 4960.30,
+        "OIII5007": 5008.24,
+        "HeI5876": 5877.25,
+        "OI6300": 6302.05,
+        "OI6363": 6365.54,
+        "NII6548": 6549.85,
+        "Ha_na_elg": 6564.61,
+        "NII6583": 6585.28,
+        "SII6716": 6718.29,
+        "SII6731": 6732.67,
+        "HeI7065": 7067.17,
+        "ArIII7138": 7137.77,
+        "OII7320": 7322.19,
+        "OII7330": 7332.97,
+        "ArIII7751": 7753.19,
+        "Pa12": 8752.87,
+        "Pa11": 8865.22,
+        "Pa10": 9017.38,
+        "Pa9": 9231.55,
+        "SIII9069": 9071.09,
+        "SIII9531": 9533.20,
+    },
+    "high_ionization": {
+        "NeV3346": 3346.79,
+        "NeV3426_hi": 3426.84,
+        "FeVII5721": 5722.74,
+        "FeVII6087": 6088.61,
+        "FeX6374": 6376.27,
+    },
+}
+
 
 def test_prior_config_object_exposes_model_mapping():
     prior = PriorConfig(
@@ -485,6 +584,9 @@ def test_default_line_table_contains_expanded_uv_complexes():
     assert by_name["CIII_br"]["ngauss"] == 2
     assert by_name["CIV_br"]["ngauss"] == 3
     assert by_name["Lya_br"]["ngauss"] == 3
+    assert np.isclose(by_name["CIII_br"]["minsig"], 0.003)
+    assert np.isclose(by_name["CIV_br"]["minsig"], 0.004)
+    assert np.isclose(by_name["Lya_br"]["minsig"], 0.004)
 
 
 def test_optional_line_tables_do_not_duplicate_hei7065():
@@ -498,6 +600,27 @@ def test_optional_line_tables_do_not_duplicate_hei7065():
 
     assert len(hei7065) == 1
     assert np.isclose(hei7065[0]["lambda"], 7067.17)
+
+
+@pytest.mark.parametrize(
+    ("table_name", "rows"),
+    [
+        ("default", DEFAULT_LINE_PRIOR_ROWS),
+        ("elg", DEFAULT_ELG_NARROW_LINE_PRIOR_ROWS),
+        ("high_ionization", DEFAULT_HIGH_IONIZATION_LINE_PRIOR_ROWS),
+    ],
+)
+def test_builtin_line_wavelengths_match_external_vacuum_references(
+    table_name, rows
+):
+    """Keep every built-in line on the curated NIST-based vacuum scale."""
+    actual = {row["linename"]: row["lambda"] for row in rows}
+    reference = REFERENCE_VACUUM_WAVELENGTHS[table_name]
+
+    # Exact key equality makes new built-in lines fail until they are checked
+    # against an external reference and deliberately added above.
+    assert actual.keys() == reference.keys()
+    assert actual == pytest.approx(reference, abs=0.005)
 
 
 def test_principal_paschen_lines_are_default_with_independent_amplitudes():
