@@ -8,6 +8,7 @@ import pytest
 
 from jaxsedfit.plotting import (
     _bridged_jaxsedfit_agn_lines,
+    _grouped_trace_samples,
     plot_corner,
     plot_fit_sed,
     plot_trace,
@@ -316,6 +317,28 @@ def test_plot_trace_writes_grouped_chain_samples(tmp_path):
     assert fig.axes[0].yaxis.label.get_size() == 8
     assert fig.axes[-1].xaxis.label.get_size() == 9
     assert {tick.get_fontsize() for ax in fig.axes for tick in ax.get_xticklabels() + ax.get_yticklabels()} == {8.0}
+
+
+def test_grouped_trace_samples_hide_internal_reparameterization_sites():
+    class _MCMC:
+        def get_samples(self, group_by_chain=False):
+            assert group_by_chain is True
+            return {
+                "scale": np.ones((1, 3)),
+                "scale_pivot": np.zeros((1, 3)),
+            }
+
+    fitter = types.SimpleNamespace(
+        nuts_result={
+            "mcmc": _MCMC(),
+            "reparameterized_sites": {"scale": "scale_pivot"},
+        },
+        samples={"scale": np.ones(3)},
+    )
+
+    samples, grouped = _grouped_trace_samples(fitter)
+    assert grouped is True
+    assert set(samples) == {"scale"}
 
 
 def test_jaxsedfit_corner_and_trace_methods_delegate(monkeypatch):

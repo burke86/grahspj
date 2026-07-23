@@ -42,7 +42,7 @@ be supplied explicitly through :class:`jaxsedfit.FilterSet`.
            num_warmup=100,
            num_samples=100,
            num_chains=1,
-           dense_mass=False,
+           dense_mass="blocks",
            max_tree_depth=8,
        ),
        output=OutputConfig(
@@ -365,9 +365,20 @@ Useful options:
    Adds an AGN variability term to photometric uncertainty when AGN emission is
    present.
 
-If NUTS repeatedly reaches maximum tree depth, first try a simpler geometry:
-fix ``systematics_width`` at a reasonable value, keep ``dense_mass=False``,
-use ``max_tree_depth=8``, and run an ``optax`` fit to verify the MAP solution.
+If NUTS repeatedly reaches maximum tree depth, first verify the MAP solution
+with an ``optax`` fit and inspect the printed NumPyro diagnostics. The default
+``dense_mass="blocks"`` learns covariance only within related physical groups.
+An exact sampler-only normalization coordinate improves conditioning without
+changing the posterior. Fixing
+``systematics_width`` at a reasonable value is a useful diagnostic for a
+remaining model-error degeneracy. Increasing ``max_tree_depth`` should come
+after these checks because it can multiply runtime without improving geometry.
+
+For joint fits using the jaxqsofit backend, Fe II and Balmer-continuum
+Normal/LogNormal priors are sampled on exact standard-Normal NUTS coordinates
+by default (``reparameterize_jaxqsofit_features=True``). This improves
+numerical scaling without changing their scientific priors, likelihood,
+predictions, or physical posterior names.
 
 Inference recipes
 -----------------
@@ -390,8 +401,15 @@ Standard posterior run:
    cfg.inference.num_samples = 200
    cfg.inference.num_chains = 1
    cfg.inference.target_accept_prob = 0.85
-   cfg.inference.dense_mass = False
+   cfg.inference.dense_mass = "blocks"
    cfg.inference.max_tree_depth = 8
+
+The exact spectral-normalization transform is enabled by default. It can be
+disabled for a controlled comparison:
+
+.. code-block:: python
+
+   cfg.inference.reparameterize_normalizations = False
 
 Nested sampling:
 

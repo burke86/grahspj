@@ -521,10 +521,10 @@ def _build_jaxqsofit_prior_config(cfg: FitConfig, spec_fluxes: np.ndarray, spec_
     if not bool(jqf_cfg.use_spectral_smart_priors):
         return None
     try:
-        from jaxqsofit.defaults import _build_default_prior_config
+        from .spectral_defaults import _build_default_prior_config
     except Exception as exc:  # pragma: no cover - exercised only without optional dependency
         raise ImportError(
-            "SpectroscopyConfig.backend='jaxqsofit' with smart priors requires jaxqsofit on PYTHONPATH."
+            "Unable to load the built-in spectral smart-prior machinery."
         ) from exc
 
     flux = np.asarray(spec_fluxes, dtype=float)
@@ -1937,8 +1937,23 @@ def build_model_context(cfg: FitConfig) -> ModelContext:
                 & (wave > 0.0)
                 & (err > 0.0)
             )
-            order = np.argsort(wave)
-            spec_wave_chunks.append(wave[order])
+            valid_wave = np.isfinite(wave) & (wave > 0.0)
+            # Keep explicitly masked finite pixels for a regular model grid,
+            # but never let an invalid wavelength enter JAX model arithmetic:
+            # a masked NaN can still create a NaN reverse-mode derivative via
+            # ``0 * NaN``. Invalid wavelengths sort last and receive harmless,
+            # monotonically increasing placeholders while remaining masked.
+            order = np.argsort(np.where(valid_wave, wave, np.inf))
+            wave_sorted = np.asarray(wave[order], dtype=float).copy()
+            valid_wave_sorted = valid_wave[order]
+            if not np.all(valid_wave_sorted):
+                valid_values = wave_sorted[valid_wave_sorted]
+                fill_base = float(valid_values[-1]) if valid_values.size else 1.0
+                n_invalid = int(np.count_nonzero(~valid_wave_sorted))
+                wave_sorted[~valid_wave_sorted] = fill_base * (
+                    1.0 + 1.0e-8 * np.arange(1, n_invalid + 1, dtype=float)
+                )
+            spec_wave_chunks.append(wave_sorted)
             spec_flux_chunks.append(flux[order])
             spec_error_chunks.append(err[order])
             spec_mask_chunks.append(mask[order])

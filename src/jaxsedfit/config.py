@@ -331,15 +331,17 @@ class LikelihoodConfig:
 
 @dataclass
 class JaxQSOFitConfig:
-    """Joint jaxqsofit spectral-feature configuration.
+    """Detailed joint spectral-feature configuration.
 
     The spectral flags control Fe II, Balmer-continuum, and line components
-    sampled by jaxqsofit. The same sampled state is projected through every
+    sampled by jaxsedfit's native spectral engine. The same sampled state is
+    projected through every
     overlapping photometric filter. Outside the spectroscopic coverage,
     jaxsedfit's fixed-ratio broad and narrow templates are normalized
-    deterministically to the integrated covered jaxqsofit family fluxes and
+    deterministically to the integrated covered spectral family fluxes and
     use their flux-weighted family widths. No additional extrapolation-scatter
-    parameters are introduced.
+    parameters are introduced. The historical class and configuration field
+    names are retained so existing configuration files remain valid.
     """
     use_spectral_lines: bool = True
     use_spectral_feii: bool = False
@@ -394,11 +396,20 @@ class InferenceConfig:
     """Inference defaults for MAP optimization, NUTS sampling, and nested sampling.
 
     ``dense_mass="blocks"`` adapts dense covariance only within physically
-    related groups (host, AGN continuum, torus, and—when present—spectral
-    lines and Fe/Balmer emission).  This captures the strongest posterior
-    correlations without the adaptation and linear-algebra cost of one global
-    dense matrix.  Boolean values remain available as explicit NumPyro global
-    dense (``True``) and diagonal (``False``) overrides.
+    related groups (host/SFH/dust energy balance, AGN continuum, torus, and—
+    when present—spectral lines and Fe/Balmer emission). This captures the
+    strongest posterior correlations without the adaptation and linear-algebra
+    cost of one global dense matrix. Boolean values remain available as
+    explicit NumPyro global dense (``True``) and diagonal (``False``)
+    overrides, and explicit NumPyro block lists are accepted. A separate
+    warmup tree-depth ceiling can cap adaptation
+    independently of retained draws; by default the two limits match.
+    NUTS also uses an exact, posterior-preserving sampler coordinate for the
+    observed spectral-continuum normalization by default. An exact
+    coordinate leaves the priors, likelihood, and predictions unchanged.
+    Active detailed-spectrum Fe II and Balmer-continuum Normal/LogNormal priors use
+    exact standard-Normal NUTS coordinates by default. Their public posterior
+    names and physical values are unchanged.
     """
     method: str = "optax+nuts"
     learning_rate: float = 5e-3
@@ -410,8 +421,11 @@ class InferenceConfig:
     num_samples: int = 200
     num_chains: int = 1
     target_accept_prob: float = 0.85
-    dense_mass: bool | str = "blocks"
+    dense_mass: bool | str | list[tuple[str, ...]] = "blocks"
     max_tree_depth: int = 8
+    warmup_max_tree_depth: int | None = None
+    reparameterize_normalizations: bool = True
+    reparameterize_jaxqsofit_features: bool = True
     use_map_init: bool = True
     ns_num_live_points: int | None = None
     ns_max_samples: int | None = None

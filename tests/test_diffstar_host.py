@@ -768,14 +768,25 @@ def test_fit_nuts_reads_sampler_settings_from_config(monkeypatch):
             captured["mcmc_kernel"] = kernel
             captured["mcmc_kwargs"] = kwargs
 
-        def run(self, rng_key):
+        def run(self, rng_key, **kwargs):
             captured["rng_key"] = rng_key
+            captured["run_kwargs"] = kwargs
 
         def print_summary(self):
             captured["print_summary_called"] = True
 
         def get_samples(self):
             return {"log_stellar_mass": np.array([10.0, 10.2])}
+
+        def get_extra_fields(self, group_by_chain=False):
+            assert group_by_chain is True
+            return {
+                "diverging": np.array([[False, False]]),
+                "num_steps": np.array([[7, 15]]),
+                "accept_prob": np.array([[0.85, 0.9]]),
+                "potential_energy": np.array([[8.0, 8.25]]),
+                "energy": np.array([[10.0, 10.5]]),
+            }
 
     monkeypatch.setitem(JAXSEDFit.fit_nuts.__globals__, "NUTS", _fake_nuts)
     monkeypatch.setitem(JAXSEDFit.fit_nuts.__globals__, "MCMC", _FakeMCMC)
@@ -787,7 +798,8 @@ def test_fit_nuts_reads_sampler_settings_from_config(monkeypatch):
     fitter.config.inference.num_chains = 2
     fitter.config.inference.target_accept_prob = 0.9
     fitter.config.inference.dense_mass = True
-    fitter.config.inference.max_tree_depth = 10
+    fitter.config.inference.max_tree_depth = 8
+    fitter.config.inference.warmup_max_tree_depth = 11
     fitter.map_result = None
     fitter.predictive = {"stale": True}
     fitter._model = lambda: None
@@ -797,14 +809,27 @@ def test_fit_nuts_reads_sampler_settings_from_config(monkeypatch):
     assert isinstance(result, FitResult)
     assert captured["kernel_kwargs"]["target_accept_prob"] == 0.9
     assert captured["kernel_kwargs"]["dense_mass"] is True
-    assert captured["kernel_kwargs"]["max_tree_depth"] == 10
+    assert captured["kernel_kwargs"]["max_tree_depth"] == (11, 8)
+    assert captured["kernel_kwargs"]["find_heuristic_step_size"] is True
+    assert captured["kernel_kwargs"]["init_strategy"] is not None
     assert captured["mcmc_kernel"] == "kernel"
     assert captured["mcmc_kwargs"]["num_warmup"] == 11
     assert captured["mcmc_kwargs"]["num_samples"] == 12
     assert captured["mcmc_kwargs"]["num_chains"] == 2
     assert captured["mcmc_kwargs"]["progress_bar"] is False
+    assert captured["run_kwargs"]["extra_fields"] == (
+        "num_steps",
+        "accept_prob",
+        "potential_energy",
+        "energy",
+    )
     assert captured["print_summary_called"] is True
     assert fitter.predictive is None
+    diagnostics = fitter.nuts_result["transition_diagnostics"]
+    assert diagnostics["max_num_steps"] == 15
+    assert diagnostics["n_max_num_steps"] == 0
+    assert diagnostics["max_tree_depth"] == 8
+    assert fitter.nuts_result["max_tree_depth"] == (11, 8)
 
 
 def test_inference_defaults_to_block_dense_mass_adaptation():
@@ -857,6 +882,7 @@ def test_joint_dense_mass_blocks_follow_active_sites():
         "cool_width": np.array(0.4),
         "log_stellar_mass": np.array(10.0),
         "log_sfh_age_gyr": np.array(0.5),
+        "dust_alpha": np.array(2.0),
         "jqf_line_amp_group": np.ones(3),
         "jqf_line_sig_group": np.ones(3),
         "jqf_feii_norm": np.array(1.0),
@@ -868,14 +894,18 @@ def test_joint_dense_mass_blocks_follow_active_sites():
 
     assert ("jqf_line_amp_group", "jqf_line_sig_group") in blocks
     assert ("jqf_feii_fwhm", "jqf_feii_norm") in blocks
-    assert (
+    assert {
         "log_agn_amp",
         "log_sfh_age_gyr",
         "log_stellar_mass",
         "pl_slope",
-    ) in blocks
+        "cool_lam",
+        "cool_width",
+        "dust_alpha",
+    } == set(
+        next(block for block in blocks if "log_agn_amp" in block)
+    )
     assert all("log_spectrum_scale" not in block for block in blocks)
-    assert ("cool_lam", "cool_width") in blocks
     assert all("unrelated" not in block for block in blocks)
     flattened = [name for block in blocks for name in block]
     assert len(flattened) == len(set(flattened))
