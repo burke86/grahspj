@@ -1570,7 +1570,7 @@ def test_jaxqsofit_fixed_narrow_width_component_reports_tied_width():
 
 
 def test_jaxqsofit_backend_does_not_fix_narrow_width_without_explicit_override(monkeypatch):
-    from jaxsedfit import spectral_components
+    from jaxsedfit import spectroscopy
     captured = {}
 
     def fake_evaluate_joint_spectral_components(wave_obs, redshift, continuum_mjy, *, config, **kwargs):
@@ -1588,7 +1588,7 @@ def test_jaxqsofit_backend_does_not_fix_narrow_width_without_explicit_override(m
         }
 
     monkeypatch.setattr(
-        spectral_components,
+        spectroscopy,
         "evaluate_joint_spectral_components",
         fake_evaluate_joint_spectral_components,
     )

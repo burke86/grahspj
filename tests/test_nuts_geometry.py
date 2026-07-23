@@ -14,11 +14,13 @@ from jaxsedfit.core import (
     _AdditivePivotReparam,
     _joint_dense_mass_blocks,
     _nuts_geometry_reparam_config,
-    _nuts_metric_diagnostics,
-    _nuts_transition_diagnostics,
     _physical_nuts_samples,
     _prepare_nuts_reparameterization,
     _remap_dense_mass_sites,
+)
+from jaxsedfit.inference import (
+    nuts_metric_diagnostics,
+    nuts_transition_diagnostics,
 )
 from jaxsedfit.config import InferenceConfig
 from jaxsedfit.model import _spectrum_continuum_log_pivot
@@ -378,7 +380,7 @@ class _TransitionMCMC:
 
 
 def test_transition_diagnostics_distinguish_final_level_from_full_trajectory():
-    diagnostics = _nuts_transition_diagnostics(_TransitionMCMC(), max_tree_depth=4)
+    diagnostics = nuts_transition_diagnostics(_TransitionMCMC(), max_tree_depth=4)
 
     assert diagnostics["n_transitions"] == 4
     assert diagnostics["n_divergent"] == 1
@@ -409,7 +411,7 @@ def test_metric_diagnostics_flag_nonpositive_and_nonfinite_eigenvalues():
         ),
     )
 
-    diagnostics = _nuts_metric_diagnostics(mcmc)
+    diagnostics = nuts_metric_diagnostics(mcmc)
     blocks = {tuple(block["sites"]): block for block in diagnostics["blocks"]}
     assert blocks[("x", "y")]["n_nonpositive_eigenvalues"] == 1
     assert np.isinf(blocks[("x", "y")]["condition_number"])

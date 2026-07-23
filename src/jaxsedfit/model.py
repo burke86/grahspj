@@ -3146,7 +3146,7 @@ def _evaluate_jaxqsofit_backend(
         sampled line, Fe II, and Balmer amplitudes.
     """
     try:
-        from .spectral_components import (
+        from .spectroscopy import (
             SpectralComponentConfig,
             evaluate_joint_spectral_components,
         )
@@ -3221,7 +3221,7 @@ def _project_jaxqsofit_smooth_state_filters(
     for these broad components; its result is interpolated onto the native
     filter curves before exact filter quadrature.
     """
-    from .spectral_components import render_joint_feature_state
+    from .spectroscopy import render_joint_feature_state
 
     curves = context.packed_filter_curves_jax
     valid_filter_waves = [

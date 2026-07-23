@@ -22,6 +22,7 @@ API Sections
    fitting
    config
    model
+   spectroscopy
    filters
    host
    preload

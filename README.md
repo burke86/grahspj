@@ -8,6 +8,10 @@ continuum, spectral priors, custom spectral components, and NumPyro geometry.
 The `jaxqsofit` package provides the spectrum-focused interface on top of this
 engine; JAXSEDFit itself does not depend on `jaxqsofit`.
 
+Reusable spectral integrations should import the supported
+`jaxsedfit.spectroscopy` API rather than private helpers from the underlying
+`spectral_*` implementation modules.
+
 Documentation: [https://jaxsedfit.readthedocs.io/](https://jaxsedfit.readthedocs.io/)
 
 At a high level, `jaxsedfit` currently includes:
