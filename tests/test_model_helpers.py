@@ -1371,6 +1371,51 @@ def test_build_context_with_inline_templates(monkeypatch):
     assert context.spec_instruments == ("test",)
 
 
+def test_build_context_sanitizes_masked_invalid_spectral_wavelengths(monkeypatch):
+    class _SSPData:
+        ssp_lgmet = np.array([-1.0, 0.0])
+        ssp_lg_age_gyr = np.array([-1.0, 0.0])
+        ssp_wave = np.array([900.0, 2000.0, 5000.0, 10000.0])
+        ssp_flux = np.ones((2, 2, 4))
+
+    monkeypatch.setattr("jaxsedfit.preload._load_ssp_templates", lambda fn: _SSPData())
+    cfg = FitConfig(
+        observation=Observation(object_id="invalid-wave", redshift=0.1),
+        photometry=PhotometryData(
+            filter_names=["f1"],
+            fluxes=[1.0],
+            errors=[0.1],
+        ),
+        filters=FilterSet(
+            curves=[
+                FilterCurve(
+                    name="f1",
+                    wave=[1000.0, 2000.0, 3000.0],
+                    transmission=[0.0, 1.0, 0.0],
+                )
+            ]
+        ),
+        galaxy=GalaxyConfig(dsps_ssp_fn="fake.h5", n_wave=64),
+        agn=AGNConfig(),
+        likelihood=LikelihoodConfig(),
+        spectroscopy=SpectroscopyData(
+            wave_obs=[3500.0, np.nan, -1.0],
+            fluxes=[0.1, 0.2, 0.3],
+            errors=[0.01, 0.02, 0.03],
+            instrument="test",
+        ),
+        spectroscopy_config=SpectroscopyConfig(enabled=True),
+        inference=InferenceConfig(map_steps=2),
+    )
+
+    context = build_model_context(cfg)
+
+    assert np.all(np.isfinite(context.spec_wave_obs))
+    assert np.all(context.spec_wave_obs > 0.0)
+    assert np.all(np.diff(context.spec_wave_obs) >= 0.0)
+    assert context.spec_mask.tolist() == [True, False, False]
+
+
 def test_mw_dereddening_applies_to_photometry_and_spectra(monkeypatch):
     class _SSPData:
         ssp_lgmet = np.array([-1.0, 0.0])
@@ -1500,8 +1545,10 @@ def test_spectroscopy_config_uses_nested_jaxqsofit_section():
 
 
 def test_jaxqsofit_fixed_narrow_width_component_reports_tied_width():
-    pytest.importorskip("jaxqsofit.components")
-    from jaxqsofit.components import SpectralComponentConfig, evaluate_joint_spectral_components
+    from jaxsedfit.spectral_components import (
+        SpectralComponentConfig,
+        evaluate_joint_spectral_components,
+    )
 
     cfg = SpectralComponentConfig(
         use_lines=True,
@@ -1523,7 +1570,7 @@ def test_jaxqsofit_fixed_narrow_width_component_reports_tied_width():
 
 
 def test_jaxqsofit_backend_does_not_fix_narrow_width_without_explicit_override(monkeypatch):
-    jqf_components = pytest.importorskip("jaxqsofit.components")
+    from jaxsedfit import spectral_components
     captured = {}
 
     def fake_evaluate_joint_spectral_components(wave_obs, redshift, continuum_mjy, *, config, **kwargs):
@@ -1540,7 +1587,11 @@ def test_jaxqsofit_backend_does_not_fix_narrow_width_without_explicit_override(m
             "balmer": zeros,
         }
 
-    monkeypatch.setattr(jqf_components, "evaluate_joint_spectral_components", fake_evaluate_joint_spectral_components)
+    monkeypatch.setattr(
+        spectral_components,
+        "evaluate_joint_spectral_components",
+        fake_evaluate_joint_spectral_components,
+    )
     cfg = FitConfig(
         observation=Observation(redshift=0.0),
         photometry=PhotometryData(filter_names=["f1"], fluxes=[1.0], errors=[0.1]),
@@ -1616,7 +1667,7 @@ def test_fit_config_mapping_rejects_flat_prior_config():
 
 
 def test_jaxqsofit_joint_backend_builds_flux_scaled_smart_priors(monkeypatch):
-    jqf_config = pytest.importorskip("jaxqsofit.config")
+    from jaxsedfit import spectral_config
 
     class _SSPData:
         ssp_lgmet = np.array([-1.0, 0.0])
@@ -1653,7 +1704,7 @@ def test_jaxqsofit_joint_backend_builds_flux_scaled_smart_priors(monkeypatch):
     assert prior is not None
     if hasattr(prior, "to_mapping"):
         prior = prior.to_mapping()
-    expected = jqf_config.PriorConfig.from_spectrum(
+    expected = spectral_config.PriorConfig.from_spectrum(
         flux=np.asarray([2.0, 4.0]),
         redshift=0.1,
     ).to_mapping()
@@ -1731,8 +1782,6 @@ def test_context_skips_spectrum_resolution_host_basis_when_backend_does_not_need
 
 
 def test_jaxqsofit_spectrum_resolution_host_basis_uses_host_kinematics(monkeypatch):
-    pytest.importorskip("jaxqsofit.components")
-
     class _SSPData:
         ssp_lgmet = np.array([-2.0, -1.0, -0.3, 0.0])
         ssp_lg_age_gyr = np.array([-3.0, -2.0, -1.0, 0.0])
@@ -1857,8 +1906,6 @@ def test_jaxqsofit_backend_keeps_nebular_width_fixed_without_nebular_prior(monke
 
 
 def test_jaxsedfit_model_can_call_jaxqsofit_backend(monkeypatch):
-    pytest.importorskip("jaxqsofit.components")
-
     class _SSPData:
         ssp_lgmet = np.array([-1.0, 0.0])
         ssp_lg_age_gyr = np.array([-1.0, 0.0])
@@ -1946,8 +1993,6 @@ def test_jaxsedfit_model_can_call_jaxqsofit_backend(monkeypatch):
 
 
 def test_jaxsedfit_jaxqsofit_backend_uses_nested_tied_line_config(monkeypatch):
-    pytest.importorskip("jaxqsofit.components")
-
     class _SSPData:
         ssp_lgmet = np.array([-1.0, 0.0])
         ssp_lg_age_gyr = np.array([-1.0, 0.0])
@@ -2045,18 +2090,24 @@ def test_jaxsedfit_jaxqsofit_backend_uses_nested_tied_line_config(monkeypatch):
     }
     blocks = _joint_dense_mass_blocks(latent_values, context=context)
     line_blocks = [block for block in blocks if any(name.startswith("jqf_line_") for name in block)]
-    assert (
+    hb_block_sites = {
         "jqf_line_amp_Hb_std",
         "jqf_line_broad_center_0_std",
         "jqf_line_broad_relative_offsets_0_std",
         "jqf_line_ordered_width_logits_Hb_std",
-    ) in line_blocks
+    }
+    assert any(hb_block_sites <= set(block) for block in line_blocks)
+    flattened_line_sites = [
+        name for block in line_blocks for name in block
+    ]
+    assert {
+        name for name in latent_values if name.startswith("jqf_line_")
+    } == set(flattened_line_sites)
+    assert len(flattened_line_sites) == len(set(flattened_line_sites))
     assert all(set(block) <= set(latent_values) for block in line_blocks)
 
 
 def test_jaxsedfit_jaxqsofit_tied_line_backend_runs_svi_jit(monkeypatch):
-    pytest.importorskip("jaxqsofit.components")
-
     class _SSPData:
         ssp_lgmet = np.array([-1.0, 0.0])
         ssp_lg_age_gyr = np.array([-1.0, 0.0])
@@ -2125,7 +2176,7 @@ def test_jaxsedfit_jaxqsofit_tied_line_backend_runs_svi_jit(monkeypatch):
 
 
 def test_plot_jaxqsofit_spectrum_adapts_joint_predictive(monkeypatch):
-    jaxqsofit = pytest.importorskip("jaxqsofit")
+    from jaxsedfit import spectral_plotting
     captured = {}
 
     def _fake_plot_fig(self, **kwargs):
@@ -2139,7 +2190,7 @@ def test_plot_jaxqsofit_spectrum_adapts_joint_predictive(monkeypatch):
         captured["kwargs"] = kwargs
         self.fig = "fig"
 
-    monkeypatch.setattr(jaxqsofit.JAXQSOFit, "plot_fig", _fake_plot_fig)
+    monkeypatch.setattr(spectral_plotting, "plot_fig", _fake_plot_fig)
 
     fitter = JAXSEDFit.__new__(JAXSEDFit)
     fitter.config = SimpleNamespace(

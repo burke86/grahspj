@@ -124,6 +124,70 @@ def test_fit_quality_metadata_includes_reduced_chi2_and_divergence_fraction():
     assert metadata["divergence_fraction"] == pytest.approx(0.5)
 
 
+def test_fit_quality_metadata_uses_saved_transition_diagnostics_without_mcmc():
+    fitter = type(
+        "_LoadedDiagnosticFitter",
+        (),
+        {
+            "nuts_result": {
+                "transition_diagnostics": {
+                    "n_divergent": 1,
+                    "n_transitions": 5,
+                    "divergence_fraction": 0.2,
+                    "mean_accept_prob": 0.88,
+                    "median_num_steps": 31.0,
+                    "p90_num_steps": 120.0,
+                    "p99_num_steps": 127.0,
+                    "final_tree_level_fraction": 0.4,
+                    "max_num_steps_fraction": 0.2,
+                    "bfmi": np.array([0.8, 0.55]),
+                }
+            },
+            "predict": lambda self: {
+                "pred_fluxes": np.array([[1.0]]),
+                "agn_fluxes": np.zeros((1, 1)),
+            },
+            "context": type(
+                "_Ctx",
+                (),
+                {
+                    "fluxes": np.array([1.0]),
+                    "errors": np.array([0.1]),
+                    "upper_limits": np.array([False]),
+                    "filters": [],
+                },
+            )(),
+            "config": type(
+                "_Cfg",
+                (),
+                {
+                    "likelihood": type(
+                        "_Likelihood",
+                        (),
+                        {
+                            "systematics_width": 0.0,
+                            "agn_systematics_width": 0.0,
+                            "variability_uncertainty": False,
+                            "attenuation_model_uncertainty": False,
+                            "lyman_break_uncertainty": False,
+                        },
+                    )()
+                },
+            )(),
+        },
+    )()
+
+    metadata = fit_quality_metadata(fitter)
+
+    assert metadata["n_divergent"] == 1
+    assert metadata["n_transition_samples"] == 5
+    assert metadata["divergence_fraction"] == pytest.approx(0.2)
+    assert metadata["mean_accept_prob"] == pytest.approx(0.88)
+    assert metadata["final_tree_level_fraction"] == pytest.approx(0.4)
+    assert metadata["max_num_steps_fraction"] == pytest.approx(0.2)
+    assert metadata["bfmi_min"] == pytest.approx(0.55)
+
+
 class _FailingFakeFitter(_FakeFitter):
     def fit_map(self):
         if str(self.config.observation.object_id).endswith("_0.0001"):

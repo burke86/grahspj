@@ -1,19 +1,389 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Mapping
 
 import h5py
 import jax
+import jax.numpy as jnp
 import numpy as np
-from numpyro.handlers import seed as seed_handler, trace as trace_handler
-from numpyro.infer import MCMC, NUTS, Predictive, SVI, Trace_ELBO, init_to_value
+import numpyro
+import numpyro.distributions as dist
+from numpyro.handlers import (
+    reparam as reparam_handler,
+    seed as seed_handler,
+    substitute as substitute_handler,
+    trace as trace_handler,
+)
+from numpyro.infer import (
+    MCMC,
+    NUTS,
+    Predictive,
+    SVI,
+    Trace_ELBO,
+    init_to_uniform,
+    init_to_value,
+)
 from numpyro.infer.autoguide import AutoDelta
+from numpyro.infer.reparam import Reparam
+from numpyro.diagnostics import print_summary as print_diagnostics_summary
 
 from .config import FitConfig, fit_config_from_mapping, serialize_config
 from .model import grahsp_photometric_model
 from .preload import ModelContext, build_model_context
 from .results import FitResult, _FitState, median_mapping
+
+
+def _scoped_auxiliary_names(site_name: str, auxiliary_name: str) -> tuple[str, str]:
+    """Return public and local auxiliary names for NumPyro scope handlers."""
+    site_name = str(site_name)
+    auxiliary_name = str(auxiliary_name)
+    if "/" not in site_name:
+        return auxiliary_name, auxiliary_name
+    scope_prefix = site_name.rsplit("/", 1)[0]
+    local_name = auxiliary_name.rsplit("/", 1)[-1]
+    public_name = (
+        auxiliary_name
+        if "/" in auxiliary_name
+        else f"{scope_prefix}/{auxiliary_name}"
+    )
+    return public_name, local_name
+
+
+class _AdditivePivotReparam(Reparam):
+    """Sample ``value + offset`` while retaining the physical site value."""
+
+    def __init__(self, offset, auxiliary_name: str, sampling_name: str | None = None):
+        self.offset = offset
+        self.auxiliary_name = str(auxiliary_name)
+        self.sampling_name = str(
+            self.auxiliary_name if sampling_name is None else sampling_name
+        )
+
+    def __call__(self, name, fn, obs):
+        if obs is not None:
+            raise ValueError("Additive pivot reparameterization requires a latent site.")
+        shifted = dist.TransformedDistribution(
+            fn,
+            dist.transforms.AffineTransform(self.offset, 1.0),
+        )
+        pivot_value = numpyro.sample(self.sampling_name, shifted)
+        return None, pivot_value - self.offset
+
+    def transform_initial_value(self, fn, value):
+        """Map a physical initial value into the auxiliary coordinate."""
+        del fn
+        return jnp.asarray(value) + jnp.asarray(self.offset)
+
+
+def _nuts_geometry_reparam_config(
+    site,
+    *,
+    reparameterize_additive_pivots: bool = True,
+    reparameterize_jaxqsofit_features: bool = True,
+):
+    """Resolve model-provided exact NUTS coordinate transformations."""
+    metadata = (site.get("infer") or {}).get("jaxsedfit_additive_pivot")
+    if metadata is not None and reparameterize_additive_pivots:
+        auxiliary_name, sampling_name = _scoped_auxiliary_names(
+            site["name"],
+            metadata["auxiliary_name"],
+        )
+        return _AdditivePivotReparam(
+            metadata["offset"],
+            auxiliary_name,
+            sampling_name,
+        )
+    if reparameterize_jaxqsofit_features:
+        feature_metadata = (site.get("infer") or {}).get(
+            "jaxqsofit_normal_lognormal_standardization"
+        )
+        if feature_metadata is not None:
+            from .spectral_reparameterization import (
+                normal_lognormal_standardization_reparam,
+            )
+
+            return normal_lognormal_standardization_reparam(site)
+    return None
+
+
+def _prepare_nuts_reparameterization(
+    model,
+    init_values,
+    rng_seed: int,
+    *,
+    reparameterize_additive_pivots: bool = True,
+    reparameterize_jaxqsofit_features: bool = True,
+):
+    """Wrap the model and map physical initial values to NUTS coordinates."""
+    def reparam_config(site):
+        return _nuts_geometry_reparam_config(
+            site,
+            reparameterize_additive_pivots=reparameterize_additive_pivots,
+            reparameterize_jaxqsofit_features=(
+                reparameterize_jaxqsofit_features
+            ),
+        )
+
+    wrapped_model = reparam_handler(model, config=reparam_config)
+    substituted = (
+        substitute_handler(model, data=init_values)
+        if init_values
+        else model
+    )
+    model_trace = trace_handler(
+        seed_handler(substituted, jax.random.PRNGKey(int(rng_seed)))
+    ).get_trace()
+    transformed_init = None if init_values is None else dict(init_values)
+    replacements = {}
+    for name, site in model_trace.items():
+        if site.get("type") != "sample":
+            continue
+        reparameterizer = reparam_config(site)
+        if reparameterizer is None:
+            continue
+        auxiliary_name = reparameterizer.auxiliary_name
+        replacements[name] = auxiliary_name
+        if transformed_init is not None and name in transformed_init:
+            transformed_init[auxiliary_name] = np.asarray(
+                reparameterizer.transform_initial_value(
+                    site["fn"],
+                    site["value"],
+                )
+            )
+            transformed_init.pop(name, None)
+    return wrapped_model, transformed_init, replacements
+
+
+def _remap_dense_mass_sites(value, replacements):
+    """Translate physical site names in explicit blocks to NUTS coordinates."""
+    if not isinstance(value, (list, tuple)) or isinstance(value, str):
+        return value
+    if not all(isinstance(block, (list, tuple)) for block in value):
+        return value
+
+    remapped = []
+    assigned = set()
+    for block in value:
+        mapped = tuple(replacements.get(str(name), str(name)) for name in block)
+        if len(mapped) != len(set(mapped)) or any(name in assigned for name in mapped):
+            raise ValueError(
+                "Explicit dense-mass blocks contain duplicate sites after "
+                "NUTS reparameterization."
+            )
+        remapped.append(mapped)
+        assigned.update(mapped)
+    return remapped
+
+
+def _physical_nuts_samples(mcmc, replacements, *, group_by_chain):
+    """Return sampler draws under scientific names, hiding auxiliary pivots."""
+    samples = (
+        mcmc.get_samples(group_by_chain=True)
+        if group_by_chain
+        else mcmc.get_samples()
+    )
+    auxiliary_names = set(replacements.values())
+    return {
+        name: value
+        for name, value in samples.items()
+        if name not in auxiliary_names
+    }
+
+
+def _print_physical_nuts_summary(mcmc, replacements):
+    """Print NumPyro diagnostics while replacing internal pivot coordinates."""
+    if not replacements:
+        mcmc.print_summary()
+        return
+
+    grouped_samples = mcmc.get_samples(group_by_chain=True)
+    state_values = getattr(getattr(mcmc, "last_state", None), "z", {})
+    latent_names = set(state_values) if isinstance(state_values, Mapping) else set()
+    for physical_name, auxiliary_name in replacements.items():
+        latent_names.discard(auxiliary_name)
+        latent_names.add(physical_name)
+    physical_samples = {
+        name: value
+        for name, value in grouped_samples.items()
+        if name in latent_names
+    }
+    print_diagnostics_summary(physical_samples, group_by_chain=True)
+    extra_fields = mcmc.get_extra_fields()
+    if "diverging" in extra_fields:
+        print(
+            "Number of divergences: {}".format(
+                int(np.asarray(extra_fields["diverging"]).sum())
+            )
+        )
+
+
+def _nuts_transition_diagnostics(mcmc, max_tree_depth: int) -> dict[str, Any]:
+    """Summarize transition-level NUTS diagnostics without dropping raw fields."""
+    raw_fields = mcmc.get_extra_fields(group_by_chain=True)
+    fields = {name: np.asarray(value) for name, value in raw_fields.items()}
+    num_steps = np.asarray(fields.get("num_steps", []), dtype=float)
+    accept_prob = np.asarray(fields.get("accept_prob", []), dtype=float)
+    diverging = np.asarray(fields.get("diverging", []), dtype=bool)
+    energy = np.asarray(fields.get("energy", []), dtype=float)
+    max_num_steps = 2 ** int(max_tree_depth) - 1
+    final_level_min_steps = 2 ** max(int(max_tree_depth) - 1, 0)
+    finite_steps = num_steps[np.isfinite(num_steps) & (num_steps >= 0.0)]
+    depth_lower_bound = (
+        np.ceil(np.log2(finite_steps + 1.0))
+        if finite_steps.size
+        else np.asarray([], dtype=float)
+    )
+
+    if energy.ndim == 1:
+        energy = energy[None, :]
+    bfmi = []
+    for chain_energy in energy:
+        finite = chain_energy[np.isfinite(chain_energy)]
+        variance = np.var(finite) if finite.size > 1 else np.nan
+        bfmi.append(
+            float(np.mean(np.diff(finite) ** 2) / variance)
+            if finite.size > 1 and variance > 0.0
+            else np.nan
+        )
+
+    return {
+        "extra_fields": fields,
+        "n_transitions": int(diverging.size),
+        "n_divergent": int(np.count_nonzero(diverging)),
+        "divergence_fraction": (
+            float(np.mean(diverging)) if diverging.size else np.nan
+        ),
+        "mean_accept_prob": (
+            float(np.nanmean(accept_prob)) if accept_prob.size else np.nan
+        ),
+        "mean_num_steps": (
+            float(np.mean(finite_steps)) if finite_steps.size else np.nan
+        ),
+        "median_num_steps": (
+            float(np.nanmedian(num_steps)) if num_steps.size else np.nan
+        ),
+        "p90_num_steps": (
+            float(np.nanpercentile(num_steps, 90.0)) if num_steps.size else np.nan
+        ),
+        "p99_num_steps": (
+            float(np.nanpercentile(num_steps, 99.0)) if num_steps.size else np.nan
+        ),
+        "total_num_steps": (
+            int(np.nansum(num_steps)) if num_steps.size else 0
+        ),
+        "max_num_steps": (
+            int(np.nanmax(num_steps)) if num_steps.size else 0
+        ),
+        "max_tree_depth": int(max_tree_depth),
+        "median_tree_depth_lower_bound": (
+            float(np.median(depth_lower_bound))
+            if depth_lower_bound.size
+            else np.nan
+        ),
+        "p90_tree_depth_lower_bound": (
+            float(np.percentile(depth_lower_bound, 90.0))
+            if depth_lower_bound.size
+            else np.nan
+        ),
+        # Entering the final allowed level requires at least 2**(depth-1)
+        # leapfrog steps. This is useful for detecting expensive trajectories,
+        # but is not itself proof that the depth limit truncated the tree.
+        "final_tree_level_fraction": (
+            float(np.mean(num_steps >= final_level_min_steps))
+            if num_steps.size
+            else np.nan
+        ),
+        "n_max_num_steps": (
+            int(np.count_nonzero(num_steps >= max_num_steps)) if num_steps.size else 0
+        ),
+        # NumPyro exposes leapfrog counts, not the realized tree depth. A full
+        # 2**depth-1 trajectory is therefore a conservative saturation flag;
+        # shorter trajectories may also have entered the final tree level.
+        "max_num_steps_fraction": (
+            float(np.mean(num_steps >= max_num_steps)) if num_steps.size else np.nan
+        ),
+        "full_trajectory_fraction": (
+            float(np.mean(num_steps >= max_num_steps)) if num_steps.size else np.nan
+        ),
+        "bfmi": np.asarray(bfmi, dtype=float),
+    }
+
+
+def _nuts_metric_diagnostics(mcmc) -> dict[str, Any]:
+    """Summarize the adapted step size and mass-matrix conditioning."""
+    last_state = getattr(mcmc, "last_state", None)
+    adapt_state = getattr(last_state, "adapt_state", None)
+    inverse_mass = getattr(adapt_state, "inverse_mass_matrix", None)
+    step_size = getattr(adapt_state, "step_size", None)
+    if inverse_mass is None:
+        return {}
+    matrices = inverse_mass if isinstance(inverse_mass, dict) else {("all",): inverse_mass}
+    num_chains = int(getattr(mcmc, "num_chains", 1))
+    blocks = []
+    for site_names, value in matrices.items():
+        array = np.asarray(value, dtype=float)
+        chain_values = [array]
+        if num_chains > 1 and array.ndim >= 2 and array.shape[0] == num_chains:
+            chain_values = list(array)
+        for chain_index, chain_value in enumerate(chain_values):
+            dimension = (
+                chain_value.size
+                if chain_value.ndim == 1
+                else chain_value.shape[-1]
+            )
+            if chain_value.ndim == 1:
+                eigenvalues = chain_value
+            elif np.all(np.isfinite(chain_value)):
+                try:
+                    eigenvalues = np.linalg.eigvalsh(chain_value)
+                except np.linalg.LinAlgError:
+                    eigenvalues = np.full(dimension, np.nan, dtype=float)
+            else:
+                # LAPACK does not reliably propagate NaNs: some backends can
+                # return plausible finite eigenvalues for a nonfinite matrix.
+                # Every eigenvalue is undefined in that case.
+                eigenvalues = np.full(dimension, np.nan, dtype=float)
+            n_nonpositive = int(
+                np.count_nonzero(np.isfinite(eigenvalues) & (eigenvalues <= 0.0))
+            )
+            n_nonfinite = int(np.count_nonzero(~np.isfinite(eigenvalues)))
+            finite_positive = eigenvalues[
+                np.isfinite(eigenvalues) & (eigenvalues > 0.0)
+            ]
+            min_eigenvalue = (
+                float(np.min(finite_positive)) if finite_positive.size else np.nan
+            )
+            max_eigenvalue = (
+                float(np.max(finite_positive)) if finite_positive.size else np.nan
+            )
+            blocks.append(
+                {
+                    "sites": tuple(site_names),
+                    "chain": chain_index,
+                    "dimension": int(dimension),
+                    "min_eigenvalue": min_eigenvalue,
+                    "max_eigenvalue": max_eigenvalue,
+                    "n_nonpositive_eigenvalues": n_nonpositive,
+                    "n_nonfinite_eigenvalues": n_nonfinite,
+                    "condition_number": (
+                        np.inf
+                        if n_nonpositive or n_nonfinite
+                        else (
+                            max_eigenvalue / min_eigenvalue
+                            if min_eigenvalue > 0.0
+                            else np.nan
+                        )
+                    ),
+                }
+            )
+    return {
+        "adapted_step_size": (
+            np.asarray(step_size, dtype=float) if step_size is not None else np.asarray([])
+        ),
+        "blocks": blocks,
+    }
 
 
 def _joint_dense_mass_blocks(
@@ -41,24 +411,27 @@ def _joint_dense_mass_blocks(
         )
         if not group:
             return
+
         # A single vector-valued site can still benefit from an internal dense
         # matrix; scalar singleton blocks are equivalent to diagonal adaptation.
         value = np.asarray(latent_values[group[0]])
         if len(group) > 1 or value.size > 1:
             blocks.append(group)
-            assigned.update(group)
+        assigned.update(group)
 
-    # Reuse jaxqsofit's native line-complex geometry exactly. Its block builder
+    # Reuse the native line-complex geometry exactly. Its block builder
     # understands which amplitudes and centroids must accompany ordered-width
     # coordinates. Prefix its site names for the embedded joint backend.
-    used_native_jqf_blocks = False
     if context is not None and context.jaxqsofit_prior_config is not None:
         cfg = context.fit_config
         jqf_cfg = cfg.spectroscopy_config.jaxqsofit
         if bool(jqf_cfg.use_spectral_lines) and bool(jqf_cfg.use_tied_lines):
             try:
-                from jaxqsofit.components import SpectralComponentConfig, build_joint_tied_line_meta
-                from jaxqsofit.geometry import line_complex_dense_mass_blocks
+                from .spectral_components import (
+                    SpectralComponentConfig,
+                    build_joint_tied_line_meta,
+                )
+                from .spectral_geometry import line_complex_dense_mass_blocks
                 from .model import _fixed_spectral_line_coverage_rest
 
                 component_cfg = SpectralComponentConfig(
@@ -72,49 +445,52 @@ def _joint_dense_mass_blocks(
                 )
                 tied_line_meta = build_joint_tied_line_meta(component_cfg)
                 if tied_line_meta is not None:
-                    for native_block in line_complex_dense_mass_blocks(
+                    native_blocks = line_complex_dense_mass_blocks(
                         tied_line_meta,
                         standardized_amplitudes=True,
-                    ):
+                    )
+                    for native_block in native_blocks:
                         block = tuple(
                             f"jqf_{site}"
                             for site in native_block
                             if f"jqf_{site}" in names and f"jqf_{site}" not in assigned
                         )
                         if block:
-                            # Preserve native jaxqsofit's structure literally,
-                            # including scalar singleton blocks (which are
-                            # numerically equivalent to diagonal adaptation).
-                            blocks.append(block)
+                            value = np.asarray(latent_values[block[0]])
+                            if len(block) > 1 or value.size > 1:
+                                blocks.append(block)
                             assigned.update(block)
-                    used_native_jqf_blocks = True
             except ImportError:
                 pass
-    if not used_native_jqf_blocks:
-        add_group(lambda name: name.startswith("jqf_line_"))
+    # Group any active line sites not known to the native geometry helper
+    # (for example, a newer custom coordinate) instead of silently leaving
+    # them diagonal. When no native metadata was available this also supplies
+    # the complete fallback block.
+    add_group(lambda name: name.startswith("jqf_line_"))
     add_group(lambda name: name.startswith(("jqf_feii_", "jqf_balmer_")))
 
-    # Joint-only astrophysical normalization geometry. Keep the instrumental
-    # spectrum scale diagonal: in real joint fits its much tighter calibration
-    # prior and direct action on every spectral pixel make the combined block
-    # poorly conditioned and can collapse the adapted NUTS step size.
+    # Joint-only astrophysical normalization geometry. Torus coordinates stay
+    # with the optical AGN/host mixture so the metric can learn the important
+    # ``AGN amplitude * covering fraction`` ridge. Keep the instrumental
+    # spectrum scale out of this block: its exact continuum-pivot coordinate
+    # is already close to orthogonal and has a much tighter calibration prior.
     joint_normalization_names = {
+        "redshift",
         "log_agn_amp", "pl_slope", "pl_bend_loc", "log_pl_bend_loc",
         "pl_bend_width", "log_pl_bend_width", "ebv_agn", "log_ebv_agn",
         "log_stellar_mass", "ebv_gal", "log_ebv_gal",
+        "dust_alpha",
         "log_host_capture_scale_arcsec", "host_capture_scale_arcsec",
-    }
-    add_group(
-        lambda name: name in joint_normalization_names
-        or name.startswith(("log_sfh_", "u_", "gal_lgmet", "log_gal_lgmet"))
-    )
-
-    torus_names = {
+        "jqf_continuum_tilt",
         "fcov", "log_fcov", "si", "cool_lam", "log_cool_lam",
         "cool_width", "log_cool_width", "hot_lam", "log_hot_lam",
         "hot_width", "log_hot_width", "hot_fcov", "log_hot_fcov",
     }
-    add_group(lambda name: name in torus_names)
+    joint_candidates = lambda name: (
+        name in joint_normalization_names
+        or name.startswith(("log_sfh_", "u_", "gal_lgmet", "log_gal_lgmet"))
+    )
+    add_group(joint_candidates)
 
     native_feature_tokens = (
         "broad_lines_strength", "narrow_lines_strength", "line_width_kms",
@@ -126,9 +502,14 @@ def _joint_dense_mass_blocks(
     )
 
     add_group(
-        lambda name: name in {"gal_v_kms", "gal_sigma_kms", "log_gal_sigma_kms"}
+        lambda name: name.startswith("nebular_")
+        or name.startswith("log_nebular_")
     )
-    add_group(lambda name: name == "dust_alpha")
+
+    add_group(
+        lambda name: name
+        in {"redshift", "gal_v_kms", "gal_sigma_kms", "log_gal_sigma_kms"}
+    )
     add_group(lambda name: "systematics_width" in name)
     return blocks
 
@@ -142,7 +523,10 @@ def _resolve_dense_mass_structure(
     if isinstance(value, str):
         normalized = value.strip().lower().replace("-", "_")
         if normalized in {"blocks", "block", "block_dense", "auto"}:
-            return _joint_dense_mass_blocks(latent_values, context=context)
+            return _joint_dense_mass_blocks(
+                latent_values,
+                context=context,
+            )
         if normalized in {"dense", "full", "global"}:
             return True
         if normalized in {"diagonal", "diag", "none"}:
@@ -950,6 +1334,7 @@ class JAXSEDFit:
         target_accept_prob: float | None = None,
         dense_mass: bool | str | list[tuple[str, ...]] | None = None,
         max_tree_depth: int | None = None,
+        warmup_max_tree_depth: int | None = None,
         use_map_init: bool = True,
         progress_bar: bool = True,
     ):
@@ -972,6 +1357,10 @@ class JAXSEDFit:
             supplied directly.
         max_tree_depth : object
             max_tree_depth value.
+        warmup_max_tree_depth : int, optional
+            Warmup-only tree-depth limit. ``None`` uses the retained-draw
+            ``max_tree_depth``; set a larger value explicitly when adaptation
+            requires longer trajectories.
         use_map_init : object
             use_map_init value.
         progress_bar : object
@@ -994,32 +1383,105 @@ class JAXSEDFit:
         max_tree_depth = int(
             inference.max_tree_depth if max_tree_depth is None else max_tree_depth
         )
+        warmup_depth = (
+            inference.warmup_max_tree_depth
+            if warmup_max_tree_depth is None
+            else warmup_max_tree_depth
+        )
+        warmup_depth = max_tree_depth if warmup_depth is None else int(warmup_depth)
+        if max_tree_depth < 1 or warmup_depth < 1:
+            raise ValueError("NUTS tree-depth limits must be positive integers.")
+        kernel_max_tree_depth = (
+            max_tree_depth
+            if warmup_depth == max_tree_depth
+            else (warmup_depth, max_tree_depth)
+        )
         init_values = None
-        if self.map_result is not None:
+        if use_map_init and self.map_result is not None:
             init_values = {
                 key: np.asarray(value)
                 for key, value in self.map_result["median"].items()
                 if np.ndim(value) != 0 or np.isfinite(value)
             }
-        latent_values = init_values or {}
+        physical_init_values = init_values
+        nuts_model = self._model
+        reparameterized_sites = {}
+        use_normalization_reparam = bool(
+            inference.reparameterize_normalizations
+            and self.config.spectroscopy is not None
+            and self.config.spectroscopy_config.enabled
+            and self.config.spectroscopy_config.fit_scale
+        )
+        jqf_config = self.config.spectroscopy_config.jaxqsofit
+        use_jaxqsofit_feature_reparam = bool(
+            inference.reparameterize_jaxqsofit_features
+            and self.config.spectroscopy is not None
+            and self.config.spectroscopy_config.enabled
+            and str(self.config.spectroscopy_config.backend).lower()
+            == "jaxqsofit"
+            and (
+                jqf_config.use_spectral_feii
+                or jqf_config.use_spectral_balmer_continuum
+            )
+        )
+        if (
+            use_normalization_reparam
+            or use_jaxqsofit_feature_reparam
+        ):
+            nuts_model, init_values, reparameterized_sites = (
+                _prepare_nuts_reparameterization(
+                    nuts_model,
+                    init_values,
+                    inference.seed + 101,
+                    reparameterize_additive_pivots=use_normalization_reparam,
+                    reparameterize_jaxqsofit_features=(
+                        use_jaxqsofit_feature_reparam
+                    ),
+                )
+            )
         block_aliases = {"blocks", "block", "block_dense", "auto"}
         use_blocks = (
             isinstance(dense_mass_setting, str)
             and dense_mass_setting.strip().lower().replace("-", "_") in block_aliases
         )
-        if use_blocks and not latent_values:
-            latent_values = _trace_latent_values(self._model, inference.seed)
-        mass_matrix_structure = _resolve_dense_mass_structure(
-            dense_mass_setting,
-            latent_values,
-            context=getattr(self, "context", None),
-        )
+        if use_blocks:
+            # Build blocks under public/scientific names, then map
+            # them to the exact NUTS-only auxiliary coordinates. This keeps
+            # reparameterized Uniform sites in their intended AGN/host blocks.
+            physical_latent_values = physical_init_values or _trace_latent_values(
+                self._model,
+                inference.seed,
+            )
+            physical_mass_structure = _resolve_dense_mass_structure(
+                dense_mass_setting,
+                physical_latent_values,
+                context=getattr(self, "context", None),
+            )
+            mass_matrix_structure = _remap_dense_mass_sites(
+                physical_mass_structure,
+                reparameterized_sites,
+            )
+        else:
+            dense_mass_setting = _remap_dense_mass_sites(
+                dense_mass_setting,
+                reparameterized_sites,
+            )
+            mass_matrix_structure = _resolve_dense_mass_structure(
+                dense_mass_setting,
+                init_values or {},
+                context=getattr(self, "context", None),
+            )
         kernel = NUTS(
-            self._model,
-            init_strategy=init_to_value(values=init_values) if init_values else None,
+            nuts_model,
+            init_strategy=(
+                init_to_value(values=init_values)
+                if init_values
+                else init_to_uniform()
+            ),
             target_accept_prob=target_accept_prob,
             dense_mass=mass_matrix_structure,
-            max_tree_depth=max_tree_depth,
+            max_tree_depth=kernel_max_tree_depth,
+            find_heuristic_step_size=True,
         )
         mcmc = MCMC(
             kernel,
@@ -1030,14 +1492,37 @@ class JAXSEDFit:
             jit_model_args=False,
         )
         rng_key = jax.random.PRNGKey(inference.seed + 1)
-        mcmc.run(rng_key)
+        mcmc.run(
+            rng_key,
+            extra_fields=(
+                "num_steps",
+                "accept_prob",
+                "potential_energy",
+                "energy",
+            ),
+        )
         # NumPyro writes this directly to stdout, so it is visible both in a
-        # terminal and as captured output beneath a notebook cell.
-        mcmc.print_summary()
-        samples = mcmc.get_samples()
+        # terminal and as captured output beneath a notebook cell. For exact
+        # sampler-only pivots, report the scientific parameter rather than the
+        # internal auxiliary coordinate.
+        _print_physical_nuts_summary(mcmc, reparameterized_sites)
+        samples = _physical_nuts_samples(
+            mcmc,
+            reparameterized_sites,
+            group_by_chain=False,
+        )
+        transition_diagnostics = _nuts_transition_diagnostics(
+            mcmc,
+            max_tree_depth=max_tree_depth,
+        )
+        metric_diagnostics = _nuts_metric_diagnostics(mcmc)
         self.nuts_result = {
             "mcmc": mcmc,
             "mass_matrix_structure": mass_matrix_structure,
+            "max_tree_depth": kernel_max_tree_depth,
+            "transition_diagnostics": transition_diagnostics,
+            "metric_diagnostics": metric_diagnostics,
+            "reparameterized_sites": reparameterized_sites,
         }
         self.samples = {k: np.asarray(v) for k, v in samples.items()}
         self.predictive = None
@@ -1513,6 +1998,19 @@ class JAXSEDFit:
             self._write_array_group(samples_grp, samples)
             predictive_grp = h5f.create_group("predictive")
             self._write_array_group(predictive_grp, predictive)
+            if isinstance(state.nuts_result, dict):
+                diagnostics = {
+                    key: state.nuts_result[key]
+                    for key in (
+                        "mass_matrix_structure",
+                        "max_tree_depth",
+                        "transition_diagnostics",
+                        "metric_diagnostics",
+                        "reparameterized_sites",
+                    )
+                    if key in state.nuts_result
+                }
+                self._write_hdf5_node(h5f, "nuts_diagnostics", diagnostics)
         state.path = out
         return out
 
@@ -1569,6 +2067,11 @@ class JAXSEDFit:
                 "mw_ebv": cls._read_hdf5_node(h5f, "mw_ebv") if "mw_ebv" in h5f else None,
                 "samples": {k: np.asarray(h5f["samples"][k][()]) for k in h5f["samples"].keys()},
                 "predictive": {k: np.asarray(h5f["predictive"][k][()]) for k in h5f.get("predictive", {}).keys()},
+                "nuts_diagnostics": (
+                    cls._read_hdf5_node(h5f, "nuts_diagnostics")
+                    if "nuts_diagnostics" in h5f
+                    else None
+                ),
             }
         if not isinstance(payload, dict) or "config" not in payload:
             raise ValueError(f"Unsupported posterior bundle schema: {posterior_path}")
@@ -1581,6 +2084,7 @@ class JAXSEDFit:
         fitter.samples = None if samples is None else {k: np.asarray(v) for k, v in samples.items()}
         predictive = payload.get("predictive")
         fitter.predictive = None if predictive is None else {k: np.asarray(v) for k, v in predictive.items()}
+        fitter.nuts_result = payload.get("nuts_diagnostics")
         fitter._saved_summary = payload.get("summary")
         fitter._loaded_posterior_path = posterior_path
         return fitter
@@ -1803,10 +2307,7 @@ class JAXSEDFit:
             raise RuntimeError("plot_jaxqsofit_spectrum requires SpectroscopyConfig.backend='jaxqsofit'.")
         if self.context.spec_wave_obs.size == 0:
             raise RuntimeError("No spectroscopy data are available to plot.")
-        try:
-            from jaxqsofit import JAXQSOFit
-        except Exception as exc:  # pragma: no cover - exercised only without optional dependency
-            raise ImportError("plot_jaxqsofit_spectrum requires jaxqsofit on PYTHONPATH.") from exc
+        from .spectral_plotting import plot_fig
 
         pred = self.predict(posterior=posterior)
         index = np.asarray(self.context.spec_spectrum_index, dtype=int)
@@ -1981,7 +2482,7 @@ class JAXSEDFit:
             scaled = draw_scale(interp_draws.shape[0])[:, None] * float(multiplier) * interp_draws
             return self._obs_flambda_to_rest_flambda_1e17(scaled, z)
 
-        plotter = JAXQSOFit.__new__(JAXQSOFit)
+        plotter = SimpleNamespace()
         plotter.z = z
         plotter.wave = wave_rest
         plotter.flux = flux_rest
@@ -2081,7 +2582,8 @@ class JAXSEDFit:
         plotter.line_component_sig_median = self._posterior_median_array(pred.get("jqf_line_sig_per_component", []))
         plotter.tied_line_meta = {"names": [""] * len(np.atleast_1d(plotter.line_component_amp_median))}
 
-        plotter.plot_fig(
+        plot_fig(
+            plotter,
             plot_legend=plot_legend,
             ylims=ylims,
             plot_residual=plot_residual,

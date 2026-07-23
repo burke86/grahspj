@@ -580,23 +580,54 @@ def fit_quality_metadata(fitter: Any) -> dict[str, Any]:
     """
     n_divergent = 0
     n_transition_samples = 0
+    transition_diagnostics: dict[str, Any] = {}
     nuts_result = getattr(fitter, "nuts_result", None)
+    if isinstance(nuts_result, dict):
+        transition_diagnostics = dict(
+            nuts_result.get("transition_diagnostics", {}) or {}
+        )
+        n_divergent = int(transition_diagnostics.get("n_divergent", 0))
+        n_transition_samples = int(
+            transition_diagnostics.get("n_transitions", 0)
+        )
     mcmc = nuts_result.get("mcmc") if isinstance(nuts_result, dict) else None
     if mcmc is not None and hasattr(mcmc, "get_extra_fields"):
         extra_fields = mcmc.get_extra_fields(group_by_chain=False)
         diverging = np.asarray(extra_fields.get("diverging", []), dtype=bool).reshape(-1)
         n_transition_samples = int(diverging.size)
         n_divergent = int(np.count_nonzero(diverging))
-    divergence_fraction = (
-        float(n_divergent / n_transition_samples)
-        if n_transition_samples > 0
-        else float("nan")
+    divergence_fraction = float(
+        transition_diagnostics.get("divergence_fraction", np.nan)
     )
+    if n_transition_samples > 0:
+        divergence_fraction = float(n_divergent / n_transition_samples)
+    bfmi = np.asarray(transition_diagnostics.get("bfmi", []), dtype=float)
     return {
         "reduced_chi2": _reduced_chi2_for_fit(fitter),
         "n_divergent": n_divergent,
         "n_transition_samples": n_transition_samples,
         "divergence_fraction": divergence_fraction,
+        "mean_accept_prob": float(
+            transition_diagnostics.get("mean_accept_prob", np.nan)
+        ),
+        "median_num_steps": float(
+            transition_diagnostics.get("median_num_steps", np.nan)
+        ),
+        "p90_num_steps": float(
+            transition_diagnostics.get("p90_num_steps", np.nan)
+        ),
+        "p99_num_steps": float(
+            transition_diagnostics.get("p99_num_steps", np.nan)
+        ),
+        "final_tree_level_fraction": float(
+            transition_diagnostics.get("final_tree_level_fraction", np.nan)
+        ),
+        "max_num_steps_fraction": float(
+            transition_diagnostics.get("max_num_steps_fraction", np.nan)
+        ),
+        "bfmi_min": (
+            float(np.nanmin(bfmi)) if bfmi.size and np.any(np.isfinite(bfmi)) else np.nan
+        ),
     }
 
 
@@ -621,6 +652,13 @@ def _failed_benchmark_row(task: _BenchmarkWorkerTask, exc: Exception) -> dict[st
     enriched["n_divergent"] = 0
     enriched["n_transition_samples"] = 0
     enriched["divergence_fraction"] = float("nan")
+    enriched["mean_accept_prob"] = float("nan")
+    enriched["median_num_steps"] = float("nan")
+    enriched["p90_num_steps"] = float("nan")
+    enriched["p99_num_steps"] = float("nan")
+    enriched["final_tree_level_fraction"] = float("nan")
+    enriched["max_num_steps_fraction"] = float("nan")
+    enriched["bfmi_min"] = float("nan")
     enriched["residual"] = float("nan")
     enriched["redshift_bin"] = _redshift_bin_label(float(task.row["redshift"]), task.z_edges)
     enriched["fit_error"] = f"{type(exc).__name__}: {exc}"

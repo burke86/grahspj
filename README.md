@@ -2,6 +2,12 @@
 
 `JAXSEDFit` is a Bayesian SED fitting code for AGN and galaxies. It is an experimental JAX-based implementation of `CIGALE` and `GRAHSP`. It ports `GRAHSP`/`pcigale` model components into JAX/NumPyro and combines them with a JAX-native galaxy models based on `Diffstar` + `DSPS`.
 
+JAXSEDFit also owns the shared differentiable quasar spectral engine used by
+joint and standalone spectrum fits: tied emission lines, Fe II, Balmer
+continuum, spectral priors, custom spectral components, and NumPyro geometry.
+The `jaxqsofit` package provides the spectrum-focused interface on top of this
+engine; JAXSEDFit itself does not depend on `jaxqsofit`.
+
 Documentation: [https://jaxsedfit.readthedocs.io/](https://jaxsedfit.readthedocs.io/)
 
 At a high level, `jaxsedfit` currently includes:
@@ -83,7 +89,7 @@ cfg.inference.learning_rate = 1e-2
 cfg.inference.num_warmup = 50
 cfg.inference.num_samples = 50
 cfg.inference.num_chains = 1
-cfg.inference.dense_mass = False
+cfg.inference.dense_mass = "blocks"
 cfg.inference.max_tree_depth = 8
 cfg.output.plot_fig = False
 cfg.output.save_fig = True

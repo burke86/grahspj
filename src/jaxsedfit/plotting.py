@@ -56,7 +56,18 @@ def _grouped_trace_samples(fitter_or_samples: Any) -> tuple[Mapping[str, Any], b
         if isinstance(nuts_result, Mapping):
             mcmc = nuts_result.get("mcmc")
             if mcmc is not None and hasattr(mcmc, "get_samples"):
-                return mcmc.get_samples(group_by_chain=True), True
+                samples = mcmc.get_samples(group_by_chain=True)
+                replacements = nuts_result.get("reparameterized_sites", {})
+                auxiliary_names = (
+                    set(replacements.values())
+                    if isinstance(replacements, Mapping)
+                    else set()
+                )
+                return {
+                    name: value
+                    for name, value in samples.items()
+                    if name not in auxiliary_names
+                }, True
     return _posterior_samples(fitter_or_samples), False
 
 

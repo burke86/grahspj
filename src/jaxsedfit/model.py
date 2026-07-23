@@ -2925,6 +2925,59 @@ def spectroscopic_likelihood_weight(wave_obs, mask, spectrum_index, likelihood_w
     return jnp.where(n_pix > 0.0, jnp.minimum(n_eff / n_pix, 1.0), jnp.asarray(1.0, dtype=jnp.float64))
 
 
+def _spectrum_continuum_log_pivot(
+    continuum_fluxes,
+    observed_fluxes,
+    mask,
+    spectrum_index,
+    n_spectra,
+):
+    """Return a smooth per-spectrum log continuum-to-data RMS ratio.
+
+    The ratio is evaluated before the instrumental spectrum scale is applied.
+    Reparameterizing ``log_spectrum_scale`` by this offset makes the scaled
+    continuum RMS a direct NUTS coordinate while preserving the original prior
+    and likelihood exactly. Squared broad averages avoid medians, extrema,
+    parameter-dependent masks, and positivity clips.
+    """
+    continuum_fluxes = jnp.nan_to_num(
+        jnp.asarray(continuum_fluxes, dtype=jnp.float64),
+        nan=0.0,
+        posinf=0.0,
+        neginf=0.0,
+    )
+    observed_fluxes = jnp.nan_to_num(
+        jnp.asarray(observed_fluxes, dtype=jnp.float64),
+        nan=0.0,
+        posinf=0.0,
+        neginf=0.0,
+    )
+    mask = jnp.asarray(mask, dtype=bool)
+    spectrum_index = jnp.asarray(spectrum_index, dtype=jnp.int32)
+    offsets = []
+    for index in range(int(n_spectra)):
+        use = mask & (spectrum_index == index)
+        count = jnp.maximum(jnp.sum(use), 1)
+        model_mean_square = jnp.sum(
+            jnp.where(use, continuum_fluxes**2, 0.0)
+        ) / count
+        observed_mean_square = jnp.sum(
+            jnp.where(use, observed_fluxes**2, 0.0)
+        ) / count
+        # This data-scaled floor only handles an all-zero edge case; in an
+        # ordinary fit it is many orders of magnitude below either RMS.
+        floor_square = jnp.maximum(observed_mean_square * 1.0e-24, 1.0e-60)
+        offsets.append(
+            0.5
+            * (
+                jnp.log(model_mean_square + floor_square)
+                - jnp.log(observed_mean_square + floor_square)
+            )
+        )
+    result = jnp.stack(offsets)
+    return result[0] if int(n_spectra) == 1 else result
+
+
 def _flambda_to_mjy(wave_obs, flux_lambda):
     """Convert internal f_lambda values on an observed wavelength grid to mJy.
 
@@ -3064,7 +3117,7 @@ def _evaluate_jaxqsofit_backend(
     fixed_narrow_amp_scale=None,
     feature_amplitude_scale=1.0,
 ):
-    """Evaluate optional jaxqsofit spectral components inside jaxsedfit.
+    """Evaluate the built-in detailed spectral components.
 
     Parameters
     ----------
@@ -3093,10 +3146,13 @@ def _evaluate_jaxqsofit_backend(
         sampled line, Fe II, and Balmer amplitudes.
     """
     try:
-        from jaxqsofit.components import SpectralComponentConfig, evaluate_joint_spectral_components
+        from .spectral_components import (
+            SpectralComponentConfig,
+            evaluate_joint_spectral_components,
+        )
     except Exception as exc:  # pragma: no cover - exercised only without optional dependency
         raise ImportError(
-            "SpectroscopyConfig.backend='jaxqsofit' requires jaxqsofit on PYTHONPATH."
+            "Unable to load the built-in detailed spectral backend."
         ) from exc
 
     jqf_cfg = cfg.spectroscopy_config.jaxqsofit
@@ -3165,7 +3221,7 @@ def _project_jaxqsofit_smooth_state_filters(
     for these broad components; its result is interpolated onto the native
     filter curves before exact filter quadrature.
     """
-    from jaxqsofit.components import render_joint_feature_state
+    from .spectral_components import render_joint_feature_state
 
     curves = context.packed_filter_curves_jax
     valid_filter_waves = [
@@ -4150,6 +4206,7 @@ def evaluate_photometric_state(
     spec_torus_model_fluxes = jnp.zeros_like(spec_fluxes)
     spec_continuum_model_fluxes = jnp.zeros_like(spec_fluxes)
     spectrum_scale = jnp.asarray(1.0, dtype=jnp.float64)
+    log_spectrum_scale = jnp.asarray(0.0, dtype=jnp.float64)
     feature_amplitude_scale = jnp.asarray(1.0, dtype=jnp.float64)
     spec_likelihood_weight = jnp.asarray(1.0, dtype=jnp.float64)
     jqf_line_photometry = jnp.zeros_like(pred_fluxes)
@@ -4160,32 +4217,6 @@ def evaluate_photometric_state(
     jqf_extrapolated_narrow_photometry = jnp.zeros_like(pred_fluxes)
     jqf_photometry_adjustment = jnp.zeros_like(pred_fluxes)
     if spectroscopy_enabled:
-        if cfg.spectroscopy_config.fit_scale:
-            scale_prior = _prior_distribution(
-                prior_config,
-                "log_spectrum_scale",
-                dist.Normal(0.0, np.log(10.0) * cfg.spectroscopy_config.scale_prior_sigma_dex),
-            )
-            n_spectra = len(context.spec_instruments)
-            if n_spectra > 1:
-                log_spectrum_scale = numpyro.sample(
-                    "log_spectrum_scale",
-                    scale_prior.expand([n_spectra]).to_event(1),
-                )
-                spectrum_scale = jnp.exp(log_spectrum_scale)
-            else:
-                log_spectrum_scale = numpyro.sample(
-                    "log_spectrum_scale",
-                    scale_prior,
-                )
-                spectrum_scale = jnp.exp(log_spectrum_scale)
-        else:
-            log_spectrum_scale = jnp.asarray(0.0, dtype=jnp.float64)
-        feature_amplitude_scale = (
-            spectrum_scale[0]
-            if jnp.ndim(spectrum_scale) > 0
-            else spectrum_scale
-        )
         backend = str(cfg.spectroscopy_config.backend).lower()
         if backend == "jaxqsofit":
             use_spec_resolution_continuum = bool(
@@ -4295,6 +4326,45 @@ def evaluate_photometric_state(
             spec_host_model_fluxes = _flambda_to_mjy(spec_wave_obs, spec_host_lambda)
             spec_model_fluxes = _flambda_to_mjy(spec_wave_obs, spec_model_lambda)
             spec_continuum_model_fluxes = spec_model_fluxes
+        if cfg.spectroscopy_config.fit_scale:
+            scale_prior = _prior_distribution(
+                prior_config,
+                "log_spectrum_scale",
+                dist.Normal(
+                    0.0,
+                    np.log(10.0)
+                    * cfg.spectroscopy_config.scale_prior_sigma_dex,
+                ),
+            )
+            n_spectra = len(context.spec_instruments)
+            pivot_offset = _spectrum_continuum_log_pivot(
+                spec_continuum_model_fluxes,
+                spec_fluxes,
+                spec_mask,
+                spec_spectrum_index,
+                n_spectra,
+            )
+            scale_distribution = (
+                scale_prior.expand([n_spectra]).to_event(1)
+                if n_spectra > 1
+                else scale_prior
+            )
+            log_spectrum_scale = numpyro.sample(
+                "log_spectrum_scale",
+                scale_distribution,
+                infer={
+                    "jaxsedfit_additive_pivot": {
+                        "offset": pivot_offset,
+                        "auxiliary_name": "log_spectrum_continuum_pivot",
+                    }
+                },
+            )
+            spectrum_scale = jnp.exp(log_spectrum_scale)
+        feature_amplitude_scale = (
+            spectrum_scale[0]
+            if jnp.ndim(spectrum_scale) > 0
+            else spectrum_scale
+        )
         if backend == "jaxqsofit" and include_spectral_features:
             jqf_components = _evaluate_jaxqsofit_backend(
                 spec_wave_obs,
