@@ -1067,6 +1067,52 @@ def test_upper_limit_uses_configured_sampling_family():
     assert student > gaussian
 
 
+def test_student_t_masks_inactive_distribution_inputs_before_evaluation(monkeypatch):
+    """Inactive Student-t tails must not contaminate NUTS gradients."""
+    original_cdf = dist.StudentT.cdf
+    seen = {}
+
+    def _recording_cdf(self, value):
+        seen["value"] = value
+        seen["loc"] = self.loc
+        return original_cdf(self, value)
+
+    monkeypatch.setattr(dist.StudentT, "cdf", _recording_cdf)
+    pred_fluxes = jnp.asarray([1.0e-12, 2.0])
+    obs_fluxes = jnp.asarray([1.0e6, 1.5])
+
+    def loglike(pred):
+        return photometric_loglike(
+            pred_fluxes=pred,
+            obs_fluxes=obs_fluxes,
+            obs_errors=jnp.asarray([1.0e-8, 0.2]),
+            upper_limits=jnp.asarray([False, True]),
+            data_mask=jnp.asarray([True, False]),
+            systematics_width=0.0,
+            likelihood_family="student_t",
+            student_t_df=5.0,
+            agn_component=jnp.zeros(2),
+            agn_bol_lum_w=1.0e37,
+            agn_nev=0.1,
+            variability_uncertainty=False,
+            attenuation_model_uncertainty=False,
+            transmitted_fraction=jnp.ones(2),
+            lyman_break_uncertainty=False,
+            filter_wavelength=jnp.asarray([5000.0, 10000.0]),
+            redshift=0.5,
+        )
+
+    loglike(pred_fluxes)
+    seen_value = np.asarray(seen["value"])
+    seen_loc = np.asarray(seen["loc"])
+    monkeypatch.setattr(dist.StudentT, "cdf", original_cdf)
+    gradient = np.asarray(jax.grad(loglike)(pred_fluxes))
+
+    assert seen_value[0] > seen_loc[0]
+    assert seen_value[1] == pytest.approx(obs_fluxes[1])
+    assert np.all(np.isfinite(gradient))
+
+
 def test_lyman_break_uncertainty_threshold_uses_angstroms():
     kwargs = dict(
         pred_fluxes=np.asarray([100.0]),

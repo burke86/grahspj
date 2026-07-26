@@ -2889,11 +2889,19 @@ def photometric_loglike(
         data_dist = dist.StudentT(df=student_t_df, loc=pred_fluxes, scale=scale)
     else:
         raise ValueError("likelihood.likelihood_family must be one of: 'gaussian', 'student_t'.")
-    logl_data = jnp.sum(jnp.where(data_mask, data_dist.log_prob(obs_fluxes), 0.0))
+    # Mask distribution inputs before evaluating them. JAX differentiates
+    # both branches of ``where``; masking only the returned log probabilities
+    # allows an unstable inactive tail (notably Student-t CDF gradients) to
+    # poison the full gradient with NaNs.
+    detection_obs = jnp.where(data_mask, obs_fluxes, pred_fluxes)
+    logl_data = jnp.sum(jnp.where(data_mask, data_dist.log_prob(detection_obs), 0.0))
     # Censored measurements must use the same sampling family as detections.
     # In particular, the default Student-t likelihood has substantially
     # heavier upper-tail probability than a Gaussian at fixed scale.
-    log_cdf = jnp.log(jnp.clip(data_dist.cdf(obs_fluxes), 1.0e-300, 1.0))
+    # A one-scale offset avoids the undefined Student-t CDF derivative at its
+    # exact center while remaining a parameter-independent standardized value.
+    limit_obs = jnp.where(upper_limits, obs_fluxes, pred_fluxes + scale)
+    log_cdf = jnp.log(jnp.clip(data_dist.cdf(limit_obs), 1.0e-300, 1.0))
     logl_lim = jnp.sum(jnp.where(upper_limits, log_cdf, 0.0))
     invalid = active & ~(input_valid & auxiliary_valid & variance_valid)
     penalty = -1.0e6 * jnp.sum(invalid.astype(jnp.float64))
