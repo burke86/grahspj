@@ -29,8 +29,12 @@ class Observation:
         mode = str(self.redshift_mode).lower()
         if mode not in {"fixed", "fit"}:
             raise ValueError("observation.redshift_mode must be either 'fixed' or 'fit'.")
-        if not np.isfinite(float(self.redshift)) or float(self.redshift) < 0.0:
-            raise ValueError("observation.redshift must be finite and non-negative.")
+        if not np.isfinite(float(self.redshift)) or float(self.redshift) <= 0.0:
+            raise ValueError(
+                "observation.redshift must be finite and strictly positive; "
+                "a source at z=0 requires an explicit distance, which jaxsedfit "
+                "does not currently accept."
+            )
         if not np.isfinite(float(self.redshift_err)) or float(self.redshift_err) < 0.0:
             raise ValueError("observation.redshift_err must be finite and non-negative.")
         self.redshift_mode = mode
@@ -592,6 +596,8 @@ class RedshiftPriorConfig:
             raise ValueError("redshift prior z_grid and pdf must be finite.")
         if np.any(np.diff(z_grid) <= 0.0):
             raise ValueError("redshift prior z_grid must be strictly increasing.")
+        if z_grid[0] <= 0.0:
+            raise ValueError("redshift prior z_grid must be strictly positive.")
         if np.any(pdf < 0.0):
             raise ValueError("redshift prior pdf must be non-negative.")
         norm = float(np.trapezoid(pdf, z_grid))

@@ -1527,7 +1527,7 @@ def _redshift_projection_grid(cfg: FitConfig) -> np.ndarray:
     else:
         sigma = max(float(cfg.observation.redshift_err), 1.0e-3)
         width = max(float(cfg.likelihood.redshift_projection_sigma), 1.0) * sigma
-        low = max(0.0, float(cfg.observation.redshift) - width)
+        low = max(1.0e-8, float(cfg.observation.redshift) - width)
         high = max(low + 1.0e-6, float(cfg.observation.redshift) + width)
     return np.linspace(low, high, n_grid, dtype=float)
 

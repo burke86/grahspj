@@ -127,7 +127,7 @@ def test_likelihood_defaults_include_local_line_photometry():
 
 @pytest.mark.parametrize("redshift", [-0.1, np.nan, np.inf])
 def test_observation_rejects_invalid_redshift(redshift):
-    with pytest.raises(ValueError, match="finite and non-negative"):
+    with pytest.raises(ValueError, match="finite and strictly positive"):
         Observation(redshift=redshift).validate()
 
 
@@ -1033,6 +1033,40 @@ def test_upper_limit_likelihood_uses_standard_deviation_not_variance():
     assert chi2_scaled == pytest.approx(chi2, rel=1.0e-12)
 
 
+def test_upper_limit_uses_configured_sampling_family():
+    kwargs = dict(
+        pred_fluxes=np.asarray([1.5]),
+        obs_fluxes=np.asarray([1.0]),
+        obs_errors=np.asarray([0.2]),
+        upper_limits=np.asarray([True]),
+        data_mask=np.asarray([False]),
+        systematics_width=0.0,
+        student_t_df=5.0,
+        agn_component=np.asarray([0.0]),
+        agn_bol_lum_w=1.0e38,
+        agn_nev=0.1,
+        variability_uncertainty=False,
+        attenuation_model_uncertainty=False,
+        transmitted_fraction=np.asarray([1.0]),
+        lyman_break_uncertainty=False,
+        filter_wavelength=np.asarray([5000.0]),
+        redshift=0.1,
+    )
+
+    gaussian = float(photometric_loglike(**kwargs, likelihood_family="gaussian"))
+    student = float(photometric_loglike(**kwargs, likelihood_family="student_t"))
+    expected_gaussian = float(
+        np.log(np.asarray(dist.Normal(1.5, 0.2).cdf(np.asarray(1.0))))
+    )
+    expected_student = float(
+        np.log(np.asarray(dist.StudentT(5.0, 1.5, 0.2).cdf(np.asarray(1.0))))
+    )
+
+    assert gaussian == pytest.approx(expected_gaussian, rel=1.0e-12)
+    assert student == pytest.approx(expected_student, rel=1.0e-12)
+    assert student > gaussian
+
+
 def test_lyman_break_uncertainty_threshold_uses_angstroms():
     kwargs = dict(
         pred_fluxes=np.asarray([100.0]),
@@ -1593,7 +1627,7 @@ def test_jaxqsofit_backend_does_not_fix_narrow_width_without_explicit_override(m
         fake_evaluate_joint_spectral_components,
     )
     cfg = FitConfig(
-        observation=Observation(redshift=0.0),
+        observation=Observation(redshift=1.0e-4),
         photometry=PhotometryData(filter_names=["f1"], fluxes=[1.0], errors=[0.1]),
         spectroscopy_config=SpectroscopyConfig(
             enabled=True,
@@ -1862,7 +1896,7 @@ def test_jaxqsofit_backend_keeps_nebular_width_fixed_without_nebular_prior(monke
     monkeypatch.setattr("jaxsedfit.preload._load_ssp_templates", lambda fn: _SSPData())
 
     cfg = FitConfig(
-        observation=Observation(object_id="obj", redshift=0.0),
+        observation=Observation(object_id="obj", redshift=1.0e-4),
         photometry=PhotometryData(filter_names=["f1"], fluxes=[1.0], errors=[0.1]),
         filters=FilterSet(curves=[FilterCurve(name="f1", wave=[1000.0, 2000.0, 3000.0], transmission=[0.0, 1.0, 0.0])]),
         galaxy=GalaxyConfig(dsps_ssp_fn="fake.h5", n_wave=64, fit_host=True),
@@ -2002,7 +2036,7 @@ def test_jaxsedfit_jaxqsofit_backend_uses_nested_tied_line_config(monkeypatch):
     monkeypatch.setattr("jaxsedfit.preload._load_ssp_templates", lambda fn: _SSPData())
 
     cfg = FitConfig(
-        observation=Observation(object_id="obj", redshift=0.0),
+        observation=Observation(object_id="obj", redshift=1.0e-4),
         photometry=PhotometryData(
             filter_names=["f1"],
             fluxes=[1.0],
@@ -2136,7 +2170,7 @@ def test_jaxsedfit_jaxqsofit_tied_line_backend_runs_svi_jit(monkeypatch):
         }
     ]
     cfg = FitConfig(
-        observation=Observation(object_id="obj", redshift=0.0),
+        observation=Observation(object_id="obj", redshift=1.0e-4),
         photometry=PhotometryData(filter_names=["f1"], fluxes=[1.0], errors=[0.1]),
         filters=FilterSet(curves=[FilterCurve(name="f1", wave=[1000.0, 2000.0, 3000.0], transmission=[0.0, 1.0, 0.0])]),
         galaxy=GalaxyConfig(dsps_ssp_fn="fake.h5", n_wave=64, fit_host=False),
@@ -2278,6 +2312,30 @@ def test_config_rejects_invalid_redshift_pdf():
         ),
     )
     with pytest.raises(ValueError, match="strictly increasing"):
+        cfg.validate()
+
+
+def test_config_rejects_zero_redshift_without_explicit_distance():
+    cfg = FitConfig(
+        observation=Observation(object_id="local", redshift=0.0),
+        photometry=PhotometryData(filter_names=["f1"], fluxes=[1.0], errors=[0.1]),
+    )
+    with pytest.raises(ValueError, match="strictly positive"):
+        cfg.validate()
+
+
+def test_config_rejects_redshift_pdf_touching_zero():
+    cfg = FitConfig(
+        observation=Observation(object_id="obj", redshift=0.1, redshift_mode="fit"),
+        photometry=PhotometryData(filter_names=["f1"], fluxes=[1.0], errors=[0.1]),
+        prior_config=PriorConfig(
+            redshift=RedshiftPriorConfig(
+                z_grid=[0.0, 0.1, 0.2],
+                pdf=[0.2, 0.5, 0.3],
+            )
+        ),
+    )
+    with pytest.raises(ValueError, match="strictly positive"):
         cfg.validate()
 
 
