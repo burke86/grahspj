@@ -571,12 +571,16 @@ def _load_templates(cfg: FitConfig) -> LoadedTemplates:
         and str(cfg.spectroscopy_config.backend).lower() == "jaxqsofit"
     )
     need_dust_templates = bool(cfg.galaxy.fit_host and cfg.galaxy.use_energy_balance)
+    # Keep lightweight/legacy config-like objects compatible with the
+    # pre-DL07 API. Full FitConfig instances always provide these fields.
+    dust_model = str(getattr(cfg.galaxy, "dust_model", "dale2014")).lower()
+    dust_umin = float(getattr(cfg.galaxy, "dust_umin", 1.0))
     feii = cfg.agn.feii_template
     em = cfg.agn.emission_line_template
     cache_key = (
         need_agn_templates,
         need_dust_templates,
-        cfg.galaxy.dust_model,
+        dust_model,
         feii.name,
         feii.wavelength_unit,
         em.wavelength_unit,
@@ -590,11 +594,11 @@ def _load_templates(cfg: FitConfig) -> LoadedTemplates:
     cached = _TEMPLATE_CACHE.get(cache_key)
     if cached is not None:
         return cached
-    dl07_umin_grid = np.asarray([float(cfg.galaxy.dust_umin)], dtype=float)
+    dl07_umin_grid = np.asarray([dust_umin], dtype=float)
     dl07_qpah_grid = np.asarray([2.5], dtype=float)
     dl07_single_u = np.zeros((1, 1, 1), dtype=float)
     dl07_powerlaw = np.zeros((1, 1, 1), dtype=float)
-    if need_dust_templates and cfg.galaxy.dust_model == "dale2014":
+    if need_dust_templates and dust_model == "dale2014":
         dust_alpha_grid, dust_wave, dust_lumin = _load_vendored_dale2014_templates()
         dl07_single_u = np.zeros((1, 1, dust_wave.size), dtype=float)
         dl07_powerlaw = np.zeros((1, 1, dust_wave.size), dtype=float)
