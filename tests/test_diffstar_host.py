@@ -31,6 +31,7 @@ from jaxsedfit.model import (
     _delayed_sfh_cumulative_mass,
     _default_gal_lgmet_loc,
     _diffstar_ssp_age_weights,
+    _flat_lcdm_age_gyr_jax,
     _mass_metallicity_relation_logprior,
     _luminosity_distance_m_jax,
     _ssp_log_age_bin_edges,
@@ -597,6 +598,9 @@ def test_tabulated_redshift_pdf_prior_is_supported(monkeypatch):
     assert "redshift_pdf_prior" in tr
     prior_value = np.asarray(tr["redshift_pdf_prior"]["value"], dtype=float)
     assert np.all(np.isfinite(prior_value))
+    cosmic_age = float(np.asarray(_flat_lcdm_age_gyr_jax(redshift, 70.0, 0.3)))
+    age_upper = float(np.exp(np.asarray(tr["log_sfh_age_gyr"]["fn"].support.upper_bound)))
+    assert age_upper == pytest.approx(min(10.0, cosmic_age), rel=1.0e-10)
 
 
 def test_luminosity_distance_jax_depends_on_redshift():

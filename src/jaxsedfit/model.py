@@ -176,6 +176,21 @@ def _luminosity_distance_m_jax(redshift, h0: float, om0: float):
     return jnp.reshape(d_l_m, ()) if scalar_input else d_l_m
 
 
+def _flat_lcdm_age_gyr_jax(redshift, h0: float, om0: float):
+    """Return the cosmic age for a flat matter-plus-Lambda cosmology."""
+    z = jnp.maximum(jnp.asarray(redshift, dtype=jnp.float64), 0.0)
+    omega_m = jnp.clip(jnp.asarray(om0, dtype=jnp.float64), 1.0e-8, 1.0 - 1.0e-8)
+    omega_l = 1.0 - omega_m
+    hubble_time_gyr = 977.7922216807892 / jnp.asarray(h0, dtype=jnp.float64)
+    argument = jnp.sqrt(omega_l / omega_m) / (1.0 + z) ** 1.5
+    return (
+        2.0
+        * hubble_time_gyr
+        / (3.0 * jnp.sqrt(omega_l))
+        * jnp.arcsinh(argument)
+    )
+
+
 def _prior_distribution(prior_config: dict[str, Any], key: str, default_distribution):
     """Read a NumPyro distribution-like prior from the flat prior mapping.
 
@@ -1942,6 +1957,7 @@ def _build_diffstar_host(
     *,
     full_output: bool = True,
     shared_gal_lgmet=None,
+    redshift=None,
 ):
     """Build the host-galaxy SED from Diffstar SFH and a precomputed SSP basis.
 
@@ -1958,9 +1974,23 @@ def _build_diffstar_host(
     ssp_lg_age_gyr = context.host_basis_jax.ssp_lg_age_gyr
     host_basis_rest = context.host_basis_jax.rest_llambda
     surviving_frac_by_age = context.host_basis_jax.surviving_frac_by_age
-    gal_t_table = context.host_basis_jax.gal_t_table
-    t_obs_gyr = jnp.asarray(context.t_obs_gyr, dtype=jnp.float64)
     galaxy_cfg = context.fit_config.galaxy
+    if redshift is None:
+        redshift = jnp.asarray(context.fit_config.observation.redshift, dtype=jnp.float64)
+    if bool(getattr(context.fit_config.observation, "fits_redshift", False)):
+        t_obs_gyr = _flat_lcdm_age_gyr_jax(
+            redshift,
+            galaxy_cfg.cosmology_h0,
+            galaxy_cfg.cosmology_om0,
+        )
+        gal_t_table = jnp.geomspace(
+            jnp.asarray(galaxy_cfg.sfh_t_min_gyr, dtype=jnp.float64),
+            jnp.maximum(t_obs_gyr, galaxy_cfg.sfh_t_min_gyr * 1.01),
+            context.host_basis_jax.gal_t_table.size,
+        )
+    else:
+        gal_t_table = context.host_basis_jax.gal_t_table
+        t_obs_gyr = jnp.asarray(context.t_obs_gyr, dtype=jnp.float64)
 
     log_stellar_mass = _sample_log_stellar_mass(prior_config)
 
@@ -1988,7 +2018,7 @@ def _build_diffstar_host(
         gal_lgmet,
         prior_config,
         ssp_lgmet=ssp_lgmet,
-        redshift=float(context.fit_config.observation.redshift),
+        redshift=redshift,
         metallicity_coordinate=galaxy_cfg.ssp_metallicity_coordinate,
         solar_metallicity=galaxy_cfg.ssp_solar_metallicity,
     )
@@ -2056,6 +2086,7 @@ def _build_delayed_host(
     *,
     full_output: bool = True,
     shared_gal_lgmet=None,
+    redshift=None,
 ):
     """Build the host-galaxy SED from a CIGALE-like delayed-tau SFH.
 
@@ -2072,30 +2103,47 @@ def _build_delayed_host(
     ssp_lg_age_gyr = context.host_basis_jax.ssp_lg_age_gyr
     host_basis_rest = context.host_basis_jax.rest_llambda
     surviving_frac_by_age = context.host_basis_jax.surviving_frac_by_age
-    gal_t_table = context.host_basis_jax.gal_t_table
-    t_obs_gyr = jnp.asarray(context.t_obs_gyr, dtype=jnp.float64)
     cfg = context.fit_config.galaxy
+    if redshift is None:
+        redshift = jnp.asarray(context.fit_config.observation.redshift, dtype=jnp.float64)
+    if bool(getattr(context.fit_config.observation, "fits_redshift", False)):
+        t_obs_gyr = _flat_lcdm_age_gyr_jax(
+            redshift,
+            cfg.cosmology_h0,
+            cfg.cosmology_om0,
+        )
+        gal_t_table = jnp.geomspace(
+            jnp.asarray(cfg.sfh_t_min_gyr, dtype=jnp.float64),
+            jnp.maximum(t_obs_gyr, cfg.sfh_t_min_gyr * 1.01),
+            context.host_basis_jax.gal_t_table.size,
+        )
+    else:
+        gal_t_table = context.host_basis_jax.gal_t_table
+        t_obs_gyr = jnp.asarray(context.t_obs_gyr, dtype=jnp.float64)
 
     log_stellar_mass = _sample_log_stellar_mass(prior_config)
     physical_min_age = max(float(cfg.sfh_t_min_gyr), 1.0e-3)
-    physical_max_age = max(float(context.t_obs_gyr), physical_min_age * 1.01)
+    physical_max_age = jnp.maximum(t_obs_gyr, physical_min_age * 1.01)
     if "log_sfh_age_gyr" in prior_config:
         log_age_gyr = _sample_bounded_normal(
             prior_config,
             "log_sfh_age_gyr",
-            np.log(min(3.0, physical_max_age)),
+            jnp.log(jnp.minimum(3.0, physical_max_age)),
             1.0,
             np.log(physical_min_age),
-            np.log(physical_max_age),
+            jnp.log(physical_max_age),
         )
     else:
         # Continuous equivalent of the GRAHSP age_main grid: log-uniform
         # from 10^2.2 Myr to 10 Gyr, capped by the age of the Universe.
-        default_max_age = min(10.0, physical_max_age)
-        default_min_age = min(max(10.0**-0.8, physical_min_age), default_max_age / 1.01)
+        default_max_age = jnp.minimum(10.0, physical_max_age)
+        default_min_age = jnp.minimum(
+            max(10.0**-0.8, physical_min_age),
+            default_max_age / 1.01,
+        )
         log_age_gyr = numpyro.sample(
             "log_sfh_age_gyr",
-            dist.Uniform(np.log(default_min_age), np.log(default_max_age)),
+            dist.Uniform(jnp.log(default_min_age), jnp.log(default_max_age)),
         )
     age_gyr = jnp.exp(log_age_gyr)
     if "log_sfh_tau_over_age" in prior_config:
@@ -2207,7 +2255,7 @@ def _build_delayed_host(
         gal_lgmet,
         prior_config,
         ssp_lgmet=ssp_lgmet,
-        redshift=float(context.fit_config.observation.redshift),
+        redshift=redshift,
         metallicity_coordinate=cfg.ssp_metallicity_coordinate,
         solar_metallicity=cfg.ssp_solar_metallicity,
     )
@@ -2278,6 +2326,7 @@ def _build_host_state(
     *,
     full_output: bool = True,
     shared_gal_lgmet=None,
+    redshift=None,
 ):
     """Dispatch to the configured host SFH model.
 
@@ -2305,6 +2354,7 @@ def _build_host_state(
             prior_config,
             full_output=full_output,
             shared_gal_lgmet=shared_gal_lgmet,
+            redshift=redshift,
         )
     if model_name in {"diffstar", "dsps_diffstar"}:
         return _build_diffstar_host(
@@ -2312,6 +2362,7 @@ def _build_host_state(
             prior_config,
             full_output=full_output,
             shared_gal_lgmet=shared_gal_lgmet,
+            redshift=redshift,
         )
     raise ValueError("galaxy.host_sfh_model must be one of: 'delayed', 'delayed_burst', 'diffstar'.")
 
@@ -2625,7 +2676,7 @@ def _sample_redshift(context: ModelContext, prior_config: dict[str, Any], cfg) -
             dist.TruncatedNormal(
                 cfg.observation.redshift,
                 max(cfg.observation.redshift_err, 1e-3),
-                low=0.0,
+                low=1.0e-8,
             ),
         )
 
@@ -2839,7 +2890,11 @@ def photometric_loglike(
     else:
         raise ValueError("likelihood.likelihood_family must be one of: 'gaussian', 'student_t'.")
     logl_data = jnp.sum(jnp.where(data_mask, data_dist.log_prob(obs_fluxes), 0.0))
-    logl_lim = jnp.sum(jnp.where(upper_limits, -0.5 * _chi2_upper_limit(obs_fluxes, pred_fluxes, total_variance), 0.0))
+    # Censored measurements must use the same sampling family as detections.
+    # In particular, the default Student-t likelihood has substantially
+    # heavier upper-tail probability than a Gaussian at fixed scale.
+    log_cdf = jnp.log(jnp.clip(data_dist.cdf(obs_fluxes), 1.0e-300, 1.0))
+    logl_lim = jnp.sum(jnp.where(upper_limits, log_cdf, 0.0))
     invalid = active & ~(input_valid & auxiliary_valid & variance_valid)
     penalty = -1.0e6 * jnp.sum(invalid.astype(jnp.float64))
     return logl_data + logl_lim + penalty
@@ -3498,6 +3553,18 @@ def evaluate_photometric_state(
         and not spectroscopy_enabled
         and not cfg.likelihood.attenuation_model_uncertainty
     )
+    if cfg.observation.fits_redshift:
+        redshift = _sample_redshift(context, prior_config, cfg)
+        luminosity_distance_m = _luminosity_distance_m_jax(
+            redshift,
+            cfg.galaxy.cosmology_h0,
+            cfg.galaxy.cosmology_om0,
+        )
+        igm = _igm_transmission(context.igm_cache_jax, redshift)
+    else:
+        redshift = context.fixed_redshift_jax
+        luminosity_distance_m = context.fixed_luminosity_distance_m_jax
+        igm = context.fixed_igm_jax
     needs_spec_host_basis = bool(
         spectroscopy_enabled
         and str(cfg.spectroscopy_config.backend).lower() == "jaxqsofit"
@@ -3512,6 +3579,7 @@ def evaluate_photometric_state(
             prior_config,
             full_output=include_components or needs_spec_host_basis,
             shared_gal_lgmet=shared_gal_lgmet,
+            redshift=redshift,
         )
         if fit_host
         else _empty_host_state(context)
@@ -3928,18 +3996,6 @@ def evaluate_photometric_state(
         )
     else:
         agn_systematics_width = jnp.asarray(float(cfg.likelihood.agn_systematics_width), dtype=jnp.float64)
-    if cfg.observation.fits_redshift:
-        redshift = _sample_redshift(context, prior_config, cfg)
-        luminosity_distance_m = _luminosity_distance_m_jax(
-            redshift,
-            cfg.galaxy.cosmology_h0,
-            cfg.galaxy.cosmology_om0,
-        )
-        igm = _igm_transmission(context.igm_cache_jax, redshift)
-    else:
-        redshift = context.fixed_redshift_jax
-        luminosity_distance_m = context.fixed_luminosity_distance_m_jax
-        igm = context.fixed_igm_jax
     nebular = _build_nebular_components(
         context,
         host_state,
