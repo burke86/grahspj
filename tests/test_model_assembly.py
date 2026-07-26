@@ -577,6 +577,23 @@ def test_energy_balance_dust_sed_integrates_to_absorbed_luminosity(monkeypatch):
     np.testing.assert_allclose(emitted_dust_luminosity, dust_luminosity, rtol=2.0e-2, atol=0.0)
 
 
+def test_dl07_uses_prospector_uniform_umin_prior_and_fixed_umax(monkeypatch):
+    _patch_ssp(monkeypatch)
+    cfg = _cfg(fit_agn=False, rest_wave_max=2.3e9, n_wave=4096)
+    cfg.galaxy.dust_model = "dl07"
+    context = build_model_context(cfg)
+    tr = trace(seed(lambda: grahsp_photometric_model(context, include_components=True), 0)).get_trace()
+
+    assert isinstance(tr["dust_umin"]["fn"], dist.Uniform)
+    assert float(tr["dust_umin"]["fn"].low) == pytest.approx(0.1)
+    assert float(tr["dust_umin"]["fn"].high) == pytest.approx(25.0)
+    wave = _site(tr, "rest_wave")
+    dust_lnu = _site(tr, "dust_rest_sed") * wave**2 / 2.99792458e18
+    emitted = -np.trapezoid(dust_lnu, 2.99792458e18 / wave)
+    expected = 10.0 ** float(_site(tr, "log_dust_luminosity_fit"))
+    assert emitted == pytest.approx(expected, rel=2.0e-3)
+
+
 def test_host_capture_scales_energy_balance_dust(monkeypatch):
     _patch_ssp(monkeypatch)
     cfg = _cfg(

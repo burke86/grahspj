@@ -316,7 +316,7 @@ def _joint_dense_mass_blocks(
         "log_agn_amp", "pl_slope", "pl_bend_loc", "log_pl_bend_loc",
         "pl_bend_width", "log_pl_bend_width", "ebv_agn", "log_ebv_agn",
         "log_stellar_mass", "ebv_gal", "log_ebv_gal",
-        "dust_alpha",
+        "dust_alpha", "dust_umin",
         "log_host_capture_scale_arcsec", "host_capture_scale_arcsec",
         "jqf_continuum_tilt",
         "fcov", "log_fcov", "si", "cool_lam", "log_cool_lam",
@@ -669,6 +669,7 @@ class JAXSEDFit:
             "nebular_line_scale_fit",
             "log_dust_luminosity_fit",
             "dust_alpha_fit",
+            "dust_umin_fit",
             "sfh_burst_fraction_fit",
             "sfh_burst_age_gyr_fit",
             "sfh_burst_tau_gyr_fit",
@@ -1635,6 +1636,8 @@ class JAXSEDFit:
             out["log_stellar_mass_fit"] = self.recovered_log_stellar_mass(_state=state)
         if "dust_alpha" in state.samples:
             out["dust_alpha_fit"] = float(np.median(np.asarray(state.samples["dust_alpha"], dtype=float)))
+        if "dust_umin" in state.samples:
+            out["dust_umin_fit"] = float(np.median(np.asarray(state.samples["dust_umin"], dtype=float)))
         if state.predictive is not None:
             out["pred_fluxes_median"] = np.median(np.asarray(state.predictive["pred_fluxes"]), axis=0).tolist()
             if "log_dust_luminosity_fit" in state.predictive:

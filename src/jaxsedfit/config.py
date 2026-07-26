@@ -197,7 +197,9 @@ class GalaxyConfig:
     # Host-galaxy dust energy balance only. AGN torus emission is modeled by the
     # empirical AGN component, not by adding AGN-absorbed luminosity here.
     use_energy_balance: bool = True
+    dust_model: str = "dale2014"
     dust_alpha: float = 2.0
+    dust_umin: float = 1.0
 
     def validate(self) -> None:
         """Validate the internal Angstrom wavelength grid and SFH grid."""
@@ -223,6 +225,11 @@ class GalaxyConfig:
             raise ValueError("galaxy.rest_wave_max must be finite and greater than rest_wave_min (Angstrom).")
         if int(self.n_wave) < 2:
             raise ValueError("galaxy.n_wave must be at least 2.")
+        self.dust_model = str(self.dust_model).strip().lower()
+        if self.dust_model not in {"dale2014", "dl07"}:
+            raise ValueError("galaxy.dust_model must be one of: 'dale2014', 'dl07'.")
+        if not np.isfinite(float(self.dust_umin)) or not 0.1 <= float(self.dust_umin) <= 25.0:
+            raise ValueError("galaxy.dust_umin must be between 0.1 and 25.")
         if int(self.sfh_n_steps) < 2:
             raise ValueError("galaxy.sfh_n_steps must be at least 2.")
         if not np.isfinite(float(self.sfh_t_min_gyr)) or float(self.sfh_t_min_gyr) <= 0.0:
@@ -657,6 +664,7 @@ class HostPriorConfig:
     gal_v_kms: Any | None = None
     gal_sigma_kms: Any | None = None
     dust_alpha: Any | None = None
+    dust_umin: Any | None = None
     ebv_gal: Any | None = None
     log_ebv_gal: Any | None = None
     log_sfh_tau_gyr: Any | None = None
@@ -681,6 +689,7 @@ class HostPriorConfig:
                 "gal_v_kms": "gal_v_kms",
                 "gal_sigma_kms": "gal_sigma_kms",
                 "dust_alpha": "dust_alpha",
+                "dust_umin": "dust_umin",
                 "ebv_gal": "ebv_gal",
                 "log_ebv_gal": "log_ebv_gal",
                 "log_sfh_tau_gyr": "log_sfh_tau_gyr",

@@ -1,0 +1,20 @@
+{
+  "description": "Frozen DL07 reference spectrum generated from the official Draine & Li template grid, independently of the jaxsedfit interpolation path.",
+  "spectrum_file": "dl07_reference_gold.npy",
+  "quantity": "Lnu",
+  "unit": "erg s^-1 Hz^-1",
+  "wavelength_angstrom": {
+    "spacing": "linear",
+    "minimum": 1000.0,
+    "maximum": 10000000.0,
+    "count": 512
+  },
+  "parameters": {
+    "lir_erg_s": 1e44,
+    "umin": 1.0,
+    "umax": 1e6,
+    "alpha": 2.0,
+    "gamma": 0.01,
+    "qpah_percent": 2.5
+  }
+}

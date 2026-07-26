@@ -1,7 +1,9 @@
 """Physical and numerical invariants for the JAXSEDfit forward model."""
 
+from pathlib import Path
 from types import SimpleNamespace
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -9,6 +11,7 @@ import pytest
 from jaxsedfit.config import FilterCurve
 from jaxsedfit.model import (
     _apply_biattenuation,
+    _host_dl07_emission,
     _host_dust_emission,
     _powerlaw_jax,
     _project_filters,
@@ -19,6 +22,7 @@ from jaxsedfit.preload import (
     _build_filter_projection_matrices_for_redshift,
     _build_fixed_filter_projection_matrices,
     _load_vendored_dale2014_templates,
+    _load_vendored_dl07_templates,
     _pack_loaded_filters,
     _pack_loaded_filters_jax,
     _prepare_loaded_filter,
@@ -184,6 +188,35 @@ def test_host_dust_energy_balance(ebv, dust_alpha):
     emitted_integral = np.trapezoid(emitted, rest_wave)
     assert emitted_integral == pytest.approx(float(absorbed), rel=2.0e-3, abs=1.0e-20)
     assert np.all(emitted >= 0.0)
+
+
+def test_dl07_matches_frozen_reference_gold():
+    """The minimal DL07 path reproduces the frozen official-grid reference."""
+    umin_grid, qpah_grid, template_wave, single_u, powerlaw = _load_vendored_dl07_templates()
+    wave = np.linspace(1.0e3, 1.0e7, 512)
+
+    def on_grid(grid):
+        out = np.empty((*grid.shape[:2], wave.size))
+        for iq in range(grid.shape[0]):
+            for iu in range(grid.shape[1]):
+                out[iq, iu] = np.interp(wave, template_wave, grid[iq, iu], left=0.0, right=0.0)
+        return out
+
+    context = SimpleNamespace(
+        rest_wave_jax=jnp.asarray(wave),
+        dl07_umin_grid_jax=jnp.asarray(umin_grid),
+        dl07_qpah_grid_jax=jnp.asarray(qpah_grid),
+        dl07_single_u_rest_jax=jnp.asarray(on_grid(single_u)),
+        dl07_powerlaw_rest_jax=jnp.asarray(on_grid(powerlaw)),
+    )
+    llam = np.asarray(_host_dl07_emission(context, 1.0e44, 1.0))
+    lnu = llam * wave**2 / 2.99792458e18
+    gold = np.load(Path(__file__).parent / "fixtures" / "dl07_reference_gold.npy")
+
+    np.testing.assert_allclose(lnu, gold, rtol=2.0e-11, atol=1.0e15)
+    assert -np.trapezoid(lnu, 2.99792458e18 / wave) == pytest.approx(1.0e44, rel=2.0e-12)
+    gradient = jax.grad(lambda u: jnp.sum(_host_dl07_emission(context, 1.0e44, u)))(1.1)
+    assert np.isfinite(float(gradient))
 
 
 def _smooth_component_photometry(n_wave: int) -> tuple[np.ndarray, float]:
