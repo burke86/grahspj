@@ -104,6 +104,10 @@ class LoadedTemplates:
     dust_alpha_grid: np.ndarray
     dust_wave: np.ndarray
     dust_lumin: np.ndarray
+    dl07_umin_grid: np.ndarray
+    dl07_qpah_grid: np.ndarray
+    dl07_single_u: np.ndarray
+    dl07_powerlaw: np.ndarray
 
 
 @dataclass
@@ -260,6 +264,10 @@ class ModelContext:
     feii_template_on_rest_jax: jnp.ndarray
     dust_alpha_grid_jax: jnp.ndarray
     dust_lumin_rest_jax: jnp.ndarray
+    dl07_umin_grid_jax: jnp.ndarray
+    dl07_qpah_grid_jax: jnp.ndarray
+    dl07_single_u_rest_jax: jnp.ndarray
+    dl07_powerlaw_rest_jax: jnp.ndarray
     fixed_nebular_line_profile_jax: jnp.ndarray | None
     fixed_redshift_jax: jnp.ndarray | None
     fixed_luminosity_distance_m_jax: jnp.ndarray | None
@@ -563,11 +571,16 @@ def _load_templates(cfg: FitConfig) -> LoadedTemplates:
         and str(cfg.spectroscopy_config.backend).lower() == "jaxqsofit"
     )
     need_dust_templates = bool(cfg.galaxy.fit_host and cfg.galaxy.use_energy_balance)
+    # Keep lightweight/legacy config-like objects compatible with the
+    # pre-DL07 API. Full FitConfig instances always provide these fields.
+    dust_model = str(getattr(cfg.galaxy, "dust_model", "dale2014")).lower()
+    dust_umin = float(getattr(cfg.galaxy, "dust_umin", 1.0))
     feii = cfg.agn.feii_template
     em = cfg.agn.emission_line_template
     cache_key = (
         need_agn_templates,
         need_dust_templates,
+        dust_model,
         feii.name,
         feii.wavelength_unit,
         em.wavelength_unit,
@@ -581,8 +594,24 @@ def _load_templates(cfg: FitConfig) -> LoadedTemplates:
     cached = _TEMPLATE_CACHE.get(cache_key)
     if cached is not None:
         return cached
-    if need_dust_templates:
+    dl07_umin_grid = np.asarray([dust_umin], dtype=float)
+    dl07_qpah_grid = np.asarray([2.5], dtype=float)
+    dl07_single_u = np.zeros((1, 1, 1), dtype=float)
+    dl07_powerlaw = np.zeros((1, 1, 1), dtype=float)
+    if need_dust_templates and dust_model == "dale2014":
         dust_alpha_grid, dust_wave, dust_lumin = _load_vendored_dale2014_templates()
+        dl07_single_u = np.zeros((1, 1, dust_wave.size), dtype=float)
+        dl07_powerlaw = np.zeros((1, 1, dust_wave.size), dtype=float)
+    elif need_dust_templates:
+        (
+            dl07_umin_grid,
+            dl07_qpah_grid,
+            dust_wave,
+            dl07_single_u,
+            dl07_powerlaw,
+        ) = _load_vendored_dl07_templates()
+        dust_alpha_grid = np.asarray([float(cfg.galaxy.dust_alpha)], dtype=float)
+        dust_lumin = np.zeros((1, dust_wave.size), dtype=float)
     else:
         dust_alpha_grid = np.asarray([float(cfg.galaxy.dust_alpha)], dtype=float)
         dust_wave = np.asarray([1.0], dtype=float)
@@ -598,6 +627,10 @@ def _load_templates(cfg: FitConfig) -> LoadedTemplates:
             dust_alpha_grid=dust_alpha_grid,
             dust_wave=dust_wave,
             dust_lumin=dust_lumin,
+            dl07_umin_grid=dl07_umin_grid,
+            dl07_qpah_grid=dl07_qpah_grid,
+            dl07_single_u=dl07_single_u,
+            dl07_powerlaw=dl07_powerlaw,
         )
         _TEMPLATE_CACHE[cache_key] = loaded
         return loaded
@@ -612,6 +645,10 @@ def _load_templates(cfg: FitConfig) -> LoadedTemplates:
             dust_alpha_grid=dust_alpha_grid,
             dust_wave=dust_wave,
             dust_lumin=dust_lumin,
+            dl07_umin_grid=dl07_umin_grid,
+            dl07_qpah_grid=dl07_qpah_grid,
+            dl07_single_u=dl07_single_u,
+            dl07_powerlaw=dl07_powerlaw,
         )
         _TEMPLATE_CACHE[cache_key] = loaded
         return loaded
@@ -646,6 +683,10 @@ def _load_templates(cfg: FitConfig) -> LoadedTemplates:
             dust_alpha_grid=dust_alpha_grid,
             dust_wave=dust_wave,
             dust_lumin=dust_lumin,
+            dl07_umin_grid=dl07_umin_grid,
+            dl07_qpah_grid=dl07_qpah_grid,
+            dl07_single_u=dl07_single_u,
+            dl07_powerlaw=dl07_powerlaw,
         )
         _TEMPLATE_CACHE[cache_key] = loaded
         return loaded
@@ -685,6 +726,23 @@ def _load_vendored_dale2014_templates() -> tuple[np.ndarray, np.ndarray, np.ndar
     loaded = (alpha_grid, wave_ang, dust_lumin_ang)
     _DALE2014_CACHE[cache_key] = loaded
     return loaded
+
+
+def _load_vendored_dl07_templates() -> tuple[
+    np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray
+]:
+    """Load the vendored DL07 grid with fixed ``U_max=1e6`` and alpha=2."""
+    import h5py
+
+    path = _package_resource_path("resources/templates/dl07_templates.h5")
+    with h5py.File(path, "r") as handle:
+        return (
+            np.asarray(handle["umin_grid"][:], dtype=float),
+            np.asarray(handle["qpah_grid"][:], dtype=float),
+            np.asarray(handle["wavelength"][:], dtype=float),
+            np.asarray(handle["single_u"][:], dtype=float),
+            np.asarray(handle["powerlaw"][:], dtype=float),
+        )
 
 
 def _prepare_loaded_filter(obs_wave: np.ndarray, response: FilterCurve) -> LoadedFilter:
@@ -1204,7 +1262,9 @@ def _build_host_basis_jax(ssp_data: SSPData, host_basis: HostBasis, gal_t_table:
     )
 
 
-def _build_rest_template_cache(rest_wave: np.ndarray, templates: LoadedTemplates) -> tuple[np.ndarray, np.ndarray]:
+def _build_rest_template_cache(
+    rest_wave: np.ndarray, templates: LoadedTemplates
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Interpolate static templates onto the model rest-wave grid once per context.
 
     Parameters
@@ -1219,6 +1279,8 @@ def _build_rest_template_cache(rest_wave: np.ndarray, templates: LoadedTemplates
         id(templates.feii_lumin),
         id(templates.dust_wave),
         id(templates.dust_lumin),
+        id(templates.dl07_single_u),
+        id(templates.dl07_powerlaw),
         float(rest_wave[0]),
         float(rest_wave[-1]),
         int(rest_wave.size),
@@ -1230,7 +1292,23 @@ def _build_rest_template_cache(rest_wave: np.ndarray, templates: LoadedTemplates
     dust_lumin_rest = np.empty((templates.dust_lumin.shape[0], rest_wave.size), dtype=float)
     for i in range(templates.dust_lumin.shape[0]):
         dust_lumin_rest[i] = np.interp(rest_wave, templates.dust_wave, templates.dust_lumin[i], left=0.0, right=0.0)
-    loaded = (feii_template_on_rest.astype(float), dust_lumin_rest.astype(float))
+    dl07_shape = (*templates.dl07_single_u.shape[:2], rest_wave.size)
+    dl07_single_u_rest = np.empty(dl07_shape, dtype=float)
+    dl07_powerlaw_rest = np.empty(dl07_shape, dtype=float)
+    for iq in range(dl07_shape[0]):
+        for iu in range(dl07_shape[1]):
+            dl07_single_u_rest[iq, iu] = np.interp(
+                rest_wave, templates.dust_wave, templates.dl07_single_u[iq, iu], left=0.0, right=0.0
+            )
+            dl07_powerlaw_rest[iq, iu] = np.interp(
+                rest_wave, templates.dust_wave, templates.dl07_powerlaw[iq, iu], left=0.0, right=0.0
+            )
+    loaded = (
+        feii_template_on_rest.astype(float),
+        dust_lumin_rest.astype(float),
+        dl07_single_u_rest,
+        dl07_powerlaw_rest,
+    )
     _REST_TEMPLATE_CACHE[cache_key] = loaded
     return loaded
 
@@ -2018,7 +2096,12 @@ def build_model_context(cfg: FitConfig) -> ModelContext:
     templates = _load_templates(cfg)
     nebular_templates_jax = _load_nebular_templates_jax(bool(cfg.galaxy.fit_host and cfg.nebular.enabled))
     nebular_rest_templates_jax = _build_nebular_rest_templates_jax(rest_wave, cfg, nebular_templates_jax)
-    feii_template_on_rest, dust_lumin_rest = _build_rest_template_cache(rest_wave, templates)
+    (
+        feii_template_on_rest,
+        dust_lumin_rest,
+        dl07_single_u_rest,
+        dl07_powerlaw_rest,
+    ) = _build_rest_template_cache(rest_wave, templates)
     fixed_nebular_line_profile = _build_fixed_nebular_line_profile(rest_wave, cfg, nebular_templates_jax)
     rest_wave_jax = jnp.asarray(rest_wave, dtype=jnp.float64)
     obs_wave_jax = jnp.asarray(obs_wave, dtype=jnp.float64)
@@ -2026,6 +2109,10 @@ def build_model_context(cfg: FitConfig) -> ModelContext:
     dust_alpha_grid_jax = jnp.asarray(templates.dust_alpha_grid, dtype=jnp.float64)
     feii_template_on_rest_jax = jnp.asarray(feii_template_on_rest, dtype=jnp.float64)
     dust_lumin_rest_jax = jnp.asarray(dust_lumin_rest, dtype=jnp.float64)
+    dl07_umin_grid_jax = jnp.asarray(templates.dl07_umin_grid, dtype=jnp.float64)
+    dl07_qpah_grid_jax = jnp.asarray(templates.dl07_qpah_grid, dtype=jnp.float64)
+    dl07_single_u_rest_jax = jnp.asarray(dl07_single_u_rest, dtype=jnp.float64)
+    dl07_powerlaw_rest_jax = jnp.asarray(dl07_powerlaw_rest, dtype=jnp.float64)
     fixed_nebular_line_profile_jax = (
         None
         if fixed_nebular_line_profile is None
@@ -2120,6 +2207,10 @@ def build_model_context(cfg: FitConfig) -> ModelContext:
         feii_template_on_rest_jax=feii_template_on_rest_jax,
         dust_alpha_grid_jax=dust_alpha_grid_jax,
         dust_lumin_rest_jax=dust_lumin_rest_jax,
+        dl07_umin_grid_jax=dl07_umin_grid_jax,
+        dl07_qpah_grid_jax=dl07_qpah_grid_jax,
+        dl07_single_u_rest_jax=dl07_single_u_rest_jax,
+        dl07_powerlaw_rest_jax=dl07_powerlaw_rest_jax,
         fixed_nebular_line_profile_jax=fixed_nebular_line_profile_jax,
         fixed_redshift_jax=fixed_redshift_jax,
         fixed_luminosity_distance_m_jax=fixed_luminosity_distance_m_jax,

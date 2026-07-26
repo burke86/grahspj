@@ -1907,6 +1907,46 @@ def _host_dust_emission(context: ModelContext, dust_luminosity, dust_alpha):
     return dust_rest_native
 
 
+def _host_dl07_emission(context: ModelContext, dust_luminosity, dust_umin):
+    """Return fixed-Prospector-shape DL07 emission with free ``U_min`` only."""
+    u_grid = context.dl07_umin_grid_jax
+    q_grid = context.dl07_qpah_grid_jax
+    u = jnp.clip(dust_umin, u_grid[0], u_grid[-1])
+    q = jnp.clip(jnp.asarray(2.5, dtype=jnp.float64), q_grid[0], q_grid[-1])
+    iu = jnp.clip(jnp.searchsorted(u_grid, u) - 1, 0, u_grid.size - 2)
+    iq = jnp.clip(jnp.searchsorted(q_grid, q) - 1, 0, q_grid.size - 2)
+    fu = (u - u_grid[iu]) / (u_grid[iu + 1] - u_grid[iu])
+    fq = (q - q_grid[iq]) / (q_grid[iq + 1] - q_grid[iq])
+
+    def bilinear(grid):
+        return (
+            (1.0 - fq) * (1.0 - fu) * grid[iq, iu]
+            + (1.0 - fq) * fu * grid[iq, iu + 1]
+            + fq * (1.0 - fu) * grid[iq + 1, iu]
+            + fq * fu * grid[iq + 1, iu + 1]
+        )
+
+    # FSPS/Prospector DL07 constants: alpha=2, Umax=1e6, gamma=0.01,
+    # qPAH=2.5%. Gamma is a dust-mass fraction, so restore the relative
+    # luminosity per mass of the power-law-heated component (DL07 Eq. 33).
+    umax = jnp.asarray(1.0e6, dtype=jnp.float64)
+    gamma = jnp.asarray(0.01, dtype=jnp.float64)
+    pdr_weight = umax * jnp.log(umax / u) / (umax - u)
+    shape = (1.0 - gamma) * bilinear(context.dl07_single_u_rest_jax)
+    shape = shape + gamma * pdr_weight * bilinear(context.dl07_powerlaw_rest_jax)
+    c_angstrom_s = jnp.asarray(2.99792458e18, dtype=jnp.float64)
+    wave = context.rest_wave_jax
+    frequency = c_angstrom_s / wave
+    shape_lnu = shape * wave**2 / c_angstrom_s
+    norm = -jnp.trapezoid(shape_lnu, frequency)
+    scaled_lnu = jnp.clip(dust_luminosity, 0.0, None) * shape_lnu / norm
+    return jnp.where(
+        norm > 0.0,
+        jnp.clip(scaled_lnu * c_angstrom_s / wave**2, 0.0, None),
+        jnp.zeros_like(shape),
+    )
+
+
 def _host_metallicity_parameters(
     context: ModelContext,
     prior_config: dict[str, Any],
@@ -3948,7 +3988,7 @@ def evaluate_photometric_state(
         if fit_agn
         else jnp.asarray(0.0, dtype=jnp.float64)
     )
-    if cfg.galaxy.use_energy_balance and fit_host:
+    if cfg.galaxy.use_energy_balance and fit_host and cfg.galaxy.dust_model == "dale2014":
         dust_alpha_low = max(0.75, float(np.min(dust_alpha_grid)))
         dust_alpha_high = min(2.75, float(np.max(dust_alpha_grid)))
         if "dust_alpha" in prior_config:
@@ -3969,6 +4009,21 @@ def evaluate_photometric_state(
             )
     else:
         dust_alpha = jnp.asarray(float(cfg.galaxy.dust_alpha), dtype=jnp.float64)
+    if cfg.galaxy.use_energy_balance and fit_host and cfg.galaxy.dust_model == "dl07":
+        if "dust_umin" in prior_config:
+            dust_umin = _sample_bounded_normal(
+                prior_config,
+                "dust_umin",
+                cfg.galaxy.dust_umin,
+                2.0,
+                0.1,
+                25.0,
+            )
+        else:
+            # Prospector's one-dimensional DL07 shape prior.
+            dust_umin = numpyro.sample("dust_umin", dist.Uniform(0.1, 25.0))
+    else:
+        dust_umin = jnp.asarray(float(cfg.galaxy.dust_umin), dtype=jnp.float64)
     if cfg.likelihood.fit_systematics_width:
         if "systematics_width" in prior_config or "log_systematics_width" in prior_config:
             systematics_width = _sample_positive(
@@ -4057,11 +4112,13 @@ def evaluate_photometric_state(
     line_liner_att_rest = line_liner_rest * agn_att_factor
     line_att_rest = line_rest * agn_att_factor
     balmer_att_rest = balmer_rest * agn_att_factor
-    dust_rest = jnp.where(
-        cfg.galaxy.use_energy_balance and fit_host,
-        _host_dust_emission(context, dust_luminosity, dust_alpha),
-        jnp.zeros_like(rest_wave),
-    )
+    if cfg.galaxy.use_energy_balance and fit_host:
+        if cfg.galaxy.dust_model == "dl07":
+            dust_rest = _host_dl07_emission(context, dust_luminosity, dust_umin)
+        else:
+            dust_rest = _host_dust_emission(context, dust_luminosity, dust_alpha)
+    else:
+        dust_rest = jnp.zeros_like(rest_wave)
     agn_rest = agn_attenuated_rest + torus_att_rest
     total_rest = gal_att_rest + dust_rest + agn_rest
     direct_intrinsic_rest = host_with_nebular_rest + agn_attenuated_input_rest
@@ -4862,6 +4919,7 @@ def evaluate_photometric_state(
     numpyro.deterministic("sfh_burst_tau_gyr_fit", host_state.get("sfh_burst_tau_gyr", 0.0))
     numpyro.deterministic("log_dust_luminosity_fit", _safe_log10(dust_luminosity))
     numpyro.deterministic("dust_alpha_fit", dust_alpha)
+    numpyro.deterministic("dust_umin_fit", dust_umin)
     numpyro.deterministic("nebular_logU_fit", nebular["logU"])
     numpyro.deterministic("nebular_zgas_fit", nebular["zgas"])
     numpyro.deterministic("nebular_ne_fit", nebular["ne"])
