@@ -29,6 +29,20 @@ def test_joint_line_bridge_rescales_native_jaxsedfit_shape():
     np.testing.assert_allclose(bridged, 3.0 * np.array([[1.5, 2.5, 1.5]]))
 
 
+def test_joint_line_bridge_prefers_rendered_jaxqsofit_sed():
+    rendered = np.array([[0.1, 0.4, 0.2]])
+    pred = {
+        "jqf_line_obs_sed": rendered,
+        "line_bl_obs_sed": np.array([[10.0, 20.0, 10.0]]),
+        "line_fluxes": np.array([[1.0, 1.0]]),
+        "jqf_line_photometry": np.array([[100.0, 100.0]]),
+    }
+
+    bridged = _bridged_jaxsedfit_agn_lines(pred)
+
+    np.testing.assert_array_equal(bridged, rendered)
+
+
 def test_plot_fit_sed_writes_output(tmp_path):
     class _Filter:
         def __init__(self, lam):
