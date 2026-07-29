@@ -38,7 +38,7 @@ from jaxsedfit.model import (
     grahsp_photometric_model,
 )
 from jaxsedfit.preload import build_model_context
-from jaxsedfit.results import FitResult
+from jaxsedfit.results import FitResult, _FitState
 
 
 def _mock_config():
@@ -758,6 +758,35 @@ def test_fit_dispatch_methods(monkeypatch):
             },
         )
     ]
+
+
+def test_compact_map_warm_start_preserves_median_and_drops_svi_state(monkeypatch):
+    cleared = []
+    monkeypatch.setattr(jax, "clear_caches", lambda: cleared.append(True))
+
+    fitter = JAXSEDFit.__new__(JAXSEDFit)
+    fitter._fit_state = _FitState()
+    median = {
+        "scalar": jnp.asarray(1.25),
+        "vector": jnp.asarray([2.0, 3.0]),
+    }
+    fitter.map_result = {
+        "params": {"heavy_optimizer_state": jnp.ones((32, 32))},
+        "median": median,
+        "losses": np.asarray([3.0, 2.0, 1.0]),
+        "staged": True,
+        "stage1": {"params": {"heavy_stage1_state": jnp.ones((32, 32))}},
+    }
+
+    JAXSEDFit._compact_map_warm_start(fitter)
+
+    assert set(fitter.map_result) == {"median", "losses", "staged"}
+    assert fitter.map_result["staged"] is True
+    np.testing.assert_array_equal(fitter.map_result["median"]["scalar"], 1.25)
+    np.testing.assert_array_equal(fitter.map_result["median"]["vector"], [2.0, 3.0])
+    np.testing.assert_array_equal(fitter.map_result["losses"], [3.0, 2.0, 1.0])
+    np.testing.assert_array_equal(fitter.samples["vector"], [[2.0, 3.0]])
+    assert cleared == [True]
 
 
 def test_fit_nuts_reads_sampler_settings_from_config(monkeypatch):
