@@ -34,6 +34,7 @@ import numpyro
 import numpyro.distributions as dist
 
 from .preload import ModelContext, _build_fixed_igm_jax as _igm_transmission
+from .velocity import shift_and_broaden_lnlam as _fourier_shift_and_broaden_lnlam
 
 C_KMS = 299792.458
 C_MS = 2.99792458e8
@@ -1014,15 +1015,12 @@ def _shift_and_broaden_single_spectrum_lnlam(lnwave, spectrum, v_kms, sigma_kms)
     sigma_kms : object
         sigma_kms value.
     """
-    dln = jnp.mean(jnp.diff(lnwave))
-    sigma_ln = jnp.maximum(sigma_kms / C_KMS, 1e-5)
-    sigma_pix = sigma_ln / jnp.maximum(dln, 1e-8)
-    kern = _gaussian_kernel1d(sigma_pix, radius_mult=5.0, max_half=128)
-    wave = jnp.exp(lnwave)
-    shift_ln = v_kms / C_KMS
-    shifted_wave = jnp.exp(lnwave - shift_ln)
-    shifted = jnp.interp(shifted_wave, wave, spectrum, left=0.0, right=0.0)
-    return _convolve_same_length(shifted, kern)
+    return _fourier_shift_and_broaden_lnlam(
+        lnwave,
+        spectrum,
+        v_kms,
+        sigma_kms,
+    )
 
 
 def _powerlaw_jax(wave, norm, lam1, lam2, x0, xbrk, bend_width, cutoff):

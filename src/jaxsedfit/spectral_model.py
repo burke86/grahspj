@@ -28,6 +28,7 @@ from .spectral_custom_components import (
     normalize_custom_line_components,
 )
 from .spectral_config import ErrorScaledHalfNormalPrior
+from .velocity import shift_and_broaden_lnlam as _fourier_shift_and_broaden_lnlam
 
 C_KMS = 299792.458
 LINE_COVERAGE_NSIGMA = 3.0
@@ -1329,8 +1330,17 @@ def _shift_and_broaden_single_spectrum_lnlam(lnwave, spectrum, v_kms, sigma_kms,
     convolution_method : object
         convolution_method value.
     """
-    sigma_ln = jnp.maximum(sigma_kms / C_KMS, 1e-5)
+    if str(convolution_method).lower() == "fft":
+        return _fourier_shift_and_broaden_lnlam(
+            lnwave,
+            spectrum,
+            v_kms,
+            sigma_kms,
+        )
+    if str(convolution_method).lower() != "direct":
+        raise ValueError("convolution method must be 'fft' or 'direct'.")
 
+    sigma_ln = jnp.maximum(sigma_kms / C_KMS, 1e-5)
     wave = jnp.exp(lnwave)
     shift_ln = v_kms / C_KMS
     shifted_wave = jnp.exp(lnwave - shift_ln)
@@ -1341,7 +1351,7 @@ def _shift_and_broaden_single_spectrum_lnlam(lnwave, spectrum, v_kms, sigma_kms,
         sigma_ln,
         radius_mult=5.0,
         max_half=512,
-        method=convolution_method,
+        method="direct",
     )
 
 
@@ -1455,13 +1465,25 @@ def _convolve_velocity_space(lnwave, signal, sigma_ln, radius_mult=5.0, max_half
     """
     lnwave = jnp.asarray(lnwave, dtype=jnp.float64)
     signal = jnp.asarray(signal, dtype=jnp.float64)
+    method = str(method).lower()
+    if method == "fft":
+        return _fourier_shift_and_broaden_lnlam(
+            lnwave,
+            signal,
+            0.0,
+            C_KMS * jnp.asarray(sigma_ln, dtype=jnp.float64),
+            max_pad=max_half,
+        )
+    if method != "direct":
+        raise ValueError("convolution method must be 'fft' or 'direct'.")
+
     n = lnwave.shape[0]
     ln_uniform = jnp.linspace(lnwave[0], lnwave[-1], n)
     dln = jnp.maximum((lnwave[-1] - lnwave[0]) / jnp.maximum(n - 1, 1), 1e-8)
     sigma_pix = jnp.maximum(sigma_ln, 1e-8) / dln
     kern = _gaussian_kernel1d(sigma_pix, radius_mult=radius_mult, max_half=max_half)
     signal_uniform = jnp.interp(ln_uniform, lnwave, signal, left=0.0, right=0.0)
-    convolved_uniform = _convolve_same_length(signal_uniform, kern, method=method)
+    convolved_uniform = _convolve_same_length(signal_uniform, kern, method="direct")
     return jnp.interp(lnwave, ln_uniform, convolved_uniform, left=0.0, right=0.0)
 
 
@@ -1606,7 +1628,7 @@ def _balmer_continuum_jax(
     bc = jnp.where(below_edge, bc, 0.0)
 
     lnwave = jnp.log(wave)
-    sigma_ln = jnp.maximum(balmer_vel / C_KMS, 1e-5)
+    sigma_ln = balmer_vel / C_KMS
     bc_conv = _convolve_velocity_space(lnwave, bc, sigma_ln, method=convolution_method)
     return bc_conv
 
