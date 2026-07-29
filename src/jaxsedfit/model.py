@@ -3217,6 +3217,7 @@ def _evaluate_jaxqsofit_backend(
     fixed_narrow_fwhm_kms=None,
     fixed_narrow_amp_scale=None,
     feature_amplitude_scale=1.0,
+    include_lines=True,
 ):
     """Evaluate the built-in detailed spectral components.
 
@@ -3258,7 +3259,7 @@ def _evaluate_jaxqsofit_backend(
 
     jqf_cfg = cfg.spectroscopy_config.jaxqsofit
     component_cfg = SpectralComponentConfig(
-        use_lines=bool(jqf_cfg.use_spectral_lines),
+        use_lines=bool(jqf_cfg.use_spectral_lines and include_lines),
         use_tied_lines=bool(jqf_cfg.use_tied_lines),
         use_feii=bool(jqf_cfg.use_spectral_feii),
         use_balmer_continuum=bool(jqf_cfg.use_spectral_balmer_continuum),
@@ -3498,6 +3499,7 @@ def evaluate_photometric_state(
     add_likelihood: bool = True,
     return_state: bool = True,
     force_component_fluxes: bool = False,
+    include_spectral_lines: bool = True,
 ):
     """Evaluate one jaxsedfit photometric model state inside a NumPyro trace.
 
@@ -3511,6 +3513,10 @@ def evaluate_photometric_state(
         include_sed_agn_features value.
     include_spectral_features : object
         include_spectral_features value.
+    include_spectral_lines : object
+        Whether detailed broad and narrow emission lines are active. Smooth
+        spectral features such as Fe II and Balmer continuum remain controlled
+        by ``include_spectral_features``.
     add_likelihood : object
         add_likelihood value.
     return_state : object
@@ -3556,10 +3562,19 @@ def evaluate_photometric_state(
         spectroscopy_enabled
         and str(cfg.spectroscopy_config.backend).lower() == "jaxqsofit"
     )
+    configured_spectral_lines = bool(
+        jaxqsofit_backend_enabled
+        and jqf_cfg.use_spectral_lines
+    )
     shared_jaxqsofit_lines = bool(
         jaxqsofit_backend_enabled
         and jqf_cfg.use_spectral_lines
         and jqf_cfg.use_photometric_lines
+    )
+    active_spectral_lines = bool(
+        configured_spectral_lines
+        and include_spectral_features
+        and include_spectral_lines
     )
     use_native_feii = bool(
         include_sed_agn_features
@@ -3787,7 +3802,9 @@ def evaluate_photometric_state(
         )
 
         if include_sed_agn_features:
-            if shared_jaxqsofit_lines:
+            if shared_jaxqsofit_lines or (
+                configured_spectral_lines and not active_spectral_lines
+            ):
                 broad_lines_strength = jnp.asarray(1.0, dtype=jnp.float64)
                 narrow_lines_strength = jnp.asarray(DEFAULT_NARROW_LINES_STRENGTH, dtype=jnp.float64)
                 broad_line_width = jnp.asarray(DEFAULT_BROAD_LINE_WIDTH_KMS, dtype=jnp.float64)
@@ -3870,7 +3887,10 @@ def evaluate_photometric_state(
         l_broadlines = 0.02 * l_agn_lambda_5100 * broad_lines_strength
         l_narrowlines = 0.002 * l_agn_lambda_5100 * narrow_lines_strength
 
-        if skip_coarse_agn_line_grid:
+        suppress_joint_stage_lines = bool(
+            configured_spectral_lines and not active_spectral_lines
+        )
+        if skip_coarse_agn_line_grid or suppress_joint_stage_lines:
             line_bl_rest = jnp.zeros_like(rest_wave)
             line_nl_rest = jnp.zeros_like(rest_wave)
             line_liner_rest = jnp.zeros_like(rest_wave)
@@ -4154,6 +4174,7 @@ def evaluate_photometric_state(
     correct_agn_line_photometry = (
         fit_agn
         and include_sed_agn_features
+        and not (configured_spectral_lines and not active_spectral_lines)
         and bool(cfg.likelihood.use_local_line_photometry)
     )
     if correct_agn_line_photometry:
@@ -4508,9 +4529,12 @@ def evaluate_photometric_state(
                 feii_template_flux_native,
                 line_coverage_rest=jaxqsofit_line_coverage_rest,
                 feature_amplitude_scale=feature_amplitude_scale,
+                include_lines=include_spectral_lines,
             )
             jqf_cfg = cfg.spectroscopy_config.jaxqsofit
-            if host_capture_enabled and bool(jqf_cfg.use_spectral_lines):
+            if host_capture_enabled and bool(
+                jqf_cfg.use_spectral_lines and include_spectral_lines
+            ):
                 spec_capture_at_pixel = spec_host_capture_fraction_by_spectrum[spec_spectrum_index]
                 jqf_line_model_aperture = _apply_extended_capture(
                     jqf_components["lines"],
@@ -4602,7 +4626,11 @@ def evaluate_photometric_state(
                 jaxqsofit_line_coverage_rest,
                 sed_feii_scale,
             )
-            if bool(jqf_cfg.use_spectral_lines) and bool(jqf_cfg.use_photometric_lines):
+            if bool(
+                jqf_cfg.use_spectral_lines
+                and jqf_cfg.use_photometric_lines
+                and include_spectral_lines
+            ):
                 line_narrow_template = jnp.where(agn_type == 3, line_liner, line_sy2)
                 extrap_broad_lumin, extrap_narrow_lumin, extrap_broad_width, extrap_narrow_width = (
                     _jaxqsofit_family_extrapolation(
@@ -4653,7 +4681,9 @@ def evaluate_photometric_state(
                 + jqf_extrapolated_narrow_photometry
             )
             native_replaced_photometry = jnp.where(
-                bool(jqf_cfg.use_spectral_lines), local_agn_line_fluxes, jnp.zeros_like(local_agn_line_fluxes)
+                bool(jqf_cfg.use_spectral_lines and include_spectral_lines),
+                local_agn_line_fluxes,
+                jnp.zeros_like(local_agn_line_fluxes),
             )
             jqf_photometry_adjustment = shared_jqf_photometry - native_replaced_photometry
             pred_fluxes = pred_fluxes + jqf_photometry_adjustment
@@ -5106,6 +5136,7 @@ def grahsp_photometric_model(
     include_components: bool = False,
     include_sed_agn_features: bool = True,
     include_spectral_features: bool = True,
+    include_spectral_lines: bool = True,
 ):
     """NumPyro model for one jaxsedfit photometric fit or predictive expansion.
 
@@ -5119,12 +5150,15 @@ def grahsp_photometric_model(
         include_sed_agn_features value.
     include_spectral_features : object
         include_spectral_features value.
+    include_spectral_lines : object
+        include_spectral_lines value.
     """
     return evaluate_photometric_state(
         context,
         include_components=include_components,
         include_sed_agn_features=include_sed_agn_features,
         include_spectral_features=include_spectral_features,
+        include_spectral_lines=include_spectral_lines,
         add_likelihood=True,
         return_state=False,
     )
@@ -5135,6 +5169,7 @@ def sed_numpyro_model(
     include_components: bool = False,
     include_sed_agn_features: bool = True,
     include_spectral_features: bool = True,
+    include_spectral_lines: bool = True,
 ):
     """NumPyro SED model for one configured ``jaxsedfit`` target.
 
@@ -5152,12 +5187,15 @@ def sed_numpyro_model(
         include_sed_agn_features value.
     include_spectral_features : object
         include_spectral_features value.
+    include_spectral_lines : object
+        include_spectral_lines value.
     """
     return grahsp_photometric_model(
         context,
         include_components=include_components,
         include_sed_agn_features=include_sed_agn_features,
         include_spectral_features=include_spectral_features,
+        include_spectral_lines=include_spectral_lines,
     )
 
 
@@ -5169,6 +5207,7 @@ def evaluate_sed_model(
     add_likelihood: bool = True,
     return_state: bool = True,
     force_component_fluxes: bool = False,
+    include_spectral_lines: bool = True,
 ):
     """Evaluate the SED model state for a configured target.
 
@@ -5186,6 +5225,8 @@ def evaluate_sed_model(
         include_sed_agn_features value.
     include_spectral_features : object
         include_spectral_features value.
+    include_spectral_lines : object
+        include_spectral_lines value.
     add_likelihood : object
         add_likelihood value.
     return_state : object
@@ -5198,6 +5239,7 @@ def evaluate_sed_model(
         include_components=include_components,
         include_sed_agn_features=include_sed_agn_features,
         include_spectral_features=include_spectral_features,
+        include_spectral_lines=include_spectral_lines,
         add_likelihood=add_likelihood,
         return_state=return_state,
         force_component_fluxes=force_component_fluxes,

@@ -871,10 +871,12 @@ def test_fit_map_plot_init_plots_both_staged_map_solutions(monkeypatch):
     fitter.fit_map(progress_bar=False)
 
     assert [call[1]["attr_prefix"] for call in calls] == ["init_stage1", "init_stage2"]
-    assert calls[0][1]["include_sed_agn_features"] is False
-    assert calls[0][1]["include_spectral_features"] is False
+    assert calls[0][1]["include_sed_agn_features"] is True
+    assert calls[0][1]["include_spectral_features"] is True
+    assert calls[0][1]["include_spectral_lines"] is False
     assert calls[1][1]["include_sed_agn_features"] is True
     assert calls[1][1]["include_spectral_features"] is True
+    assert calls[1][1]["include_spectral_lines"] is True
 
 
 def test_joint_dense_mass_blocks_follow_active_sites():
