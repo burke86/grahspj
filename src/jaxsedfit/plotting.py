@@ -426,7 +426,10 @@ def _site_sum(pred: dict[str, Any], keys: tuple[str, ...]) -> np.ndarray:
 
 
 def _bridged_jaxsedfit_agn_lines(pred: dict[str, Any]) -> np.ndarray | None:
-    """Return native jaxsedfit line shapes normalized to joint-fit photometry."""
+    """Return the joint-fit line SED, falling back to the native line shape."""
+    if "jqf_line_obs_sed" in pred:
+        return np.asarray(pred["jqf_line_obs_sed"], dtype=float)
+
     native_sed_keys = (
         "line_bl_obs_sed",
         "line_nl_obs_sed",

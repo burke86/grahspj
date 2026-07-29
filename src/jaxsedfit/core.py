@@ -663,6 +663,7 @@ class JAXSEDFit:
             "jqf_balmer_photometry",
             "jqf_extrapolated_broad_photometry",
             "jqf_extrapolated_narrow_photometry",
+            "jqf_line_obs_sed",
             "rest_wave",
             "obs_wave",
             "redshift_fit",

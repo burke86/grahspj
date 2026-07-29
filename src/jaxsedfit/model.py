@@ -4337,6 +4337,7 @@ def evaluate_photometric_state(
     jqf_extrapolated_broad_photometry = jnp.zeros_like(pred_fluxes)
     jqf_extrapolated_narrow_photometry = jnp.zeros_like(pred_fluxes)
     jqf_photometry_adjustment = jnp.zeros_like(pred_fluxes)
+    jqf_line_obs_sed = jnp.zeros_like(obs_wave)
     if spectroscopy_enabled:
         backend = str(cfg.spectroscopy_config.backend).lower()
         if backend == "jaxqsofit":
@@ -4521,6 +4522,21 @@ def evaluate_photometric_state(
                 numpyro.deterministic("jqf_line_model_aperture", jqf_line_model_aperture)
                 numpyro.deterministic("jqf_line_model_narrow_aperture", jqf_components["line_narrow"])
             jqf_state = jqf_components["state"]
+            # Render the sampled spectral-line state on the SED grid as well.
+            # This is the same posterior line model used by the spectrum, not
+            # a globally rescaled copy of the native jaxsedfit line template.
+            from .spectroscopy import render_joint_feature_state
+
+            jqf_sed_lines_mjy = render_joint_feature_state(
+                obs_wave,
+                redshift,
+                jqf_state,
+                config=jqf_components["component_config"],
+            )["lines"]
+            jqf_line_obs_sed = jqf_sed_lines_mjy / jnp.maximum(
+                1.0e-10 / 299792458.0 * 1.0e29 * obs_wave**2,
+                1.0e-30,
+            )
             jqf_broad_photometry = _project_jaxqsofit_line_state_filters(
                 context, jqf_state, redshift, broad_only=True
             )
@@ -4880,6 +4896,7 @@ def evaluate_photometric_state(
     numpyro.deterministic("jqf_balmer_photometry", jqf_balmer_photometry)
     numpyro.deterministic("jqf_extrapolated_broad_photometry", jqf_extrapolated_broad_photometry)
     numpyro.deterministic("jqf_extrapolated_narrow_photometry", jqf_extrapolated_narrow_photometry)
+    numpyro.deterministic("jqf_line_obs_sed", jqf_line_obs_sed)
     numpyro.deterministic("spec_continuum_model_fluxes", spec_continuum_model_fluxes)
     numpyro.deterministic("spec_host_model_fluxes", spec_host_model_fluxes)
     numpyro.deterministic("spec_disk_model_fluxes", spec_disk_model_fluxes)
