@@ -15,7 +15,8 @@ _COMPONENT_STYLE = [
     (("dust_obs_sed",), "Host dust", "#b7791f", 1.5),
     (("disk_obs_sed",), "AGN disk", "#c05621", 1.2),
     (("torus_obs_sed",), "Torus", "#805ad5", 1.2),
-    (("line_bl_obs_sed", "line_nl_obs_sed", "line_liner_obs_sed", "feii_obs_sed"), "AGN lines", "#d53f8c", 1.0),
+    (("line_bl_obs_sed", "line_nl_obs_sed", "line_liner_obs_sed"), "AGN lines", "#d53f8c", 1.0),
+    (("feii_obs_sed",), "Fe II", "#38a169", 1.0),
     (("balmer_obs_sed",), "Balmer cont.", "#dd6b20", 1.0),
     (("agn_obs_sed",), "AGN total", "#718096", 1.4),
     (("total_obs_sed",), "Model total", "#000000", 2.0),
@@ -590,6 +591,10 @@ def plot_fit_sed(
         for keys, label, color, lw in _COMPONENT_STYLE:
             if label == "AGN lines" and bridged_agn_lines is not None:
                 component_draws = bridged_agn_lines
+            elif label == "Fe II" and "jqf_feii_obs_sed" in pred:
+                component_draws = np.asarray(pred["jqf_feii_obs_sed"], dtype=float)
+            elif label == "Balmer cont." and "jqf_balmer_obs_sed" in pred:
+                component_draws = np.asarray(pred["jqf_balmer_obs_sed"], dtype=float)
             elif any(key in pred for key in keys):
                 component_draws = _site_sum(pred, keys)
             else:

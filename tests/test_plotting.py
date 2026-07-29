@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 
 from jaxsedfit.plotting import (
+    _COMPONENT_STYLE,
     _bridged_jaxsedfit_agn_lines,
     _grouped_trace_samples,
     plot_corner,
@@ -41,6 +42,13 @@ def test_joint_line_bridge_prefers_rendered_jaxqsofit_sed():
     bridged = _bridged_jaxsedfit_agn_lines(pred)
 
     np.testing.assert_array_equal(bridged, rendered)
+
+
+def test_component_style_separates_feii_from_agn_lines():
+    styles = {label: keys for keys, label, *_ in _COMPONENT_STYLE}
+
+    assert "feii_obs_sed" not in styles["AGN lines"]
+    assert styles["Fe II"] == ("feii_obs_sed",)
 
 
 def test_plot_fit_sed_writes_output(tmp_path):
@@ -98,6 +106,8 @@ def test_plot_fit_sed_writes_output(tmp_path):
                 "spec_wave_obs": np.array([[1800.0, 2200.0, 2600.0]]),
                 "jqf_line_model_aperture": np.array([[0.2, 0.3, 0.4]]),
                 "jqf_feii_model": np.array([[0.1, 0.1, 0.1]]),
+                "jqf_feii_obs_sed": (0.06 * flux)[None, :],
+                "jqf_balmer_obs_sed": (0.04 * flux)[None, :],
             }
 
     output = tmp_path / "sed_plot.png"
@@ -115,6 +125,8 @@ def test_plot_fit_sed_writes_output(tmp_path):
     agn_line_curves = [line for line in fig.axes[0].lines if line.get_label() == "AGN lines"]
     assert len(agn_line_curves) == 1
     assert np.array_equal(agn_line_curves[0].get_xdata(), wave)
+    assert len([line for line in fig.axes[0].lines if line.get_label() == "Fe II"]) == 1
+    assert len([line for line in fig.axes[0].lines if line.get_label() == "Balmer cont."]) == 1
     assert output.exists()
     assert output.stat().st_size > 0
 
