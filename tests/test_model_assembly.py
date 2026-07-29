@@ -729,6 +729,33 @@ def test_host_kinematics_enabled_with_spectroscopy_samples_and_broadens(monkeypa
     assert "gal_sigma_kms" in tr
 
 
+def test_joint_continuum_stage_keeps_feii_and_balmer_but_omits_lines(monkeypatch):
+    _patch_ssp(monkeypatch)
+    cfg = _cfg(fit_host=False, spectroscopy_enabled=True)
+    cfg.spectroscopy_config.backend = "jaxqsofit"
+    cfg.spectroscopy_config.jaxqsofit.use_spectral_lines = True
+    cfg.spectroscopy_config.jaxqsofit.use_spectral_feii = True
+    cfg.spectroscopy_config.jaxqsofit.use_spectral_balmer_continuum = True
+    context = build_model_context(cfg)
+
+    tr = trace(
+        seed(
+            lambda: grahsp_photometric_model(
+                context,
+                include_sed_agn_features=True,
+                include_spectral_features=True,
+                include_spectral_lines=False,
+            ),
+            jax.random.PRNGKey(41),
+        )
+    ).get_trace()
+
+    assert "jqf_feii_norm" in tr
+    assert "jqf_balmer_norm" in tr
+    assert not any(name.startswith("jqf_line_amp") for name in tr)
+    assert not any(name.startswith("jqf_line_fwhm") for name in tr)
+
+
 def test_agn_only_context_skips_host_ssp_loading(monkeypatch):
     monkeypatch.setattr("jaxsedfit.preload._SSP_DATA_CACHE", {})
     monkeypatch.setattr("jaxsedfit.preload._HOST_BASIS_CACHE", {})

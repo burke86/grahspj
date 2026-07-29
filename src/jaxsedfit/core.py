@@ -566,12 +566,13 @@ class JAXSEDFit:
         return grahsp_photometric_model(self.context, include_components=False)
 
     def _continuum_init_model(self):
-        """Return the MAP warm-start model with detailed AGN features disabled."""
+        """Return the MAP warm start with smooth continuum features but no lines."""
         return grahsp_photometric_model(
             self.context,
             include_components=False,
-            include_sed_agn_features=False,
-            include_spectral_features=False,
+            include_sed_agn_features=True,
+            include_spectral_features=True,
+            include_spectral_lines=False,
         )
 
     @staticmethod
@@ -1086,8 +1087,9 @@ class JAXSEDFit:
                     stage1_median,
                     stage_name="Stage 1 continuum/host MAP initialization",
                     attr_prefix="init_stage1",
-                    include_sed_agn_features=False,
-                    include_spectral_features=False,
+                    include_sed_agn_features=True,
+                    include_spectral_features=True,
+                    include_spectral_lines=False,
                 )
 
         svi_result, median = self._run_map_svi(
@@ -1117,6 +1119,7 @@ class JAXSEDFit:
                 attr_prefix="init_stage2" if staged else "init_map",
                 include_sed_agn_features=True,
                 include_spectral_features=True,
+                include_spectral_lines=True,
             )
         self.samples = {k: np.asarray(v)[None, ...] for k, v in median.items()}
         self.predictive = None
@@ -1130,6 +1133,7 @@ class JAXSEDFit:
         attr_prefix: str,
         include_sed_agn_features: bool,
         include_spectral_features: bool,
+        include_spectral_lines: bool,
     ):
         """Plot and retain one MAP solution using the standard SED figure.
 
@@ -1142,6 +1146,7 @@ class JAXSEDFit:
             include_components=True,
             include_sed_agn_features=include_sed_agn_features,
             include_spectral_features=include_spectral_features,
+            include_spectral_lines=include_spectral_lines,
         )
         pred = Predictive(
             model,
