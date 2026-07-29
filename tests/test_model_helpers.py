@@ -1928,7 +1928,9 @@ def test_jaxqsofit_spectrum_resolution_host_basis_uses_host_kinematics(monkeypat
     ).get_trace(context, include_components=False)
 
     assert context.spec_host_basis_jax is not None
-    assert sorted(broadened_grids) == [len(cfg.spectroscopy.wave_obs), cfg.galaxy.n_wave]
+    # Host kinematics belong on the dense spectral basis only. Applying them a
+    # second time on the coarse global SED grid produces Fourier ringing.
+    assert broadened_grids == [len(cfg.spectroscopy.wave_obs)]
     assert np.asarray(tr["pred_spectrum_fluxes"]["value"]).shape == (3,)
 
 
