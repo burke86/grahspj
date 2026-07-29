@@ -3635,7 +3635,17 @@ def evaluate_photometric_state(
     if host_kinematics_enabled:
         gal_v_kms = _sample_prior(prior_config, "gal_v_kms", dist.Normal(0.0, 150.0))
         gal_sigma_kms = _sample_prior(prior_config, "gal_sigma_kms", dist.HalfNormal(150.0))
-        host_rest = _shift_and_broaden_single_spectrum_lnlam(jnp.log(rest_wave), host_rest, gal_v_kms, gal_sigma_kms)
+        # Fixed-redshift joint fits have a dense spectroscopic host basis below.
+        # Apply LOS kinematics there only: the global SED grid is intentionally
+        # coarse over several wavelength decades and cannot resolve a
+        # ~100-km/s convolution without severe Fourier ringing.
+        if not needs_spec_host_basis:
+            host_rest = _shift_and_broaden_single_spectrum_lnlam(
+                jnp.log(rest_wave),
+                host_rest,
+                gal_v_kms,
+                gal_sigma_kms,
+            )
     else:
         gal_v_kms = jnp.asarray(0.0, dtype=jnp.float64)
         gal_sigma_kms = jnp.asarray(0.0, dtype=jnp.float64)

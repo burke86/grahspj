@@ -175,6 +175,54 @@ def test_balmer_continuum_fft_edge_and_width_gradients_are_smooth():
     assert float(jnp.min(continuum)) > -1.0e-10
 
 
+def test_joint_smooth_components_do_not_ring_on_global_sed_grid():
+    from jaxsedfit.spectroscopy import (
+        SpectralComponentConfig,
+        render_joint_feature_state,
+    )
+
+    redshift = 0.3
+    wave_obs = jnp.geomspace(100.0, 3.0e6, 512)
+    template_wave = jnp.geomspace(1800.0, 6500.0, 4096)
+    template_flux = (
+        jnp.exp(-0.5 * ((template_wave - 2600.0) / 90.0) ** 2)
+        + 0.7 * jnp.exp(-0.5 * ((template_wave - 4600.0) / 180.0) ** 2)
+        + 0.4 * jnp.exp(-0.5 * ((template_wave - 5350.0) / 120.0) ** 2)
+    )
+    state = {
+        "feii_norm": jnp.asarray(0.2),
+        "feii_fwhm": jnp.asarray(3000.0),
+        "feii_shift": jnp.asarray(0.004),
+        "balmer_norm": jnp.asarray(0.1),
+        "balmer_tau": jnp.asarray(1.0),
+        "balmer_vel": jnp.asarray(3500.0),
+    }
+
+    rendered = render_joint_feature_state(
+        wave_obs,
+        redshift,
+        state,
+        config=SpectralComponentConfig(
+            use_lines=False,
+            use_feii=True,
+            use_balmer_continuum=True,
+            broadening_convolution="fft",
+        ),
+        feii_template_wave_rest=template_wave,
+        feii_template_flux=template_flux,
+    )
+    wave_rest = wave_obs / (1.0 + redshift)
+    outside_feii = (wave_rest < template_wave[0]) | (wave_rest > template_wave[-1])
+    far_ir = wave_rest > 8000.0
+
+    assert np.all(np.isfinite(np.asarray(rendered["feii"])))
+    assert np.all(np.isfinite(np.asarray(rendered["balmer"])))
+    assert float(jnp.max(jnp.abs(rendered["feii"][outside_feii]))) == 0.0
+    assert float(jnp.max(jnp.abs(rendered["balmer"][far_ir]))) == 0.0
+    assert float(jnp.min(rendered["feii"])) > -1.0e-10
+    assert float(jnp.min(rendered["balmer"])) > -1.0e-10
+
+
 def test_model_wrappers_share_the_fourier_operator():
     from jaxsedfit.model import _shift_and_broaden_single_spectrum_lnlam as model_op
     from jaxsedfit.spectral_model import (
