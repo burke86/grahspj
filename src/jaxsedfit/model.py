@@ -4527,16 +4527,11 @@ def evaluate_photometric_state(
             # a globally rescaled copy of the native jaxsedfit line template.
             from .spectroscopy import render_joint_feature_state
 
-            jqf_sed_line_cfg = replace(
-                jqf_components["component_config"],
-                use_feii=False,
-                use_balmer_continuum=False,
-            )
             jqf_sed_lines_mjy = render_joint_feature_state(
                 obs_wave,
                 redshift,
                 jqf_state,
-                config=jqf_sed_line_cfg,
+                config=jqf_components["component_config"],
             )["lines"]
             jqf_line_obs_sed = jqf_sed_lines_mjy / jnp.maximum(
                 1.0e-10 / 299792458.0 * 1.0e29 * obs_wave**2,
