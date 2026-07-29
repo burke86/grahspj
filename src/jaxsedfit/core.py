@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Mapping
@@ -925,9 +926,10 @@ class JAXSEDFit:
             }
             if inference.staged_steps is not None:
                 map_kwargs["staged_steps"] = inference.staged_steps
-            map_result = self.fit_map(
+            self.fit_map(
                 **map_kwargs,
             )
+            self._compact_map_warm_start()
             nuts_kwargs = {
                 "progress_bar": progress_bar,
                 "num_warmup": inference.num_warmup,
@@ -938,10 +940,9 @@ class JAXSEDFit:
                 "max_tree_depth": inference.max_tree_depth,
                 "use_map_init": inference.use_map_init,
             }
-            nuts_result = self.fit_nuts(
+            fit_output = self.fit_nuts(
                 **nuts_kwargs,
             )
-            fit_output = {"map": map_result, "nuts": nuts_result}
         elif method == "ns":
             ns_kwargs: dict[str, Any] = {"progress_bar": progress_bar}
             if inference.ns_num_live_points is not None:
@@ -988,6 +989,35 @@ class JAXSEDFit:
             figure=fig,
             summary=self.summary() if getattr(self, "samples", None) is not None else None,
         )
+
+    def _compact_map_warm_start(self) -> None:
+        """Keep only the MAP data needed to initialize a following NUTS fit.
+
+        A combined ``optax+nuts`` run does not need the SVI optimizer state,
+        staged-fit payload, or compiled MAP executables after optimization.
+        Moving the median to host NumPy arrays before clearing JAX caches keeps
+        the NUTS initial point numerically identical while releasing those
+        transient allocations.
+        """
+        map_result = self.map_result
+        if map_result is None or "median" not in map_result:
+            return
+        compact_result = {
+            "median": {
+                key: np.asarray(value)
+                for key, value in map_result["median"].items()
+            },
+            "losses": np.asarray(map_result.get("losses", [])),
+            "staged": bool(map_result.get("staged", False)),
+        }
+        self.map_result = compact_result
+        self.samples = {
+            key: value[None, ...]
+            for key, value in compact_result["median"].items()
+        }
+        del map_result
+        gc.collect()
+        jax.clear_caches()
 
     def _run_map_svi(
         self,
