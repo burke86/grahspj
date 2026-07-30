@@ -1771,8 +1771,8 @@ def _project_local_nebular_line_filters(
     )
 
 
-def _local_nebular_line_obs_sed(context: ModelContext, line_wave, line_lumin, width_kms, ebv_total, redshift, luminosity_distance_m, igm):
-    """Return observed-frame local-grid wavelengths and F_lambda for nebular lines.
+def _local_integrated_line_obs_sed(context: ModelContext, line_wave, line_lumin, width_kms, ebv_total, redshift, luminosity_distance_m, igm):
+    """Return observed-frame local-grid wavelengths and F_lambda for lines.
 
     Parameters
     ----------
@@ -1806,6 +1806,20 @@ def _local_nebular_line_obs_sed(context: ModelContext, line_wave, line_lumin, wi
     obs_plot = jnp.concatenate([obs_line_wave, separator], axis=1)
     flux_plot = jnp.concatenate([flux_lambda, separator], axis=1)
     return jnp.ravel(obs_plot), jnp.ravel(flux_plot)
+
+
+def _local_nebular_line_obs_sed(context: ModelContext, line_wave, line_lumin, width_kms, ebv_total, redshift, luminosity_distance_m, igm):
+    """Backward-compatible wrapper for locally rendered nebular lines."""
+    return _local_integrated_line_obs_sed(
+        context,
+        line_wave,
+        line_lumin,
+        width_kms,
+        ebv_total,
+        redshift,
+        luminosity_distance_m,
+        igm,
+    )
 
 
 def _interp_fixed_local_line_terms(width_kms, cache):
@@ -4365,6 +4379,10 @@ def evaluate_photometric_state(
     jqf_balmer_photometry = jnp.zeros_like(pred_fluxes)
     jqf_extrapolated_broad_photometry = jnp.zeros_like(pred_fluxes)
     jqf_extrapolated_narrow_photometry = jnp.zeros_like(pred_fluxes)
+    jqf_extrapolated_broad_lumin = jnp.zeros_like(line_wave)
+    jqf_extrapolated_narrow_lumin = jnp.zeros_like(line_wave)
+    jqf_extrapolated_broad_width = jnp.asarray(DEFAULT_BROAD_LINE_WIDTH_KMS, dtype=jnp.float64)
+    jqf_extrapolated_narrow_width = jnp.asarray(DEFAULT_NARROW_LINE_WIDTH_KMS, dtype=jnp.float64)
     jqf_photometry_adjustment = jnp.zeros_like(pred_fluxes)
     jqf_line_obs_sed = jnp.zeros_like(obs_wave)
     jqf_feii_obs_sed = jnp.zeros_like(obs_wave)
@@ -4632,7 +4650,7 @@ def evaluate_photometric_state(
                 and include_spectral_lines
             ):
                 line_narrow_template = jnp.where(agn_type == 3, line_liner, line_sy2)
-                extrap_broad_lumin, extrap_narrow_lumin, extrap_broad_width, extrap_narrow_width = (
+                jqf_extrapolated_broad_lumin, jqf_extrapolated_narrow_lumin, jqf_extrapolated_broad_width, jqf_extrapolated_narrow_width = (
                     _jaxqsofit_family_extrapolation(
                         context,
                         cfg,
@@ -4654,8 +4672,8 @@ def evaluate_photometric_state(
                 jqf_extrapolated_broad_photometry = _project_integrated_local_line_filters(
                     context,
                     line_wave,
-                    extrap_broad_lumin,
-                    extrap_broad_width,
+                    jqf_extrapolated_broad_lumin,
+                    jqf_extrapolated_broad_width,
                     ebv_gal + ebv_agn,
                     redshift,
                     luminosity_distance_m,
@@ -4664,8 +4682,8 @@ def evaluate_photometric_state(
                 jqf_extrapolated_narrow_total = _project_integrated_local_line_filters(
                     context,
                     line_wave,
-                    extrap_narrow_lumin,
-                    extrap_narrow_width,
+                    jqf_extrapolated_narrow_lumin,
+                    jqf_extrapolated_narrow_width,
                     ebv_gal + ebv_agn,
                     redshift,
                     luminosity_distance_m,
@@ -4826,6 +4844,69 @@ def evaluate_photometric_state(
         line_nl_obs = _redshift_to_obs(rest_wave, line_nl_att_rest * igm, obs_wave, redshift, luminosity_distance_m)
         line_liner_obs = _redshift_to_obs(rest_wave, line_liner_att_rest * igm, obs_wave, redshift, luminosity_distance_m)
         balmer_obs = _redshift_to_obs(rest_wave, balmer_att_rest * igm, obs_wave, redshift, luminosity_distance_m)
+        joint_line_rendering = bool(
+            spectroscopy_enabled
+            and str(cfg.spectroscopy_config.backend).lower() == "jaxqsofit"
+            and include_spectral_features
+            and include_spectral_lines
+            and cfg.spectroscopy_config.jaxqsofit.use_spectral_lines
+        )
+        plotted_total_obs = total_obs
+        plotted_agn_obs = agn_obs
+        if joint_line_rendering:
+            # The photometric likelihood replaces the native GRAHSP AGN-line
+            # template with the fitted JQF state.  Apply the same replacement
+            # to the plotted continuous SED instead of leaving invisible
+            # native UV lines in the black and AGN-total curves.
+            plotted_total_obs = plotted_total_obs - line_obs + jqf_line_obs_sed
+            plotted_agn_obs = plotted_agn_obs - line_obs + jqf_line_obs_sed
+        if joint_line_rendering and correct_nebular_line_photometry:
+            # Locally rendered nebular profiles are plotted below.  Remove the
+            # undersampled coarse-grid version from the continuous total first.
+            plotted_total_obs = plotted_total_obs - nebular_lines_obs
+
+        agn_broad_local_wave, agn_broad_local_obs = _local_integrated_line_obs_sed(
+            context,
+            line_wave,
+            jqf_extrapolated_broad_lumin,
+            jqf_extrapolated_broad_width,
+            ebv_gal + ebv_agn,
+            redshift,
+            luminosity_distance_m,
+            igm,
+        )
+        agn_narrow_local_wave, agn_narrow_local_obs = _local_integrated_line_obs_sed(
+            context,
+            line_wave,
+            jqf_extrapolated_narrow_lumin,
+            jqf_extrapolated_narrow_width,
+            ebv_gal + ebv_agn,
+            redshift,
+            luminosity_distance_m,
+            igm,
+        )
+        agn_lines_local_obs_wave = jnp.concatenate([agn_broad_local_wave, agn_narrow_local_wave])
+        agn_lines_local_obs = jnp.concatenate([agn_broad_local_obs, agn_narrow_local_obs])
+        total_agn_lines_local_obs = jnp.concatenate(
+            [
+                jnp.where(
+                    agn_broad_local_obs > 0.0,
+                    jnp.interp(agn_broad_local_wave, obs_wave, plotted_total_obs, left=0.0, right=0.0)
+                    + agn_broad_local_obs,
+                    jnp.nan,
+                ),
+                jnp.where(
+                    agn_narrow_local_obs > 0.0,
+                    jnp.interp(agn_narrow_local_wave, obs_wave, plotted_total_obs, left=0.0, right=0.0)
+                    + agn_narrow_local_obs,
+                    jnp.nan,
+                ),
+            ]
+        )
+        total_local_obs = (
+            jnp.interp(nebular_lines_local_obs_wave, obs_wave, plotted_total_obs, left=0.0, right=0.0)
+            + nebular_lines_local_obs
+        )
         if fast_projection_enabled:
             agn_fluxes = _project_rest_luminosity_filters(context, agn_rest)
             dust_fluxes = _project_rest_luminosity_filters(context, dust_rest)
@@ -5050,10 +5131,14 @@ def evaluate_photometric_state(
         numpyro.deterministic("line_nl_fluxes", line_nl_fluxes)
         numpyro.deterministic("line_liner_fluxes", line_liner_fluxes)
         numpyro.deterministic("balmer_fluxes", balmer_fluxes)
-        numpyro.deterministic("total_obs_sed", total_obs)
+        numpyro.deterministic("total_obs_sed", plotted_total_obs)
         numpyro.deterministic("total_local_lines_obs_wave", nebular_lines_local_obs_wave)
         numpyro.deterministic("total_local_lines_obs_sed", total_local_obs)
-        numpyro.deterministic("agn_obs_sed", agn_obs)
+        numpyro.deterministic("total_agn_lines_local_obs_wave", agn_lines_local_obs_wave)
+        numpyro.deterministic("total_agn_lines_local_obs_sed", total_agn_lines_local_obs)
+        numpyro.deterministic("agn_lines_local_obs_wave", agn_lines_local_obs_wave)
+        numpyro.deterministic("agn_lines_local_obs_sed", agn_lines_local_obs)
+        numpyro.deterministic("agn_obs_sed", plotted_agn_obs)
         numpyro.deterministic("host_obs_sed", host_stellar_obs)
         numpyro.deterministic("host_total_obs_sed", host_obs)
         numpyro.deterministic("dust_obs_sed", dust_obs)
@@ -5106,10 +5191,14 @@ def evaluate_photometric_state(
                 "host_total_rest_sed": gal_att_rest,
                 "dust_rest_sed": dust_rest,
                 "nebular_rest_sed": nebular_att_rest,
-                "total_obs_sed": total_obs,
+                "total_obs_sed": plotted_total_obs,
                 "total_local_lines_obs_wave": nebular_lines_local_obs_wave,
                 "total_local_lines_obs_sed": total_local_obs,
-                "agn_obs_sed": agn_obs,
+                "total_agn_lines_local_obs_wave": agn_lines_local_obs_wave,
+                "total_agn_lines_local_obs_sed": total_agn_lines_local_obs,
+                "agn_lines_local_obs_wave": agn_lines_local_obs_wave,
+                "agn_lines_local_obs_sed": agn_lines_local_obs,
+                "agn_obs_sed": plotted_agn_obs,
                 "host_obs_sed": host_stellar_obs,
                 "host_total_obs_sed": host_obs,
                 "dust_obs_sed": dust_obs,
