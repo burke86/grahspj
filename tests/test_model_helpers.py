@@ -2143,7 +2143,7 @@ def test_jaxsedfit_jaxqsofit_backend_uses_nested_tied_line_config(monkeypatch):
     }
     tr = trace(substitute(seed(grahsp_photometric_model, jax.random.PRNGKey(2)), data=params)).get_trace(
         context,
-        include_components=False,
+        include_components=True,
     )
 
     assert "jqf_line_dmu_group" in tr
@@ -2156,6 +2156,27 @@ def test_jaxsedfit_jaxqsofit_backend_uses_nested_tied_line_config(monkeypatch):
     assert np.asarray(tr["jqf_extrapolated_broad_photometry"]["value"]).shape == (1,)
     assert np.asarray(tr["jqf_extrapolated_narrow_photometry"]["value"]).shape == (1,)
     assert np.asarray(tr["pred_spectrum_fluxes"]["value"]).shape == (3,)
+    for site in (
+        "agn_lines_local_obs_wave",
+        "agn_lines_local_obs_sed",
+        "total_agn_lines_local_obs_wave",
+        "total_agn_lines_local_obs_sed",
+    ):
+        assert site in tr
+    expected_agn_obs = (
+        np.asarray(tr["disk_obs_sed"]["value"])
+        + np.asarray(tr["torus_obs_sed"]["value"])
+        + np.asarray(tr["feii_obs_sed"]["value"])
+        + np.asarray(tr["balmer_obs_sed"]["value"])
+        + np.asarray(tr["jqf_line_obs_sed"]["value"])
+    )
+    np.testing.assert_allclose(
+        np.asarray(tr["agn_obs_sed"]["value"]),
+        expected_agn_obs,
+        rtol=2.0e-10,
+        atol=1.0e-40,
+    )
+    assert np.any(np.asarray(tr["agn_lines_local_obs_sed"]["value"]) > 0.0)
     assert context.jaxqsofit_prior_config["standardize_active_priors"] is True
     standardized_amplitudes = [
         name
