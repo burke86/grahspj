@@ -225,6 +225,15 @@ def test_systematics_width_default_is_tight_log_prior(monkeypatch):
     assert np.isclose(np.asarray(fn.high), np.log(0.15))
     assert np.isclose(_site(tr, "systematics_width"), 0.10)
     assert "photometry_loglike" in tr
+    assert _site(tr, "sed_n_eff") == 1.0
+    assert np.isnan(_site(tr, "spectroscopy_chi2"))
+    assert _site(tr, "spectroscopy_n_eff") == 0.0
+    assert np.isnan(_site(tr, "spectroscopy_reduced_chi2"))
+    assert _site(tr, "joint_chi2") == pytest.approx(_site(tr, "sed_chi2"))
+    assert _site(tr, "joint_n_eff") == pytest.approx(_site(tr, "sed_n_eff"))
+    assert _site(tr, "joint_reduced_chi2") == pytest.approx(
+        _site(tr, "sed_reduced_chi2")
+    )
 
 
 def test_systematics_width_can_be_sampled_with_exponential_prior(monkeypatch):
@@ -1038,6 +1047,17 @@ def test_predict_supports_lightweight_and_median_modes(monkeypatch):
     median = fitter.predict_median(kind="photometry")
 
     assert "pred_fluxes" in phot
+    assert {
+        "sed_chi2",
+        "sed_n_eff",
+        "sed_reduced_chi2",
+        "spectroscopy_chi2",
+        "spectroscopy_n_eff",
+        "spectroscopy_reduced_chi2",
+        "joint_chi2",
+        "joint_n_eff",
+        "joint_reduced_chi2",
+    } <= set(phot)
     assert "total_obs_sed" not in phot
     assert phot["pred_fluxes"].shape[0] == 2
     assert "total_obs_sed" in full

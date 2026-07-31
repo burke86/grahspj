@@ -2825,6 +2825,7 @@ def photometric_loglike(
     nebular_line_component=None,
     local_nebular_line_uncertainty_dex=0.0,
     agn_systematics_width=0.0,
+    return_diagnostics=False,
 ):
     """Evaluate the broadband photometric log-likelihood for one model state.
 
@@ -2871,6 +2872,10 @@ def photometric_loglike(
     agn_systematics_width : object
         Fractional AGN model-mismatch coefficient in the GRAHSP systematic
         error term.
+    return_diagnostics : bool, optional
+        If True, also return standardized-residual chi-square diagnostics.
+        These diagnostics exclude censored upper limits and use the effective
+        variance constructed by this likelihood.
     """
     pred_fluxes = jnp.asarray(pred_fluxes, dtype=jnp.float64)
     obs_fluxes = jnp.asarray(obs_fluxes, dtype=jnp.float64)
@@ -2945,10 +2950,41 @@ def photometric_loglike(
     logl_lim = jnp.sum(jnp.where(upper_limits, log_cdf, 0.0))
     invalid = active & ~(input_valid & auxiliary_valid & variance_valid)
     penalty = -1.0e6 * jnp.sum(invalid.astype(jnp.float64))
-    return logl_data + logl_lim + penalty
+    loglike = logl_data + logl_lim + penalty
+    if not return_diagnostics:
+        return loglike
+
+    chi2_mask = jnp.asarray(data_mask, dtype=bool) & input_valid & auxiliary_valid & variance_valid
+    n_eff = jnp.sum(chi2_mask.astype(jnp.float64))
+    chi2_sum = jnp.sum(
+        jnp.where(
+            chi2_mask,
+            (obs_fluxes - pred_fluxes) ** 2 / jnp.maximum(total_variance, 1.0e-60),
+            0.0,
+        )
+    )
+    chi2 = jnp.where(n_eff > 0.0, chi2_sum, jnp.asarray(jnp.nan, dtype=jnp.float64))
+    reduced_chi2 = jnp.where(
+        n_eff > 0.0,
+        chi2_sum / jnp.maximum(n_eff, 1.0),
+        jnp.asarray(jnp.nan, dtype=jnp.float64),
+    )
+    return loglike, {
+        "chi2": chi2,
+        "n_eff": n_eff,
+        "reduced_chi2": reduced_chi2,
+    }
 
 
-def spectroscopic_loglike(pred_fluxes, obs_fluxes, obs_errors, mask, systematics_width, student_t_df):
+def spectroscopic_loglike(
+    pred_fluxes,
+    obs_fluxes,
+    obs_errors,
+    mask,
+    systematics_width,
+    student_t_df,
+    return_diagnostics=False,
+):
     """Evaluate the observed-frame spectral log-likelihood.
 
     Parameters
@@ -2965,6 +3001,9 @@ def spectroscopic_loglike(pred_fluxes, obs_fluxes, obs_errors, mask, systematics
         systematics_width value.
     student_t_df : object
         student_t_df value.
+    return_diagnostics : bool, optional
+        If True, also return standardized-residual chi-square diagnostics
+        using the same effective variance as the spectral likelihood.
     """
     pred_fluxes = jnp.asarray(pred_fluxes, dtype=jnp.float64)
     obs_fluxes = jnp.asarray(obs_fluxes, dtype=jnp.float64)
@@ -2985,7 +3024,29 @@ def spectroscopic_loglike(pred_fluxes, obs_fluxes, obs_errors, mask, systematics
     student = dist.StudentT(df=student_t_df, loc=pred_fluxes, scale=scale)
     valid = mask & input_valid & variance_valid & jnp.isfinite(scale)
     penalty = -1.0e6 * jnp.sum((mask & ~valid).astype(jnp.float64))
-    return jnp.sum(jnp.where(valid, student.log_prob(obs_fluxes), 0.0)) + penalty
+    loglike = jnp.sum(jnp.where(valid, student.log_prob(obs_fluxes), 0.0)) + penalty
+    if not return_diagnostics:
+        return loglike
+
+    n_eff = jnp.sum(valid.astype(jnp.float64))
+    chi2_sum = jnp.sum(
+        jnp.where(
+            valid,
+            (obs_fluxes - pred_fluxes) ** 2 / jnp.maximum(variance, 1.0e-60),
+            0.0,
+        )
+    )
+    chi2 = jnp.where(n_eff > 0.0, chi2_sum, jnp.asarray(jnp.nan, dtype=jnp.float64))
+    reduced_chi2 = jnp.where(
+        n_eff > 0.0,
+        chi2_sum / jnp.maximum(n_eff, 1.0),
+        jnp.asarray(jnp.nan, dtype=jnp.float64),
+    )
+    return loglike, {
+        "chi2": chi2,
+        "n_eff": n_eff,
+        "reduced_chi2": reduced_chi2,
+    }
 
 
 def spectroscopic_likelihood_weight(wave_obs, mask, spectrum_index, likelihood_weight_mode, resolving_power):
@@ -4330,6 +4391,9 @@ def evaluate_photometric_state(
     log_spectrum_scale = jnp.asarray(0.0, dtype=jnp.float64)
     feature_amplitude_scale = jnp.asarray(1.0, dtype=jnp.float64)
     spec_likelihood_weight = jnp.asarray(1.0, dtype=jnp.float64)
+    spec_chi2 = jnp.asarray(jnp.nan, dtype=jnp.float64)
+    spec_n_eff = jnp.asarray(0.0, dtype=jnp.float64)
+    spec_reduced_chi2 = jnp.asarray(jnp.nan, dtype=jnp.float64)
     jqf_line_photometry = jnp.zeros_like(pred_fluxes)
     jqf_feii_photometry = jnp.zeros_like(pred_fluxes)
     jqf_extrapolated_feii_photometry = jnp.zeros_like(pred_fluxes)
@@ -4710,13 +4774,14 @@ def evaluate_photometric_state(
             spec_model_fluxes = spectrum_scale[spec_spectrum_index] * spec_model_fluxes
         else:
             spec_model_fluxes = spectrum_scale * spec_model_fluxes
-        spec_logl = spectroscopic_loglike(
+        spec_logl, spec_chi2_diagnostics = spectroscopic_loglike(
             spec_model_fluxes,
             spec_fluxes,
             spec_errors,
             spec_mask,
             cfg.spectroscopy_config.systematics_width,
             cfg.spectroscopy_config.student_t_df,
+            return_diagnostics=True,
         )
         spec_likelihood_weight = spectroscopic_likelihood_weight(
             spec_wave_obs,
@@ -4724,6 +4789,13 @@ def evaluate_photometric_state(
             spec_spectrum_index,
             cfg.spectroscopy_config.likelihood_weight_mode,
             cfg.spectroscopy_config.resolving_power,
+        )
+        spec_chi2 = spec_likelihood_weight * spec_chi2_diagnostics["chi2"]
+        spec_n_eff = spec_likelihood_weight * spec_chi2_diagnostics["n_eff"]
+        spec_reduced_chi2 = jnp.where(
+            spec_n_eff > 0.0,
+            spec_chi2 / jnp.maximum(spec_n_eff, 1.0e-30),
+            jnp.asarray(jnp.nan, dtype=jnp.float64),
         )
         spec_logl = spec_likelihood_weight * spec_logl
         if add_likelihood:
@@ -4864,7 +4936,7 @@ def evaluate_photometric_state(
 
     if jaxqsofit_backend_enabled and include_spectral_features:
         agn_fluxes = agn_fluxes + jqf_photometry_adjustment
-    logl = photometric_loglike(
+    logl, sed_chi2_diagnostics = photometric_loglike(
         pred_fluxes=pred_fluxes,
         obs_fluxes=obs_fluxes,
         obs_errors=obs_errors,
@@ -4885,6 +4957,26 @@ def evaluate_photometric_state(
         redshift=redshift,
         nebular_line_component=local_nebular_line_fluxes,
         local_nebular_line_uncertainty_dex=cfg.likelihood.local_nebular_line_uncertainty_dex,
+        return_diagnostics=True,
+    )
+    sed_chi2 = sed_chi2_diagnostics["chi2"]
+    sed_n_eff = sed_chi2_diagnostics["n_eff"]
+    sed_reduced_chi2 = sed_chi2_diagnostics["reduced_chi2"]
+    joint_n_eff = sed_n_eff + spec_n_eff
+    joint_chi2_sum = jnp.where(sed_n_eff > 0.0, sed_chi2, 0.0) + jnp.where(
+        spec_n_eff > 0.0,
+        spec_chi2,
+        0.0,
+    )
+    joint_chi2 = jnp.where(
+        joint_n_eff > 0.0,
+        joint_chi2_sum,
+        jnp.asarray(jnp.nan, dtype=jnp.float64),
+    )
+    joint_reduced_chi2 = jnp.where(
+        joint_n_eff > 0.0,
+        joint_chi2_sum / jnp.maximum(joint_n_eff, 1.0e-30),
+        jnp.asarray(jnp.nan, dtype=jnp.float64),
     )
     if add_likelihood:
         numpyro.factor("photometry_loglike", logl)
@@ -4907,6 +4999,15 @@ def evaluate_photometric_state(
     numpyro.deterministic("spectrum_host_capture_fraction", spec_host_capture_fraction_by_spectrum)
     numpyro.deterministic("spectroscopy_likelihood_weight", spec_likelihood_weight)
     numpyro.deterministic("spectroscopy_loglike", spec_logl)
+    numpyro.deterministic("sed_chi2", sed_chi2)
+    numpyro.deterministic("sed_n_eff", sed_n_eff)
+    numpyro.deterministic("sed_reduced_chi2", sed_reduced_chi2)
+    numpyro.deterministic("spectroscopy_chi2", spec_chi2)
+    numpyro.deterministic("spectroscopy_n_eff", spec_n_eff)
+    numpyro.deterministic("spectroscopy_reduced_chi2", spec_reduced_chi2)
+    numpyro.deterministic("joint_chi2", joint_chi2)
+    numpyro.deterministic("joint_n_eff", joint_n_eff)
+    numpyro.deterministic("joint_reduced_chi2", joint_reduced_chi2)
     numpyro.deterministic("fracAGN_5100_fit", fracagn_5100)
     numpyro.deterministic("log_agn_amp_fit", log_agn_amp)
     numpyro.deterministic("log_disk_luminosity_fit", _safe_log10(l_agn_lambda_5100))
@@ -5037,6 +5138,15 @@ def evaluate_photometric_state(
         "photometry_loglike": logl,
         "spectroscopy_loglike": spec_logl,
         "spectroscopy_likelihood_weight": spec_likelihood_weight,
+        "sed_chi2": sed_chi2,
+        "sed_n_eff": sed_n_eff,
+        "sed_reduced_chi2": sed_reduced_chi2,
+        "spectroscopy_chi2": spec_chi2,
+        "spectroscopy_n_eff": spec_n_eff,
+        "spectroscopy_reduced_chi2": spec_reduced_chi2,
+        "joint_chi2": joint_chi2,
+        "joint_n_eff": joint_n_eff,
+        "joint_reduced_chi2": joint_reduced_chi2,
     }
     if include_components:
         state.update(
