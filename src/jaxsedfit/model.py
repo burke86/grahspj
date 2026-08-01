@@ -4851,6 +4851,18 @@ def evaluate_photometric_state(
             and include_spectral_lines
             and cfg.spectroscopy_config.jaxqsofit.use_spectral_lines
         )
+        joint_feii_rendering = bool(
+            spectroscopy_enabled
+            and str(cfg.spectroscopy_config.backend).lower() == "jaxqsofit"
+            and include_spectral_features
+            and cfg.spectroscopy_config.jaxqsofit.use_spectral_feii
+        )
+        joint_balmer_rendering = bool(
+            spectroscopy_enabled
+            and str(cfg.spectroscopy_config.backend).lower() == "jaxqsofit"
+            and include_spectral_features
+            and cfg.spectroscopy_config.jaxqsofit.use_spectral_balmer_continuum
+        )
         plotted_total_obs = total_obs
         plotted_agn_obs = agn_obs
         if joint_line_rendering:
@@ -4860,6 +4872,17 @@ def evaluate_photometric_state(
             # native UV lines in the black and AGN-total curves.
             plotted_total_obs = plotted_total_obs - line_obs + jqf_line_obs_sed
             plotted_agn_obs = plotted_agn_obs - line_obs + jqf_line_obs_sed
+        if joint_feii_rendering:
+            # Joint fitting disables the native SED Fe II component. Add the
+            # fitted JAXQSOFit state back to the continuous plotted totals,
+            # matching the component curve and photometric likelihood.
+            plotted_total_obs = plotted_total_obs - feii_obs + jqf_feii_obs_sed
+            plotted_agn_obs = plotted_agn_obs - feii_obs + jqf_feii_obs_sed
+        if joint_balmer_rendering:
+            # As above, use the fitted spectral Balmer continuum in the total
+            # curves. This remains active in continuum-only warm-up stages.
+            plotted_total_obs = plotted_total_obs - balmer_obs + jqf_balmer_obs_sed
+            plotted_agn_obs = plotted_agn_obs - balmer_obs + jqf_balmer_obs_sed
         if joint_line_rendering and correct_nebular_line_photometry:
             # Locally rendered nebular profiles are plotted below.  Remove the
             # undersampled coarse-grid version from the continuous total first.

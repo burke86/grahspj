@@ -2388,6 +2388,14 @@ class JAXSEDFit:
         plotter.f_bc_model = component("jqf_balmer_model")
         jqf_line_site = "jqf_line_model_aperture" if "jqf_line_model_aperture" in pred else "jqf_line_model"
         plotter.f_line_model = component(jqf_line_site)
+        jqf_broad_line_site = "jqf_line_model_broad"
+        jqf_narrow_line_site = (
+            "jqf_line_model_narrow_aperture"
+            if "jqf_line_model_narrow_aperture" in pred
+            else "jqf_line_model_narrow"
+        )
+        broad_line_component = component(jqf_broad_line_site)
+        narrow_line_component = component(jqf_narrow_line_site)
         spec_torus_component = component("spec_torus_model_fluxes")
         custom_components = {
             "jaxsedfit_torus": spec_torus_component if keep_component(spec_torus_component) else obs_sed_component("torus_obs_sed"),
@@ -2448,7 +2456,22 @@ class JAXSEDFit:
                 if band is not None:
                     pred_bands[name] = band
         plotter.f_poly_model = np.ones_like(wave_rest)
-        plotter.custom_line_components = {}
+        plotter.custom_line_components = {
+            name: model
+            for name, model in (
+                ("broad_lines", broad_line_component),
+                ("narrow_lines", narrow_line_component),
+            )
+            if keep_component(model)
+        }
+        for name, site in (
+            ("broad_lines", jqf_broad_line_site),
+            ("narrow_lines", jqf_narrow_line_site),
+        ):
+            if name in plotter.custom_line_components:
+                band = band_from_draws(spectrum_draws(site))
+                if band is not None:
+                    pred_bands[name] = band
         plotter.pred_bands = pred_bands
         plotter.use_psf_phot = False
         plotter.psf_model = np.array([])
