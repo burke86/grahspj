@@ -34,6 +34,7 @@ import numpyro
 import numpyro.distributions as dist
 
 from .preload import ModelContext, _build_fixed_igm_jax as _igm_transmission
+from .velocity import shift_and_broaden_lnlam as _fourier_shift_and_broaden_lnlam
 
 C_KMS = 299792.458
 C_MS = 2.99792458e8
@@ -1014,15 +1015,12 @@ def _shift_and_broaden_single_spectrum_lnlam(lnwave, spectrum, v_kms, sigma_kms)
     sigma_kms : object
         sigma_kms value.
     """
-    dln = jnp.mean(jnp.diff(lnwave))
-    sigma_ln = jnp.maximum(sigma_kms / C_KMS, 1e-5)
-    sigma_pix = sigma_ln / jnp.maximum(dln, 1e-8)
-    kern = _gaussian_kernel1d(sigma_pix, radius_mult=5.0, max_half=128)
-    wave = jnp.exp(lnwave)
-    shift_ln = v_kms / C_KMS
-    shifted_wave = jnp.exp(lnwave - shift_ln)
-    shifted = jnp.interp(shifted_wave, wave, spectrum, left=0.0, right=0.0)
-    return _convolve_same_length(shifted, kern)
+    return _fourier_shift_and_broaden_lnlam(
+        lnwave,
+        spectrum,
+        v_kms,
+        sigma_kms,
+    )
 
 
 def _powerlaw_jax(wave, norm, lam1, lam2, x0, xbrk, bend_width, cutoff):
@@ -1773,8 +1771,8 @@ def _project_local_nebular_line_filters(
     )
 
 
-def _local_nebular_line_obs_sed(context: ModelContext, line_wave, line_lumin, width_kms, ebv_total, redshift, luminosity_distance_m, igm):
-    """Return observed-frame local-grid wavelengths and F_lambda for nebular lines.
+def _local_integrated_line_obs_sed(context: ModelContext, line_wave, line_lumin, width_kms, ebv_total, redshift, luminosity_distance_m, igm):
+    """Return observed-frame local-grid wavelengths and F_lambda for lines.
 
     Parameters
     ----------
@@ -1808,6 +1806,20 @@ def _local_nebular_line_obs_sed(context: ModelContext, line_wave, line_lumin, wi
     obs_plot = jnp.concatenate([obs_line_wave, separator], axis=1)
     flux_plot = jnp.concatenate([flux_lambda, separator], axis=1)
     return jnp.ravel(obs_plot), jnp.ravel(flux_plot)
+
+
+def _local_nebular_line_obs_sed(context: ModelContext, line_wave, line_lumin, width_kms, ebv_total, redshift, luminosity_distance_m, igm):
+    """Backward-compatible wrapper for locally rendered nebular lines."""
+    return _local_integrated_line_obs_sed(
+        context,
+        line_wave,
+        line_lumin,
+        width_kms,
+        ebv_total,
+        redshift,
+        luminosity_distance_m,
+        igm,
+    )
 
 
 def _interp_fixed_local_line_terms(width_kms, cache):
@@ -3280,6 +3292,7 @@ def _evaluate_jaxqsofit_backend(
     fixed_narrow_fwhm_kms=None,
     fixed_narrow_amp_scale=None,
     feature_amplitude_scale=1.0,
+    include_lines=True,
 ):
     """Evaluate the built-in detailed spectral components.
 
@@ -3321,7 +3334,7 @@ def _evaluate_jaxqsofit_backend(
 
     jqf_cfg = cfg.spectroscopy_config.jaxqsofit
     component_cfg = SpectralComponentConfig(
-        use_lines=bool(jqf_cfg.use_spectral_lines),
+        use_lines=bool(jqf_cfg.use_spectral_lines and include_lines),
         use_tied_lines=bool(jqf_cfg.use_tied_lines),
         use_feii=bool(jqf_cfg.use_spectral_feii),
         use_balmer_continuum=bool(jqf_cfg.use_spectral_balmer_continuum),
@@ -3561,6 +3574,7 @@ def evaluate_photometric_state(
     add_likelihood: bool = True,
     return_state: bool = True,
     force_component_fluxes: bool = False,
+    include_spectral_lines: bool = True,
 ):
     """Evaluate one jaxsedfit photometric model state inside a NumPyro trace.
 
@@ -3574,6 +3588,10 @@ def evaluate_photometric_state(
         include_sed_agn_features value.
     include_spectral_features : object
         include_spectral_features value.
+    include_spectral_lines : object
+        Whether detailed broad and narrow emission lines are active. Smooth
+        spectral features such as Fe II and Balmer continuum remain controlled
+        by ``include_spectral_features``.
     add_likelihood : object
         add_likelihood value.
     return_state : object
@@ -3619,10 +3637,19 @@ def evaluate_photometric_state(
         spectroscopy_enabled
         and str(cfg.spectroscopy_config.backend).lower() == "jaxqsofit"
     )
+    configured_spectral_lines = bool(
+        jaxqsofit_backend_enabled
+        and jqf_cfg.use_spectral_lines
+    )
     shared_jaxqsofit_lines = bool(
         jaxqsofit_backend_enabled
         and jqf_cfg.use_spectral_lines
         and jqf_cfg.use_photometric_lines
+    )
+    active_spectral_lines = bool(
+        configured_spectral_lines
+        and include_spectral_features
+        and include_spectral_lines
     )
     use_native_feii = bool(
         include_sed_agn_features
@@ -3698,7 +3725,17 @@ def evaluate_photometric_state(
     if host_kinematics_enabled:
         gal_v_kms = _sample_prior(prior_config, "gal_v_kms", dist.Normal(0.0, 150.0))
         gal_sigma_kms = _sample_prior(prior_config, "gal_sigma_kms", dist.HalfNormal(150.0))
-        host_rest = _shift_and_broaden_single_spectrum_lnlam(jnp.log(rest_wave), host_rest, gal_v_kms, gal_sigma_kms)
+        # Fixed-redshift joint fits have a dense spectroscopic host basis below.
+        # Apply LOS kinematics there only: the global SED grid is intentionally
+        # coarse over several wavelength decades and cannot resolve a
+        # ~100-km/s convolution without severe Fourier ringing.
+        if not needs_spec_host_basis:
+            host_rest = _shift_and_broaden_single_spectrum_lnlam(
+                jnp.log(rest_wave),
+                host_rest,
+                gal_v_kms,
+                gal_sigma_kms,
+            )
     else:
         gal_v_kms = jnp.asarray(0.0, dtype=jnp.float64)
         gal_sigma_kms = jnp.asarray(0.0, dtype=jnp.float64)
@@ -3840,7 +3877,9 @@ def evaluate_photometric_state(
         )
 
         if include_sed_agn_features:
-            if shared_jaxqsofit_lines:
+            if shared_jaxqsofit_lines or (
+                configured_spectral_lines and not active_spectral_lines
+            ):
                 broad_lines_strength = jnp.asarray(1.0, dtype=jnp.float64)
                 narrow_lines_strength = jnp.asarray(DEFAULT_NARROW_LINES_STRENGTH, dtype=jnp.float64)
                 broad_line_width = jnp.asarray(DEFAULT_BROAD_LINE_WIDTH_KMS, dtype=jnp.float64)
@@ -3923,7 +3962,10 @@ def evaluate_photometric_state(
         l_broadlines = 0.02 * l_agn_lambda_5100 * broad_lines_strength
         l_narrowlines = 0.002 * l_agn_lambda_5100 * narrow_lines_strength
 
-        if skip_coarse_agn_line_grid:
+        suppress_joint_stage_lines = bool(
+            configured_spectral_lines and not active_spectral_lines
+        )
+        if skip_coarse_agn_line_grid or suppress_joint_stage_lines:
             line_bl_rest = jnp.zeros_like(rest_wave)
             line_nl_rest = jnp.zeros_like(rest_wave)
             line_liner_rest = jnp.zeros_like(rest_wave)
@@ -4207,6 +4249,7 @@ def evaluate_photometric_state(
     correct_agn_line_photometry = (
         fit_agn
         and include_sed_agn_features
+        and not (configured_spectral_lines and not active_spectral_lines)
         and bool(cfg.likelihood.use_local_line_photometry)
     )
     if correct_agn_line_photometry:
@@ -4400,8 +4443,14 @@ def evaluate_photometric_state(
     jqf_balmer_photometry = jnp.zeros_like(pred_fluxes)
     jqf_extrapolated_broad_photometry = jnp.zeros_like(pred_fluxes)
     jqf_extrapolated_narrow_photometry = jnp.zeros_like(pred_fluxes)
+    jqf_extrapolated_broad_lumin = jnp.zeros_like(line_wave)
+    jqf_extrapolated_narrow_lumin = jnp.zeros_like(line_wave)
+    jqf_extrapolated_broad_width = jnp.asarray(DEFAULT_BROAD_LINE_WIDTH_KMS, dtype=jnp.float64)
+    jqf_extrapolated_narrow_width = jnp.asarray(DEFAULT_NARROW_LINE_WIDTH_KMS, dtype=jnp.float64)
     jqf_photometry_adjustment = jnp.zeros_like(pred_fluxes)
     jqf_line_obs_sed = jnp.zeros_like(obs_wave)
+    jqf_feii_obs_sed = jnp.zeros_like(obs_wave)
+    jqf_balmer_obs_sed = jnp.zeros_like(obs_wave)
     if spectroscopy_enabled:
         backend = str(cfg.spectroscopy_config.backend).lower()
         if backend == "jaxqsofit":
@@ -4562,9 +4611,12 @@ def evaluate_photometric_state(
                 feii_template_flux_native,
                 line_coverage_rest=jaxqsofit_line_coverage_rest,
                 feature_amplitude_scale=feature_amplitude_scale,
+                include_lines=include_spectral_lines,
             )
             jqf_cfg = cfg.spectroscopy_config.jaxqsofit
-            if host_capture_enabled and bool(jqf_cfg.use_spectral_lines):
+            if host_capture_enabled and bool(
+                jqf_cfg.use_spectral_lines and include_spectral_lines
+            ):
                 spec_capture_at_pixel = spec_host_capture_fraction_by_spectrum[spec_spectrum_index]
                 jqf_line_model_aperture = _apply_extended_capture(
                     jqf_components["lines"],
@@ -4586,9 +4638,9 @@ def evaluate_photometric_state(
                 numpyro.deterministic("jqf_line_model_aperture", jqf_line_model_aperture)
                 numpyro.deterministic("jqf_line_model_narrow_aperture", jqf_components["line_narrow"])
             jqf_state = jqf_components["state"]
-            # Render the sampled spectral-line state on the SED grid as well.
-            # This is the same posterior line model used by the spectrum, not
-            # a globally rescaled copy of the native jaxsedfit line template.
+            # Render the sampled spectral-feature state on the SED grid as
+            # well. These are the same posterior line, Fe II, and Balmer
+            # models used by the spectrum, not rescaled native templates.
             from .spectroscopy import render_joint_feature_state
 
             jqf_sed_lines_mjy = render_joint_feature_state(
@@ -4597,10 +4649,27 @@ def evaluate_photometric_state(
                 jqf_state,
                 config=jqf_components["component_config"],
             )["lines"]
-            jqf_line_obs_sed = jqf_sed_lines_mjy / jnp.maximum(
+            sed_mjy_per_flambda = jnp.maximum(
                 1.0e-10 / 299792458.0 * 1.0e29 * obs_wave**2,
                 1.0e-30,
             )
+            jqf_line_obs_sed = jqf_sed_lines_mjy / sed_mjy_per_flambda
+            # Fe II and Balmer broadening are comparatively expensive FFTs.
+            # Render them only for component predictions used by plotting, not
+            # during every likelihood evaluation in MAP or NUTS.
+            if include_components and (
+                "feii_norm" in jqf_state or "balmer_norm" in jqf_state
+            ):
+                jqf_sed_smooth_mjy = render_joint_feature_state(
+                    obs_wave,
+                    redshift,
+                    jqf_state,
+                    config=jqf_components["component_config"],
+                    feii_template_wave_rest=feii_template_wave_native,
+                    feii_template_flux=feii_template_flux_native,
+                )
+                jqf_feii_obs_sed = jqf_sed_smooth_mjy["feii"] / sed_mjy_per_flambda
+                jqf_balmer_obs_sed = jqf_sed_smooth_mjy["balmer"] / sed_mjy_per_flambda
             jqf_broad_photometry = _project_jaxqsofit_line_state_filters(
                 context, jqf_state, redshift, broad_only=True
             )
@@ -4639,9 +4708,13 @@ def evaluate_photometric_state(
                 jaxqsofit_line_coverage_rest,
                 sed_feii_scale,
             )
-            if bool(jqf_cfg.use_spectral_lines) and bool(jqf_cfg.use_photometric_lines):
+            if bool(
+                jqf_cfg.use_spectral_lines
+                and jqf_cfg.use_photometric_lines
+                and include_spectral_lines
+            ):
                 line_narrow_template = jnp.where(agn_type == 3, line_liner, line_sy2)
-                extrap_broad_lumin, extrap_narrow_lumin, extrap_broad_width, extrap_narrow_width = (
+                jqf_extrapolated_broad_lumin, jqf_extrapolated_narrow_lumin, jqf_extrapolated_broad_width, jqf_extrapolated_narrow_width = (
                     _jaxqsofit_family_extrapolation(
                         context,
                         cfg,
@@ -4663,8 +4736,8 @@ def evaluate_photometric_state(
                 jqf_extrapolated_broad_photometry = _project_integrated_local_line_filters(
                     context,
                     line_wave,
-                    extrap_broad_lumin,
-                    extrap_broad_width,
+                    jqf_extrapolated_broad_lumin,
+                    jqf_extrapolated_broad_width,
                     ebv_gal + ebv_agn,
                     redshift,
                     luminosity_distance_m,
@@ -4673,8 +4746,8 @@ def evaluate_photometric_state(
                 jqf_extrapolated_narrow_total = _project_integrated_local_line_filters(
                     context,
                     line_wave,
-                    extrap_narrow_lumin,
-                    extrap_narrow_width,
+                    jqf_extrapolated_narrow_lumin,
+                    jqf_extrapolated_narrow_width,
                     ebv_gal + ebv_agn,
                     redshift,
                     luminosity_distance_m,
@@ -4690,7 +4763,9 @@ def evaluate_photometric_state(
                 + jqf_extrapolated_narrow_photometry
             )
             native_replaced_photometry = jnp.where(
-                bool(jqf_cfg.use_spectral_lines), local_agn_line_fluxes, jnp.zeros_like(local_agn_line_fluxes)
+                bool(jqf_cfg.use_spectral_lines and include_spectral_lines),
+                local_agn_line_fluxes,
+                jnp.zeros_like(local_agn_line_fluxes),
             )
             jqf_photometry_adjustment = shared_jqf_photometry - native_replaced_photometry
             pred_fluxes = pred_fluxes + jqf_photometry_adjustment
@@ -4841,6 +4916,92 @@ def evaluate_photometric_state(
         line_nl_obs = _redshift_to_obs(rest_wave, line_nl_att_rest * igm, obs_wave, redshift, luminosity_distance_m)
         line_liner_obs = _redshift_to_obs(rest_wave, line_liner_att_rest * igm, obs_wave, redshift, luminosity_distance_m)
         balmer_obs = _redshift_to_obs(rest_wave, balmer_att_rest * igm, obs_wave, redshift, luminosity_distance_m)
+        joint_line_rendering = bool(
+            spectroscopy_enabled
+            and str(cfg.spectroscopy_config.backend).lower() == "jaxqsofit"
+            and include_spectral_features
+            and include_spectral_lines
+            and cfg.spectroscopy_config.jaxqsofit.use_spectral_lines
+        )
+        joint_feii_rendering = bool(
+            spectroscopy_enabled
+            and str(cfg.spectroscopy_config.backend).lower() == "jaxqsofit"
+            and include_spectral_features
+            and cfg.spectroscopy_config.jaxqsofit.use_spectral_feii
+        )
+        joint_balmer_rendering = bool(
+            spectroscopy_enabled
+            and str(cfg.spectroscopy_config.backend).lower() == "jaxqsofit"
+            and include_spectral_features
+            and cfg.spectroscopy_config.jaxqsofit.use_spectral_balmer_continuum
+        )
+        plotted_total_obs = total_obs
+        plotted_agn_obs = agn_obs
+        if joint_line_rendering:
+            # The photometric likelihood replaces the native GRAHSP AGN-line
+            # template with the fitted JQF state.  Apply the same replacement
+            # to the plotted continuous SED instead of leaving invisible
+            # native UV lines in the black and AGN-total curves.
+            plotted_total_obs = plotted_total_obs - line_obs + jqf_line_obs_sed
+            plotted_agn_obs = plotted_agn_obs - line_obs + jqf_line_obs_sed
+        if joint_feii_rendering:
+            # Joint fitting disables the native SED Fe II component. Add the
+            # fitted JAXQSOFit state back to the continuous plotted totals,
+            # matching the component curve and photometric likelihood.
+            plotted_total_obs = plotted_total_obs - feii_obs + jqf_feii_obs_sed
+            plotted_agn_obs = plotted_agn_obs - feii_obs + jqf_feii_obs_sed
+        if joint_balmer_rendering:
+            # As above, use the fitted spectral Balmer continuum in the total
+            # curves. This remains active in continuum-only warm-up stages.
+            plotted_total_obs = plotted_total_obs - balmer_obs + jqf_balmer_obs_sed
+            plotted_agn_obs = plotted_agn_obs - balmer_obs + jqf_balmer_obs_sed
+        if joint_line_rendering and correct_nebular_line_photometry:
+            # Locally rendered nebular profiles are plotted below.  Remove the
+            # undersampled coarse-grid version from the continuous total first.
+            plotted_total_obs = plotted_total_obs - nebular_lines_obs
+
+        agn_broad_local_wave, agn_broad_local_obs = _local_integrated_line_obs_sed(
+            context,
+            line_wave,
+            jqf_extrapolated_broad_lumin,
+            jqf_extrapolated_broad_width,
+            ebv_gal + ebv_agn,
+            redshift,
+            luminosity_distance_m,
+            igm,
+        )
+        agn_narrow_local_wave, agn_narrow_local_obs = _local_integrated_line_obs_sed(
+            context,
+            line_wave,
+            jqf_extrapolated_narrow_lumin,
+            jqf_extrapolated_narrow_width,
+            ebv_gal + ebv_agn,
+            redshift,
+            luminosity_distance_m,
+            igm,
+        )
+        agn_lines_local_obs_wave = jnp.concatenate([agn_broad_local_wave, agn_narrow_local_wave])
+        agn_lines_local_obs = jnp.concatenate([agn_broad_local_obs, agn_narrow_local_obs])
+        total_agn_lines_local_obs = jnp.concatenate(
+            [
+                jnp.where(
+                    agn_broad_local_obs > 0.0,
+                    jnp.interp(agn_broad_local_wave, obs_wave, plotted_total_obs, left=0.0, right=0.0)
+                    + agn_broad_local_obs,
+                    jnp.nan,
+                ),
+                jnp.where(
+                    agn_narrow_local_obs > 0.0,
+                    jnp.interp(agn_narrow_local_wave, obs_wave, plotted_total_obs, left=0.0, right=0.0)
+                    + agn_narrow_local_obs,
+                    jnp.nan,
+                ),
+            ]
+        )
+        total_local_obs = (
+            jnp.interp(nebular_lines_local_obs_wave, obs_wave, plotted_total_obs, left=0.0, right=0.0)
+            + nebular_lines_local_obs
+        )
         if fast_projection_enabled:
             agn_fluxes = _project_rest_luminosity_filters(context, agn_rest)
             dust_fluxes = _project_rest_luminosity_filters(context, dust_rest)
@@ -4989,6 +5150,8 @@ def evaluate_photometric_state(
     numpyro.deterministic("jqf_extrapolated_broad_photometry", jqf_extrapolated_broad_photometry)
     numpyro.deterministic("jqf_extrapolated_narrow_photometry", jqf_extrapolated_narrow_photometry)
     numpyro.deterministic("jqf_line_obs_sed", jqf_line_obs_sed)
+    numpyro.deterministic("jqf_feii_obs_sed", jqf_feii_obs_sed)
+    numpyro.deterministic("jqf_balmer_obs_sed", jqf_balmer_obs_sed)
     numpyro.deterministic("spec_continuum_model_fluxes", spec_continuum_model_fluxes)
     numpyro.deterministic("spec_host_model_fluxes", spec_host_model_fluxes)
     numpyro.deterministic("spec_disk_model_fluxes", spec_disk_model_fluxes)
@@ -5092,10 +5255,14 @@ def evaluate_photometric_state(
         numpyro.deterministic("line_nl_fluxes", line_nl_fluxes)
         numpyro.deterministic("line_liner_fluxes", line_liner_fluxes)
         numpyro.deterministic("balmer_fluxes", balmer_fluxes)
-        numpyro.deterministic("total_obs_sed", total_obs)
+        numpyro.deterministic("total_obs_sed", plotted_total_obs)
         numpyro.deterministic("total_local_lines_obs_wave", nebular_lines_local_obs_wave)
         numpyro.deterministic("total_local_lines_obs_sed", total_local_obs)
-        numpyro.deterministic("agn_obs_sed", agn_obs)
+        numpyro.deterministic("total_agn_lines_local_obs_wave", agn_lines_local_obs_wave)
+        numpyro.deterministic("total_agn_lines_local_obs_sed", total_agn_lines_local_obs)
+        numpyro.deterministic("agn_lines_local_obs_wave", agn_lines_local_obs_wave)
+        numpyro.deterministic("agn_lines_local_obs_sed", agn_lines_local_obs)
+        numpyro.deterministic("agn_obs_sed", plotted_agn_obs)
         numpyro.deterministic("host_obs_sed", host_stellar_obs)
         numpyro.deterministic("host_total_obs_sed", host_obs)
         numpyro.deterministic("dust_obs_sed", dust_obs)
@@ -5157,10 +5324,14 @@ def evaluate_photometric_state(
                 "host_total_rest_sed": gal_att_rest,
                 "dust_rest_sed": dust_rest,
                 "nebular_rest_sed": nebular_att_rest,
-                "total_obs_sed": total_obs,
+                "total_obs_sed": plotted_total_obs,
                 "total_local_lines_obs_wave": nebular_lines_local_obs_wave,
                 "total_local_lines_obs_sed": total_local_obs,
-                "agn_obs_sed": agn_obs,
+                "total_agn_lines_local_obs_wave": agn_lines_local_obs_wave,
+                "total_agn_lines_local_obs_sed": total_agn_lines_local_obs,
+                "agn_lines_local_obs_wave": agn_lines_local_obs_wave,
+                "agn_lines_local_obs_sed": agn_lines_local_obs,
+                "agn_obs_sed": plotted_agn_obs,
                 "host_obs_sed": host_stellar_obs,
                 "host_total_obs_sed": host_obs,
                 "dust_obs_sed": dust_obs,
@@ -5187,6 +5358,7 @@ def grahsp_photometric_model(
     include_components: bool = False,
     include_sed_agn_features: bool = True,
     include_spectral_features: bool = True,
+    include_spectral_lines: bool = True,
 ):
     """NumPyro model for one jaxsedfit photometric fit or predictive expansion.
 
@@ -5200,12 +5372,15 @@ def grahsp_photometric_model(
         include_sed_agn_features value.
     include_spectral_features : object
         include_spectral_features value.
+    include_spectral_lines : object
+        include_spectral_lines value.
     """
     return evaluate_photometric_state(
         context,
         include_components=include_components,
         include_sed_agn_features=include_sed_agn_features,
         include_spectral_features=include_spectral_features,
+        include_spectral_lines=include_spectral_lines,
         add_likelihood=True,
         return_state=False,
     )
@@ -5216,6 +5391,7 @@ def sed_numpyro_model(
     include_components: bool = False,
     include_sed_agn_features: bool = True,
     include_spectral_features: bool = True,
+    include_spectral_lines: bool = True,
 ):
     """NumPyro SED model for one configured ``jaxsedfit`` target.
 
@@ -5233,12 +5409,15 @@ def sed_numpyro_model(
         include_sed_agn_features value.
     include_spectral_features : object
         include_spectral_features value.
+    include_spectral_lines : object
+        include_spectral_lines value.
     """
     return grahsp_photometric_model(
         context,
         include_components=include_components,
         include_sed_agn_features=include_sed_agn_features,
         include_spectral_features=include_spectral_features,
+        include_spectral_lines=include_spectral_lines,
     )
 
 
@@ -5250,6 +5429,7 @@ def evaluate_sed_model(
     add_likelihood: bool = True,
     return_state: bool = True,
     force_component_fluxes: bool = False,
+    include_spectral_lines: bool = True,
 ):
     """Evaluate the SED model state for a configured target.
 
@@ -5267,6 +5447,8 @@ def evaluate_sed_model(
         include_sed_agn_features value.
     include_spectral_features : object
         include_spectral_features value.
+    include_spectral_lines : object
+        include_spectral_lines value.
     add_likelihood : object
         add_likelihood value.
     return_state : object
@@ -5279,6 +5461,7 @@ def evaluate_sed_model(
         include_components=include_components,
         include_sed_agn_features=include_sed_agn_features,
         include_spectral_features=include_spectral_features,
+        include_spectral_lines=include_spectral_lines,
         add_likelihood=add_likelihood,
         return_state=return_state,
         force_component_fluxes=force_component_fluxes,

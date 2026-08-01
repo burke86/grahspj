@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Mapping
@@ -566,12 +567,13 @@ class JAXSEDFit:
         return grahsp_photometric_model(self.context, include_components=False)
 
     def _continuum_init_model(self):
-        """Return the MAP warm-start model with detailed AGN features disabled."""
+        """Return the MAP warm start with smooth continuum features but no lines."""
         return grahsp_photometric_model(
             self.context,
             include_components=False,
-            include_sed_agn_features=False,
-            include_spectral_features=False,
+            include_sed_agn_features=True,
+            include_spectral_features=True,
+            include_spectral_lines=False,
         )
 
     @staticmethod
@@ -673,6 +675,8 @@ class JAXSEDFit:
             "jqf_extrapolated_broad_photometry",
             "jqf_extrapolated_narrow_photometry",
             "jqf_line_obs_sed",
+            "jqf_feii_obs_sed",
+            "jqf_balmer_obs_sed",
             "rest_wave",
             "obs_wave",
             "redshift_fit",
@@ -753,6 +757,10 @@ class JAXSEDFit:
             "total_obs_sed",
             "total_local_lines_obs_wave",
             "total_local_lines_obs_sed",
+            "total_agn_lines_local_obs_wave",
+            "total_agn_lines_local_obs_sed",
+            "agn_lines_local_obs_wave",
+            "agn_lines_local_obs_sed",
             "agn_obs_sed",
             "host_obs_sed",
             "host_total_obs_sed",
@@ -931,9 +939,10 @@ class JAXSEDFit:
             }
             if inference.staged_steps is not None:
                 map_kwargs["staged_steps"] = inference.staged_steps
-            map_result = self.fit_map(
+            self.fit_map(
                 **map_kwargs,
             )
+            self._compact_map_warm_start()
             nuts_kwargs = {
                 "progress_bar": progress_bar,
                 "num_warmup": inference.num_warmup,
@@ -944,10 +953,9 @@ class JAXSEDFit:
                 "max_tree_depth": inference.max_tree_depth,
                 "use_map_init": inference.use_map_init,
             }
-            nuts_result = self.fit_nuts(
+            fit_output = self.fit_nuts(
                 **nuts_kwargs,
             )
-            fit_output = {"map": map_result, "nuts": nuts_result}
         elif method == "ns":
             ns_kwargs: dict[str, Any] = {"progress_bar": progress_bar}
             if inference.ns_num_live_points is not None:
@@ -994,6 +1002,35 @@ class JAXSEDFit:
             figure=fig,
             summary=self.summary() if getattr(self, "samples", None) is not None else None,
         )
+
+    def _compact_map_warm_start(self) -> None:
+        """Keep only the MAP data needed to initialize a following NUTS fit.
+
+        A combined ``optax+nuts`` run does not need the SVI optimizer state,
+        staged-fit payload, or compiled MAP executables after optimization.
+        Moving the median to host NumPy arrays before clearing JAX caches keeps
+        the NUTS initial point numerically identical while releasing those
+        transient allocations.
+        """
+        map_result = self.map_result
+        if map_result is None or "median" not in map_result:
+            return
+        compact_result = {
+            "median": {
+                key: np.asarray(value)
+                for key, value in map_result["median"].items()
+            },
+            "losses": np.asarray(map_result.get("losses", [])),
+            "staged": bool(map_result.get("staged", False)),
+        }
+        self.map_result = compact_result
+        self.samples = {
+            key: value[None, ...]
+            for key, value in compact_result["median"].items()
+        }
+        del map_result
+        gc.collect()
+        jax.clear_caches()
 
     def _run_map_svi(
         self,
@@ -1093,8 +1130,9 @@ class JAXSEDFit:
                     stage1_median,
                     stage_name="Stage 1 continuum/host MAP initialization",
                     attr_prefix="init_stage1",
-                    include_sed_agn_features=False,
-                    include_spectral_features=False,
+                    include_sed_agn_features=True,
+                    include_spectral_features=True,
+                    include_spectral_lines=False,
                 )
 
         svi_result, median = self._run_map_svi(
@@ -1124,6 +1162,7 @@ class JAXSEDFit:
                 attr_prefix="init_stage2" if staged else "init_map",
                 include_sed_agn_features=True,
                 include_spectral_features=True,
+                include_spectral_lines=True,
             )
         self.samples = {k: np.asarray(v)[None, ...] for k, v in median.items()}
         self.predictive = None
@@ -1137,6 +1176,7 @@ class JAXSEDFit:
         attr_prefix: str,
         include_sed_agn_features: bool,
         include_spectral_features: bool,
+        include_spectral_lines: bool,
     ):
         """Plot and retain one MAP solution using the standard SED figure.
 
@@ -1149,6 +1189,7 @@ class JAXSEDFit:
             include_components=True,
             include_sed_agn_features=include_sed_agn_features,
             include_spectral_features=include_spectral_features,
+            include_spectral_lines=include_spectral_lines,
         )
         pred = Predictive(
             model,
@@ -2356,6 +2397,14 @@ class JAXSEDFit:
         plotter.f_bc_model = component("jqf_balmer_model")
         jqf_line_site = "jqf_line_model_aperture" if "jqf_line_model_aperture" in pred else "jqf_line_model"
         plotter.f_line_model = component(jqf_line_site)
+        jqf_broad_line_site = "jqf_line_model_broad"
+        jqf_narrow_line_site = (
+            "jqf_line_model_narrow_aperture"
+            if "jqf_line_model_narrow_aperture" in pred
+            else "jqf_line_model_narrow"
+        )
+        broad_line_component = component(jqf_broad_line_site)
+        narrow_line_component = component(jqf_narrow_line_site)
         spec_torus_component = component("spec_torus_model_fluxes")
         custom_components = {
             "jaxsedfit_torus": spec_torus_component if keep_component(spec_torus_component) else obs_sed_component("torus_obs_sed"),
@@ -2416,7 +2465,22 @@ class JAXSEDFit:
                 if band is not None:
                     pred_bands[name] = band
         plotter.f_poly_model = np.ones_like(wave_rest)
-        plotter.custom_line_components = {}
+        plotter.custom_line_components = {
+            name: model
+            for name, model in (
+                ("broad_lines", broad_line_component),
+                ("narrow_lines", narrow_line_component),
+            )
+            if keep_component(model)
+        }
+        for name, site in (
+            ("broad_lines", jqf_broad_line_site),
+            ("narrow_lines", jqf_narrow_line_site),
+        ):
+            if name in plotter.custom_line_components:
+                band = band_from_draws(spectrum_draws(site))
+                if band is not None:
+                    pred_bands[name] = band
         plotter.pred_bands = pred_bands
         plotter.use_psf_phot = False
         plotter.psf_model = np.array([])

@@ -28,6 +28,7 @@ from .spectral_custom_components import (
     normalize_custom_line_components,
 )
 from .spectral_config import ErrorScaledHalfNormalPrior
+from .velocity import shift_and_broaden_lnlam as _fourier_shift_and_broaden_lnlam
 
 C_KMS = 299792.458
 LINE_COVERAGE_NSIGMA = 3.0
@@ -1329,8 +1330,17 @@ def _shift_and_broaden_single_spectrum_lnlam(lnwave, spectrum, v_kms, sigma_kms,
     convolution_method : object
         convolution_method value.
     """
-    sigma_ln = jnp.maximum(sigma_kms / C_KMS, 1e-5)
+    if str(convolution_method).lower() == "fft":
+        return _fourier_shift_and_broaden_lnlam(
+            lnwave,
+            spectrum,
+            v_kms,
+            sigma_kms,
+        )
+    if str(convolution_method).lower() != "direct":
+        raise ValueError("convolution method must be 'fft' or 'direct'.")
 
+    sigma_ln = jnp.maximum(sigma_kms / C_KMS, 1e-5)
     wave = jnp.exp(lnwave)
     shift_ln = v_kms / C_KMS
     shifted_wave = jnp.exp(lnwave - shift_ln)
@@ -1341,7 +1351,7 @@ def _shift_and_broaden_single_spectrum_lnlam(lnwave, spectrum, v_kms, sigma_kms,
         sigma_ln,
         radius_mult=5.0,
         max_half=512,
-        method=convolution_method,
+        method="direct",
     )
 
 
@@ -1455,13 +1465,25 @@ def _convolve_velocity_space(lnwave, signal, sigma_ln, radius_mult=5.0, max_half
     """
     lnwave = jnp.asarray(lnwave, dtype=jnp.float64)
     signal = jnp.asarray(signal, dtype=jnp.float64)
+    method = str(method).lower()
+    if method == "fft":
+        return _fourier_shift_and_broaden_lnlam(
+            lnwave,
+            signal,
+            0.0,
+            C_KMS * jnp.asarray(sigma_ln, dtype=jnp.float64),
+            max_pad=max_half,
+        )
+    if method != "direct":
+        raise ValueError("convolution method must be 'fft' or 'direct'.")
+
     n = lnwave.shape[0]
     ln_uniform = jnp.linspace(lnwave[0], lnwave[-1], n)
     dln = jnp.maximum((lnwave[-1] - lnwave[0]) / jnp.maximum(n - 1, 1), 1e-8)
     sigma_pix = jnp.maximum(sigma_ln, 1e-8) / dln
     kern = _gaussian_kernel1d(sigma_pix, radius_mult=radius_mult, max_half=max_half)
     signal_uniform = jnp.interp(ln_uniform, lnwave, signal, left=0.0, right=0.0)
-    convolved_uniform = _convolve_same_length(signal_uniform, kern, method=method)
+    convolved_uniform = _convolve_same_length(signal_uniform, kern, method="direct")
     return jnp.interp(lnwave, ln_uniform, convolved_uniform, left=0.0, right=0.0)
 
 
@@ -1506,12 +1528,23 @@ def _fe_template_component(
     convolution_method : object
         convolution_method value.
     """
-    # Enforce physically non-negative Fe pseudo-continuum and model broadening in velocity space.
+    # Enforce a physically non-negative Fe pseudo-continuum and do not first
+    # resample a native template onto a potentially very coarse target grid.
+    # In particular, the global SED grid spans several decades in wavelength;
+    # Fourier-shifting the handful of optical samples on that grid produces
+    # nonphysical ringing far outside the template support.
     if template_on_wave is None:
-        flux_template = jnp.maximum(flux_template, 0.0)
-        template_on_wave = jnp.interp(wave, wave_template, flux_template, left=0.0, right=0.0)
+        convolution_wave = jnp.asarray(wave_template, dtype=jnp.float64)
+        convolution_flux = jnp.maximum(
+            jnp.asarray(flux_template, dtype=jnp.float64),
+            0.0,
+        )
     else:
-        template_on_wave = jnp.maximum(jnp.asarray(template_on_wave, dtype=jnp.float64), 0.0)
+        convolution_wave = jnp.asarray(wave, dtype=jnp.float64)
+        convolution_flux = jnp.maximum(
+            jnp.asarray(template_on_wave, dtype=jnp.float64),
+            0.0,
+        )
 
     min_fwhm_kms = 1.01 * base_fwhm_kms
     transition_kms = jnp.maximum(0.01 * base_fwhm_kms, 10.0)
@@ -1519,13 +1552,23 @@ def _fe_template_component(
     fwhm_eff = jnp.sqrt(fwhm_total**2 - base_fwhm_kms**2)
     sigma_kms = fwhm_eff / (2.0 * jnp.sqrt(2.0 * jnp.log(2.0)))
     v_kms = C_KMS * shift_frac
-    lnwave = jnp.log(wave)
-    model = _shift_and_broaden_single_spectrum_lnlam(
-        lnwave,
-        template_on_wave,
+    model_on_convolution_grid = _shift_and_broaden_single_spectrum_lnlam(
+        jnp.log(convolution_wave),
+        convolution_flux,
         v_kms,
         sigma_kms,
         convolution_method=convolution_method,
+    )
+    model = (
+        model_on_convolution_grid
+        if template_on_wave is not None
+        else jnp.interp(
+            wave,
+            convolution_wave,
+            model_on_convolution_grid,
+            left=0.0,
+            right=0.0,
+        )
     )
     return norm * model
 
@@ -1593,9 +1636,28 @@ def _balmer_continuum_jax(
     convolution_method : object
         convolution_method value.
     """
-    if balmer_static_terms is None:
-        bb, tau_shape, below_edge = _balmer_static_terms_jax(wave, balmer_te=balmer_te)
+    method = str(convolution_method).lower()
+    use_local_grid = balmer_static_terms is None and method == "fft"
+    if use_local_grid:
+        # Resolve the physical 3646-A edge independently of the target SED
+        # sampling. The fixed bounds cover the UV continuum and even very broad
+        # redward edge leakage without convolving over the full IR SED grid.
+        n_local = max(int(wave.shape[0]), 2048)
+        local_min = jnp.maximum(jnp.minimum(wave[0], 2500.0), 100.0)
+        local_max = jnp.maximum(jnp.minimum(wave[-1], 8000.0), 4500.0)
+        convolution_wave = jnp.geomspace(local_min, local_max, n_local)
+        bb, tau_shape, below_edge = _balmer_static_terms_jax(
+            convolution_wave,
+            balmer_te=balmer_te,
+        )
+    elif balmer_static_terms is None:
+        convolution_wave = wave
+        bb, tau_shape, below_edge = _balmer_static_terms_jax(
+            convolution_wave,
+            balmer_te=balmer_te,
+        )
     else:
+        convolution_wave = wave
         bb, tau_shape, below_edge = balmer_static_terms
         bb = jnp.asarray(bb, dtype=jnp.float64)
         tau_shape = jnp.asarray(tau_shape, dtype=jnp.float64)
@@ -1605,9 +1667,17 @@ def _balmer_continuum_jax(
     bc = balmer_norm * (1.0 - jnp.exp(-tau)) * bb
     bc = jnp.where(below_edge, bc, 0.0)
 
-    lnwave = jnp.log(wave)
-    sigma_ln = jnp.maximum(balmer_vel / C_KMS, 1e-5)
+    lnwave = jnp.log(convolution_wave)
+    sigma_ln = balmer_vel / C_KMS
     bc_conv = _convolve_velocity_space(lnwave, bc, sigma_ln, method=convolution_method)
+    if use_local_grid:
+        return jnp.interp(
+            wave,
+            convolution_wave,
+            bc_conv,
+            left=0.0,
+            right=0.0,
+        )
     return bc_conv
 
 

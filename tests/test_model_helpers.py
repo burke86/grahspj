@@ -2069,7 +2069,9 @@ def test_jaxqsofit_spectrum_resolution_host_basis_uses_host_kinematics(monkeypat
     ).get_trace(context, include_components=False)
 
     assert context.spec_host_basis_jax is not None
-    assert sorted(broadened_grids) == [len(cfg.spectroscopy.wave_obs), cfg.galaxy.n_wave]
+    # Host kinematics belong on the dense spectral basis only. Applying them a
+    # second time on the coarse global SED grid produces Fourier ringing.
+    assert broadened_grids == [len(cfg.spectroscopy.wave_obs)]
     assert np.asarray(tr["pred_spectrum_fluxes"]["value"]).shape == (3,)
     diagnostic_names = {
         "sed_chi2",
@@ -2280,8 +2282,8 @@ def test_jaxsedfit_jaxqsofit_backend_uses_nested_tied_line_config(monkeypatch):
             jaxqsofit=JaxQSOFitConfig(
                 use_spectral_lines=True,
                 use_tied_lines=True,
-                use_spectral_feii=False,
-                use_spectral_balmer_continuum=False,
+                use_spectral_feii=True,
+                use_spectral_balmer_continuum=True,
                 line_flux_scale_mjy=0.1,
             ),
         ),
@@ -2314,7 +2316,7 @@ def test_jaxsedfit_jaxqsofit_backend_uses_nested_tied_line_config(monkeypatch):
     }
     tr = trace(substitute(seed(grahsp_photometric_model, jax.random.PRNGKey(2)), data=params)).get_trace(
         context,
-        include_components=False,
+        include_components=True,
     )
 
     assert "jqf_line_dmu_group" in tr
@@ -2327,6 +2329,27 @@ def test_jaxsedfit_jaxqsofit_backend_uses_nested_tied_line_config(monkeypatch):
     assert np.asarray(tr["jqf_extrapolated_broad_photometry"]["value"]).shape == (1,)
     assert np.asarray(tr["jqf_extrapolated_narrow_photometry"]["value"]).shape == (1,)
     assert np.asarray(tr["pred_spectrum_fluxes"]["value"]).shape == (3,)
+    for site in (
+        "agn_lines_local_obs_wave",
+        "agn_lines_local_obs_sed",
+        "total_agn_lines_local_obs_wave",
+        "total_agn_lines_local_obs_sed",
+    ):
+        assert site in tr
+    expected_agn_obs = (
+        np.asarray(tr["disk_obs_sed"]["value"])
+        + np.asarray(tr["torus_obs_sed"]["value"])
+        + np.asarray(tr["jqf_feii_obs_sed"]["value"])
+        + np.asarray(tr["jqf_balmer_obs_sed"]["value"])
+        + np.asarray(tr["jqf_line_obs_sed"]["value"])
+    )
+    np.testing.assert_allclose(
+        np.asarray(tr["agn_obs_sed"]["value"]),
+        expected_agn_obs,
+        rtol=2.0e-10,
+        atol=1.0e-40,
+    )
+    assert np.any(np.asarray(tr["agn_lines_local_obs_sed"]["value"]) > 0.0)
     assert context.jaxqsofit_prior_config["standardize_active_priors"] is True
     standardized_amplitudes = [
         name
@@ -2446,6 +2469,7 @@ def test_plot_jaxqsofit_spectrum_adapts_joint_predictive(monkeypatch):
         captured["host"] = np.asarray(self.host)
         captured["line"] = np.asarray(self.f_line_model)
         captured["custom_components"] = dict(self.custom_components)
+        captured["custom_line_components"] = dict(self.custom_line_components)
         captured["pred_bands"] = self.pred_bands
         captured["kwargs"] = kwargs
         self.fig = "fig"
@@ -2473,6 +2497,9 @@ def test_plot_jaxqsofit_spectrum_adapts_joint_predictive(monkeypatch):
         "jqf_continuum_model": np.asarray([[1.0, 2.0, 3.0], [1.0, 2.0, 3.0]]),
         "jqf_line_model": np.asarray([[0.1, 0.2, 0.3], [0.3, 0.4, 0.5]]),
         "jqf_line_model_aperture": np.asarray([[1.0, 1.0, 1.0], [3.0, 3.0, 3.0]]),
+        "jqf_line_model_broad": np.asarray([[0.6, 0.7, 0.8], [0.8, 0.9, 1.0]]),
+        "jqf_line_model_narrow": np.asarray([[0.4, 0.3, 0.2], [0.6, 0.5, 0.4]]),
+        "jqf_line_model_narrow_aperture": np.asarray([[0.2, 0.15, 0.1], [0.3, 0.25, 0.2]]),
         "spectrum_scale_fit": np.asarray([2.0, 2.0]),
         "spectrum_host_capture_fraction": np.asarray([0.5, 0.5]),
         "host_obs_sed": np.asarray([[1.0e-20, 2.0e-20, 3.0e-20], [1.0e-20, 2.0e-20, 3.0e-20]]),
@@ -2502,10 +2529,29 @@ def test_plot_jaxqsofit_spectrum_adapts_joint_predictive(monkeypatch):
     assert "jaxsedfit_host_dust" in captured["custom_components"]
     assert "jaxsedfit_sed_lines" not in captured["custom_components"]
     assert "jaxsedfit_nebular_lines" not in captured["custom_components"]
+    assert set(captured["custom_line_components"]) == {"broad_lines", "narrow_lines"}
+    np.testing.assert_allclose(
+        captured["custom_line_components"]["broad_lines"],
+        JAXSEDFit._mjy_to_rest_flambda_1e17(
+            np.asarray([4000.0, 5000.0, 6000.0]),
+            2.0 * np.asarray([0.7, 0.8, 0.9]),
+            1.0,
+        ),
+    )
+    np.testing.assert_allclose(
+        captured["custom_line_components"]["narrow_lines"],
+        JAXSEDFit._mjy_to_rest_flambda_1e17(
+            np.asarray([4000.0, 5000.0, 6000.0]),
+            2.0 * np.asarray([0.25, 0.2, 0.15]),
+            1.0,
+        ),
+    )
     assert "total_model" in captured["pred_bands"]
     assert "host" in captured["pred_bands"]
     assert "PL" in captured["pred_bands"]
     assert "jaxsedfit_torus" in captured["pred_bands"]
+    assert "broad_lines" in captured["pred_bands"]
+    assert "narrow_lines" in captured["pred_bands"]
     lo, hi = captured["pred_bands"]["total_model"]
     assert lo.shape == captured["wave"].shape
     assert hi.shape == captured["wave"].shape

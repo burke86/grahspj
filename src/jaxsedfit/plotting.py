@@ -15,7 +15,8 @@ _COMPONENT_STYLE = [
     (("dust_obs_sed",), "Host dust", "#b7791f", 1.5),
     (("disk_obs_sed",), "AGN disk", "#c05621", 1.2),
     (("torus_obs_sed",), "Torus", "#805ad5", 1.2),
-    (("line_bl_obs_sed", "line_nl_obs_sed", "line_liner_obs_sed", "feii_obs_sed"), "AGN lines", "#d53f8c", 1.0),
+    (("line_bl_obs_sed", "line_nl_obs_sed", "line_liner_obs_sed"), "AGN lines", "#d53f8c", 1.0),
+    (("feii_obs_sed",), "Fe II", "#38a169", 1.0),
     (("balmer_obs_sed",), "Balmer cont.", "#dd6b20", 1.0),
     (("agn_obs_sed",), "AGN total", "#718096", 1.4),
     (("total_obs_sed",), "Model total", "#000000", 2.0),
@@ -590,6 +591,10 @@ def plot_fit_sed(
         for keys, label, color, lw in _COMPONENT_STYLE:
             if label == "AGN lines" and bridged_agn_lines is not None:
                 component_draws = bridged_agn_lines
+            elif label == "Fe II" and "jqf_feii_obs_sed" in pred:
+                component_draws = np.asarray(pred["jqf_feii_obs_sed"], dtype=float)
+            elif label == "Balmer cont." and "jqf_balmer_obs_sed" in pred:
+                component_draws = np.asarray(pred["jqf_balmer_obs_sed"], dtype=float)
             elif any(key in pred for key in keys):
                 component_draws = _site_sum(pred, keys)
             else:
@@ -646,6 +651,28 @@ def plot_fit_sed(
                 ax_sed.plot(obs_wave, component, color=color, lw=max(lw, 2.2), ls="-.", alpha=0.95, label=plot_label, zorder=4)
             else:
                 ax_sed.plot(obs_wave, component, color=color, lw=max(lw, 2.0), ls=":", alpha=0.95, label=plot_label, zorder=3)
+
+        if "agn_lines_local_obs_wave" in pred and "agn_lines_local_obs_sed" in pred:
+            local_wave = _median_site(pred, "agn_lines_local_obs_wave")
+            local_lines = _to_display_flux_density(
+                local_wave,
+                _median_site(pred, "agn_lines_local_obs_sed"),
+            )
+            finite_wave = np.asarray(local_wave, dtype=float)
+            finite_lines = np.asarray(local_lines, dtype=float)
+            finite = np.isfinite(finite_wave) & np.isfinite(finite_lines) & (finite_lines > 0.0)
+            if np.any(finite):
+                plotted_components.append(local_lines)
+                ax_sed.plot(
+                    np.where(np.isfinite(finite_wave), finite_wave, np.nan),
+                    np.where(finite, finite_lines, np.nan),
+                    color="#d53f8c",
+                    lw=1.4,
+                    ls=":",
+                    alpha=0.95,
+                    label="_nolegend_",
+                    zorder=3,
+                )
 
         if "nebular_lines_local_obs_wave" in pred and "nebular_lines_local_obs_sed" in pred and "nebular_continuum_obs_sed" in pred:
             continuum_obs = _median_site(pred, "nebular_continuum_obs_sed")
@@ -725,6 +752,27 @@ def plot_fit_sed(
                 ax_sed.plot(
                     local_wave_plot,
                     local_total_plot,
+                    color="#000000",
+                    lw=1.5,
+                    alpha=0.8,
+                    label="_nolegend_",
+                    zorder=2,
+                )
+
+        if "total_agn_lines_local_obs_wave" in pred and "total_agn_lines_local_obs_sed" in pred:
+            local_wave = _median_site(pred, "total_agn_lines_local_obs_wave")
+            local_total = _to_display_flux_density(
+                local_wave,
+                _median_site(pred, "total_agn_lines_local_obs_sed"),
+            )
+            finite_wave = np.asarray(local_wave, dtype=float)
+            finite_total = np.asarray(local_total, dtype=float)
+            finite = np.isfinite(finite_wave) & np.isfinite(finite_total) & (finite_total > 0.0)
+            if np.any(finite):
+                plotted_components.append(local_total)
+                ax_sed.plot(
+                    np.where(np.isfinite(finite_wave), finite_wave, np.nan),
+                    np.where(finite, finite_total, np.nan),
                     color="#000000",
                     lw=1.5,
                     alpha=0.8,
