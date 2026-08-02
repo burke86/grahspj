@@ -37,7 +37,12 @@ def _minimal_config() -> FitConfig:
 def test_load_from_samples_roundtrip(monkeypatch, tmp_path):
     monkeypatch.setattr("jaxsedfit.core.build_model_context", lambda config: SimpleNamespace(mw_ebv=0.03))
     fitter = JAXSEDFit(_minimal_config())
-    fitter.samples = {"log_stellar_mass": np.array([10.0, 10.2, 10.4])}
+    fitter.samples = {
+        "log_stellar_mass": np.array([10.0, 10.2, 10.4]),
+        "sed_reduced_chi2": np.array([0.9, 1.0, 1.1]),
+        "spectroscopy_reduced_chi2": np.array([1.1, 1.2, 1.3]),
+        "joint_reduced_chi2": np.array([1.0, 1.1, 1.2]),
+    }
     fitter.predictive = {"pred_fluxes": np.array([[0.9], [1.0], [1.1]])}
 
     saved_path = fitter.save(tmp_path)
@@ -52,6 +57,15 @@ def test_load_from_samples_roundtrip(monkeypatch, tmp_path):
     assert loaded.config.observation.redshift == 0.2
     assert loaded._loaded_posterior_path == saved_path
     np.testing.assert_allclose(loaded.samples["log_stellar_mass"], [10.0, 10.2, 10.4])
+    np.testing.assert_allclose(loaded.samples["sed_reduced_chi2"], [0.9, 1.0, 1.1])
+    np.testing.assert_allclose(
+        loaded.samples["spectroscopy_reduced_chi2"],
+        [1.1, 1.2, 1.3],
+    )
+    np.testing.assert_allclose(
+        loaded.samples["joint_reduced_chi2"],
+        [1.0, 1.1, 1.2],
+    )
     np.testing.assert_allclose(loaded.predictive["pred_fluxes"], [[0.9], [1.0], [1.1]])
 
 

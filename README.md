@@ -128,6 +128,30 @@ plot_fit_sed(fitter, output_path="sed_fit.png")
 
 This uses the lazy predictive path, so the component spectra are generated when you first call `plot_sed()` or `plot_fit_sed(...)`.
 
+## Fit-quality chi-square diagnostics
+
+Joint fits expose scalar posterior sites for the photometric SED, spectrum, and
+combined data:
+
+- `sed_chi2`, `sed_n_eff`, and `sed_reduced_chi2`
+- `spectroscopy_chi2`, `spectroscopy_n_eff`, and `spectroscopy_reduced_chi2`
+- `joint_chi2`, `joint_n_eff`, and `joint_reduced_chi2`
+
+For each posterior draw, the SED diagnostic sums squared standardized residuals
+over detected photometric bands. Censored upper limits remain part of the
+likelihood but are excluded from chi-square. The spectral diagnostic uses valid
+masked pixels and the same measurement-plus-systematics variance as the
+spectral likelihood. When the spectral likelihood is weighted by resolution
+elements, both its chi-square and effective count receive the same weight. The
+joint values are the sums of the available SED and spectral contributions.
+
+Here `reduced_chi2 = chi2 / n_eff`. JAXSEDFit deliberately does not subtract
+the number of sampled parameters: the parameters are shared by the Bayesian
+SED and spectral model, and the usual `N - p` count is not meaningful for the
+sparse photometry. These values are standardized-residual goodness-of-fit
+diagnostics, not `-2 log(likelihood)`; the configured likelihood can be
+Student-t and can include censored observations.
+
 
 ## License and provenance
 
