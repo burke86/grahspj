@@ -636,6 +636,43 @@ def test_host_capture_scales_energy_balance_dust(monkeypatch):
     assert np.all(_site(tr, "pred_fluxes") < uncaptured_host_source)
 
 
+def test_psf_photometry_without_scale_infers_independent_host_capture(monkeypatch):
+    _patch_ssp(monkeypatch)
+    cfg = _cfg(fit_agn=False)
+    cfg.photometry = PhotometryData(
+        filter_names=["f1", "f2", "f3"],
+        fluxes=[1.0, 1.0, 1.0],
+        errors=[0.1, 0.1, 0.1],
+        photometry_method=["psf", "psf", "profile"],
+    )
+    cfg.filters = FilterSet(
+        curves=[
+            FilterCurve(
+                name=name,
+                wave=[1500.0, 2000.0, 2500.0],
+                transmission=[0.0, 1.0, 0.0],
+            )
+            for name in ("f1", "f2", "f3")
+        ]
+    )
+    cfg.likelihood.use_host_capture_model = True
+    context = build_model_context(cfg)
+    tr = _deterministic_trace(
+        context,
+        {
+            "missing_psf_host_capture_fraction": np.array([0.35, 0.65]),
+            "log_ebv_gal": _log_positive(0.5),
+            "dust_alpha": np.array(2.0),
+        },
+    )
+
+    assert "missing_psf_host_capture_fraction" in tr
+    np.testing.assert_allclose(
+        _site(tr, "host_capture_fraction_fluxes"),
+        [0.35, 0.65, 1.0],
+    )
+
+
 def test_agn_off_mode_has_zero_agn_components_and_no_total_leak(monkeypatch):
     _patch_ssp(monkeypatch)
     context = build_model_context(_cfg(fit_agn=False))
@@ -1074,6 +1111,8 @@ def test_predict_supports_lightweight_and_median_modes(monkeypatch):
     median = fitter.predict_median(kind="photometry")
 
     assert "pred_fluxes" in phot
+    assert "variable_agn_fluxes" in phot
+    assert "constant_agn_fluxes" in phot
     assert {
         "sed_chi2",
         "sed_n_eff",

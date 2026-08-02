@@ -3663,6 +3663,14 @@ def evaluate_photometric_state(
     has_phot_spatial_scale = bool(
         np.any(np.isfinite(context.effective_spatial_scale_arcsec) & (np.asarray(context.effective_spatial_scale_arcsec, dtype=float) > 0.0))
     )
+    missing_partial_photometry_scale = (
+        ~np.asarray(context.photometry_total_capture, dtype=bool)
+        & ~(
+            np.isfinite(context.effective_spatial_scale_arcsec)
+            & (np.asarray(context.effective_spatial_scale_arcsec, dtype=float) > 0.0)
+        )
+    )
+    has_missing_partial_photometry_scale = bool(np.any(missing_partial_photometry_scale))
     has_spec_spatial_scale = bool(
         spectroscopy_enabled
         and np.any(np.isfinite(context.spec_effective_spatial_scale_arcsec) & (np.asarray(context.spec_effective_spatial_scale_arcsec, dtype=float) > 0.0))
@@ -3670,7 +3678,11 @@ def evaluate_photometric_state(
     host_capture_enabled = bool(
         fit_host
         and cfg.likelihood.use_host_capture_model
-        and (has_phot_spatial_scale or has_spec_spatial_scale)
+        and (
+            has_phot_spatial_scale
+            or has_spec_spatial_scale
+            or has_missing_partial_photometry_scale
+        )
     )
     skip_coarse_agn_line_grid = bool(
         fit_agn
@@ -4384,10 +4396,23 @@ def evaluate_photometric_state(
             jnp.exp(log_host_capture_scale_arcsec),
         )
         phot_scale_valid = jnp.isfinite(spatial_scale_arcsec) & (spatial_scale_arcsec > 0.0)
+        if has_missing_partial_photometry_scale:
+            missing_indices = np.flatnonzero(missing_partial_photometry_scale)
+            missing_psf_capture_values = numpyro.sample(
+                "missing_psf_host_capture_fraction",
+                dist.Uniform(0.0, 1.0)
+                .expand((len(missing_indices),))
+                .to_event(1),
+            )
+            missing_psf_capture = jnp.ones_like(phot_capture_raw).at[
+                jnp.asarray(missing_indices, dtype=jnp.int32)
+            ].set(missing_psf_capture_values)
+        else:
+            missing_psf_capture = jnp.ones_like(phot_capture_raw)
         host_capture_fraction = jnp.where(
             photometry_total_capture,
             1.0,
-            jnp.where(phot_scale_valid, phot_capture_raw, 1.0),
+            jnp.where(phot_scale_valid, phot_capture_raw, missing_psf_capture),
         )
         spec_capture_raw = _host_capture_fraction(
             spec_spatial_scale_arcsec,
@@ -4438,6 +4463,8 @@ def evaluate_photometric_state(
     spec_n_eff = jnp.asarray(0.0, dtype=jnp.float64)
     spec_reduced_chi2 = jnp.asarray(jnp.nan, dtype=jnp.float64)
     jqf_line_photometry = jnp.zeros_like(pred_fluxes)
+    jqf_broad_photometry = jnp.zeros_like(pred_fluxes)
+    jqf_narrow_photometry = jnp.zeros_like(pred_fluxes)
     jqf_feii_photometry = jnp.zeros_like(pred_fluxes)
     jqf_extrapolated_feii_photometry = jnp.zeros_like(pred_fluxes)
     jqf_balmer_photometry = jnp.zeros_like(pred_fluxes)
@@ -5097,6 +5124,20 @@ def evaluate_photometric_state(
 
     if jaxqsofit_backend_enabled and include_spectral_features:
         agn_fluxes = agn_fluxes + jqf_photometry_adjustment
+        constant_agn_fluxes = (
+            jqf_narrow_photometry + jqf_extrapolated_narrow_photometry
+        )
+    else:
+        constant_agn_fluxes = (
+            captured_agn_narrow_line_fluxes
+            if host_capture_enabled
+            else agn_narrow_line_fluxes_total
+        )
+    variable_agn_fluxes = jnp.where(
+        need_agn_fluxes,
+        agn_fluxes - constant_agn_fluxes,
+        jnp.zeros_like(pred_fluxes),
+    )
     logl, sed_chi2_diagnostics = photometric_loglike(
         pred_fluxes=pred_fluxes,
         obs_fluxes=obs_fluxes,
@@ -5142,8 +5183,12 @@ def evaluate_photometric_state(
     if add_likelihood:
         numpyro.factor("photometry_loglike", logl)
     numpyro.deterministic("pred_fluxes", pred_fluxes)
+    numpyro.deterministic("variable_agn_fluxes", variable_agn_fluxes)
+    numpyro.deterministic("constant_agn_fluxes", constant_agn_fluxes)
     numpyro.deterministic("pred_spectrum_fluxes", spec_model_fluxes)
     numpyro.deterministic("jqf_line_photometry", jqf_line_photometry)
+    numpyro.deterministic("jqf_broad_photometry", jqf_broad_photometry)
+    numpyro.deterministic("jqf_narrow_photometry", jqf_narrow_photometry)
     numpyro.deterministic("jqf_feii_photometry", jqf_feii_photometry)
     numpyro.deterministic("jqf_extrapolated_feii_photometry", jqf_extrapolated_feii_photometry)
     numpyro.deterministic("jqf_balmer_photometry", jqf_balmer_photometry)
@@ -5359,6 +5404,7 @@ def grahsp_photometric_model(
     include_sed_agn_features: bool = True,
     include_spectral_features: bool = True,
     include_spectral_lines: bool = True,
+    force_component_fluxes: bool = False,
 ):
     """NumPyro model for one jaxsedfit photometric fit or predictive expansion.
 
@@ -5374,6 +5420,9 @@ def grahsp_photometric_model(
         include_spectral_features value.
     include_spectral_lines : object
         include_spectral_lines value.
+    force_component_fluxes : object
+        Compute component band fluxes even when the likelihood does not need
+        them. Used by lightweight posterior prediction products.
     """
     return evaluate_photometric_state(
         context,
@@ -5381,6 +5430,7 @@ def grahsp_photometric_model(
         include_sed_agn_features=include_sed_agn_features,
         include_spectral_features=include_spectral_features,
         include_spectral_lines=include_spectral_lines,
+        force_component_fluxes=force_component_fluxes,
         add_likelihood=True,
         return_state=False,
     )

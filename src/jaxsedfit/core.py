@@ -632,6 +632,8 @@ class JAXSEDFit:
         """
         photometry_sites = [
             "pred_fluxes",
+            "variable_agn_fluxes",
+            "constant_agn_fluxes",
             "pred_spectrum_fluxes",
             "spec_continuum_model_fluxes",
             "spec_host_model_fluxes",
@@ -669,6 +671,8 @@ class JAXSEDFit:
             "jqf_balmer_model",
             "jqf_total_model",
             "jqf_line_photometry",
+            "jqf_broad_photometry",
+            "jqf_narrow_photometry",
             "jqf_feii_photometry",
             "jqf_extrapolated_feii_photometry",
             "jqf_balmer_photometry",
@@ -867,7 +871,11 @@ class JAXSEDFit:
         draw_samples = self._subset_prediction_samples(samples, max_draws)
         rng_key = jax.random.PRNGKey(self.config.inference.seed + 17)
         pred = Predictive(
-            lambda: grahsp_photometric_model(self.context, include_components=include_components),
+            lambda: grahsp_photometric_model(
+                self.context,
+                include_components=include_components,
+                force_component_fluxes=(kind == "photometry"),
+            ),
             posterior_samples=draw_samples,
             return_sites=self._predictive_return_sites(kind),
         )(rng_key)

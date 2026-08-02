@@ -2326,9 +2326,21 @@ def test_jaxsedfit_jaxqsofit_backend_uses_nested_tied_line_config(monkeypatch):
     assert "jqf_broad_to_sed_broad_line_prior" not in tr
     assert "jqf_narrow_to_sed_narrow_line_prior" not in tr
     assert np.asarray(tr["jqf_line_photometry"]["value"]).shape == (1,)
+    assert np.asarray(tr["jqf_broad_photometry"]["value"]).shape == (1,)
+    assert np.asarray(tr["jqf_narrow_photometry"]["value"]).shape == (1,)
     assert np.asarray(tr["jqf_extrapolated_broad_photometry"]["value"]).shape == (1,)
     assert np.asarray(tr["jqf_extrapolated_narrow_photometry"]["value"]).shape == (1,)
     assert np.asarray(tr["pred_spectrum_fluxes"]["value"]).shape == (3,)
+    np.testing.assert_allclose(
+        np.asarray(tr["constant_agn_fluxes"]["value"]),
+        np.asarray(tr["jqf_narrow_photometry"]["value"])
+        + np.asarray(tr["jqf_extrapolated_narrow_photometry"]["value"]),
+    )
+    np.testing.assert_allclose(
+        np.asarray(tr["variable_agn_fluxes"]["value"])
+        + np.asarray(tr["constant_agn_fluxes"]["value"]),
+        np.asarray(tr["agn_fluxes"]["value"]),
+    )
     for site in (
         "agn_lines_local_obs_wave",
         "agn_lines_local_obs_sed",
