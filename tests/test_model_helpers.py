@@ -2483,6 +2483,10 @@ def test_plot_jaxqsofit_spectrum_adapts_joint_predictive(monkeypatch):
         captured["custom_components"] = dict(self.custom_components)
         captured["custom_line_components"] = dict(self.custom_line_components)
         captured["pred_bands"] = self.pred_bands
+        captured["use_psf_phot"] = self.use_psf_phot
+        captured["psf_bands"] = list(self.psf_bands)
+        captured["psf_mags"] = np.asarray(self.psf_mags)
+        captured["psf_mag_errs"] = np.asarray(self.psf_mag_errs)
         captured["kwargs"] = kwargs
         self.fig = "fig"
 
@@ -2492,8 +2496,15 @@ def test_plot_jaxqsofit_spectrum_adapts_joint_predictive(monkeypatch):
     fitter.config = SimpleNamespace(
         observation=SimpleNamespace(object_id="obj", redshift=1.0),
         spectroscopy_config=SimpleNamespace(backend="jaxqsofit"),
+        photometry=SimpleNamespace(
+            filter_names=["W1", "r_sdss", "u_sdss", "g_sdss", "z_sdss", "i_sdss"],
+            photometry_method=["catalog", "psf", "psf", "catalog", "psf", "psf"],
+        ),
     )
     fitter.context = SimpleNamespace(
+        fluxes=np.asarray([1.0, 2.0, 4.0, 3.0, 5.0, -1.0]),
+        errors=np.asarray([0.1, 0.2, 0.8, 0.3, 0.5, 0.1]),
+        data_mask=np.asarray([True, True, True, True, False, True]),
         spec_wave_obs=np.asarray([4000.0, 5000.0, 6000.0]),
         spec_fluxes=np.asarray([1.0, 2.0, 3.0]),
         spec_errors=np.asarray([0.1, 0.2, 0.3]),
@@ -2564,6 +2575,16 @@ def test_plot_jaxqsofit_spectrum_adapts_joint_predictive(monkeypatch):
     assert "jaxsedfit_torus" in captured["pred_bands"]
     assert "broad_lines" in captured["pred_bands"]
     assert "narrow_lines" in captured["pred_bands"]
+    assert captured["use_psf_phot"] is True
+    assert captured["psf_bands"] == ["u", "r"]
+    np.testing.assert_allclose(
+        captured["psf_mags"],
+        -2.5 * np.log10(np.asarray([4.0, 2.0]) * 1.0e-26) - 48.60,
+    )
+    np.testing.assert_allclose(
+        captured["psf_mag_errs"],
+        (2.5 / np.log(10.0)) * np.asarray([0.8 / 4.0, 0.2 / 2.0]),
+    )
     lo, hi = captured["pred_bands"]["total_model"]
     assert lo.shape == captured["wave"].shape
     assert hi.shape == captured["wave"].shape
@@ -2577,6 +2598,52 @@ def test_plot_jaxqsofit_spectrum_adapts_joint_predictive(monkeypatch):
     assert "jaxsedfit_sed_lines" not in captured["custom_components"]
     assert np.nanmax(captured["custom_components"]["jaxsedfit_nebular_lines"]) > 0.0
     assert "jaxsedfit_nebular_lines" in captured["pred_bands"]
+
+
+def test_spectral_plot_psf_photometry_rejects_duplicate_band():
+    fitter = JAXSEDFit.__new__(JAXSEDFit)
+    fitter.config = SimpleNamespace(
+        photometry=SimpleNamespace(
+            filter_names=["u_sdss", "u_sdss"],
+            photometry_method=["psf", "psf"],
+        )
+    )
+    fitter.context = SimpleNamespace(
+        fluxes=np.asarray([1.0, 2.0]),
+        errors=np.asarray([0.1, 0.2]),
+        data_mask=np.asarray([True, True]),
+    )
+
+    with pytest.raises(ValueError, match="at most one PSF measurement.*u_sdss"):
+        fitter._sdss_psf_photometry_for_spectral_plot()
+
+
+def test_spectral_plot_photometry_helpers_return_observed_and_synthetic_points():
+    from jaxsedfit.spectral_plotting import (
+        observed_photometry_for_plot,
+        synthetic_photometry_for_plot,
+    )
+
+    plotter = SimpleNamespace(
+        use_psf_phot=True,
+        psf_bands=list("ugriz"),
+        psf_mags=np.asarray([20.0, 19.5, 19.0, 18.5, 18.0]),
+        psf_mag_errs=np.full(5, 0.1),
+        z=0.5,
+        wave=np.linspace(1800.0, 8000.0, 5000),
+        model_total=np.full(5000, 10.0),
+    )
+
+    observed = observed_photometry_for_plot(plotter)
+    synthetic = synthetic_photometry_for_plot(plotter)
+
+    assert observed is not None
+    assert synthetic is not None
+    for points in (observed, synthetic):
+        assert all(np.asarray(values).shape == (5,) for values in points)
+        assert all(np.all(np.isfinite(values)) for values in points)
+    assert np.all(observed[2] > 0.0)
+    assert np.all(synthetic[2] > 0.0)
 
 
 def test_config_rejects_invalid_redshift_pdf():

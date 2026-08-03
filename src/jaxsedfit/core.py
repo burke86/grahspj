@@ -2324,6 +2324,69 @@ class JAXSEDFit:
         flux_lambda_obs = np.asarray(flux_lambda_obs, dtype=float)
         return flux_lambda_obs * 1.0e3 * (1.0 + float(redshift)) / 1.0e-17
 
+    def _sdss_psf_photometry_for_spectral_plot(
+        self,
+    ) -> tuple[list[str], np.ndarray, np.ndarray]:
+        """Return valid SDSS PSF photometry in the plotting API's AB units.
+
+        The model context stores the photometry used by the fit in mJy,
+        including any configured Milky Way dereddening.  The shared
+        PyQSOFit-style spectral plotter instead accepts ``psf_mags`` and
+        ``psf_mag_errs``, so convert only native ugriz PSF measurements and
+        retain their canonical band order.
+        """
+        photometry = getattr(self.config, "photometry", None)
+        if photometry is None or getattr(photometry, "photometry_method", None) is None:
+            return [], np.asarray([], dtype=float), np.asarray([], dtype=float)
+
+        filter_names = np.asarray(getattr(photometry, "filter_names", []), dtype=object)
+        methods = np.asarray(photometry.photometry_method, dtype=object)
+        fluxes = np.asarray(getattr(self.context, "fluxes", []), dtype=float)
+        errors = np.asarray(getattr(self.context, "errors", []), dtype=float)
+        data_mask = np.asarray(
+            getattr(self.context, "data_mask", np.ones(fluxes.shape, dtype=bool)),
+            dtype=bool,
+        )
+        sizes = {filter_names.size, methods.size, fluxes.size, errors.size, data_mask.size}
+        if len(sizes) != 1:
+            raise ValueError("Photometry metadata and model-context arrays must have matching lengths.")
+
+        bands: list[str] = []
+        magnitudes: list[float] = []
+        magnitude_errors: list[float] = []
+        for band in ("u", "g", "r", "i", "z"):
+            matches = np.flatnonzero(
+                (filter_names == f"{band}_sdss")
+                & (methods == "psf")
+            )
+            if matches.size > 1:
+                raise ValueError(
+                    f"Expected at most one PSF measurement for filter '{band}_sdss'; "
+                    f"found {matches.size}."
+                )
+            if matches.size == 0:
+                continue
+            idx = int(matches[0])
+            flux_mjy = float(fluxes[idx])
+            error_mjy = float(errors[idx])
+            if (
+                not data_mask[idx]
+                or not np.isfinite(flux_mjy)
+                or not np.isfinite(error_mjy)
+                or flux_mjy <= 0.0
+                or error_mjy <= 0.0
+            ):
+                continue
+            bands.append(band)
+            magnitudes.append(-2.5 * np.log10(flux_mjy * 1.0e-26) - 48.60)
+            magnitude_errors.append((2.5 / np.log(10.0)) * error_mjy / flux_mjy)
+
+        return (
+            bands,
+            np.asarray(magnitudes, dtype=float),
+            np.asarray(magnitude_errors, dtype=float),
+        )
+
     def plot_jaxqsofit_spectrum(
         self,
         spectrum_index: int = 0,
@@ -2646,7 +2709,11 @@ class JAXSEDFit:
                 if band is not None:
                     pred_bands[name] = band
         plotter.pred_bands = pred_bands
-        plotter.use_psf_phot = False
+        psf_bands, psf_mags, psf_mag_errs = self._sdss_psf_photometry_for_spectral_plot()
+        plotter.use_psf_phot = bool(psf_bands)
+        plotter.psf_bands = psf_bands
+        plotter.psf_mags = psf_mags
+        plotter.psf_mag_errs = psf_mag_errs
         plotter.psf_model = np.array([])
         plotter.host_psf = np.array([])
         plotter.scale_psf = 1.0
