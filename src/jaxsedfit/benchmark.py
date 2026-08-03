@@ -558,7 +558,7 @@ def _reduced_chi2_for_fit(fitter: Any) -> float:
         att_unc = 10 ** log_unc_frac / tf
         sys_variance = sys_variance + (att_unc * pred_fluxes) ** 2
     if cfg.lyman_break_uncertainty:
-        ly_unc = np.where(filter_wavelength / (1.0 + redshift) < 150.0, 1.0e8, 0.0)
+        ly_unc = np.where(filter_wavelength / (1.0 + redshift) < 1500.0, 1.0e8, 0.0)
         sys_variance = sys_variance + (ly_unc * pred_fluxes) ** 2
     total_variance = np.nan_to_num(obs_variance + sys_variance + var_variance, nan=1.0e30, posinf=1.0e30, neginf=1.0e30)
     sigma = np.sqrt(np.clip(total_variance, 1e-30, 1.0e60))
