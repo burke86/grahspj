@@ -1741,6 +1741,11 @@ class JAXSEDFit:
             return
 
         if isinstance(value, list):
+            compact = cls._compact_scalar_sequence(value)
+            if compact is not None:
+                ds = parent.create_dataset(name, data=compact, compression="gzip", shuffle=True)
+                ds.attrs["node_type"] = "list_array"
+                return
             grp = parent.create_group(name)
             grp.attrs["node_type"] = "list"
             for idx, item in enumerate(value):
@@ -1748,6 +1753,11 @@ class JAXSEDFit:
             return
 
         if isinstance(value, tuple):
+            compact = cls._compact_scalar_sequence(value)
+            if compact is not None:
+                ds = parent.create_dataset(name, data=compact, compression="gzip", shuffle=True)
+                ds.attrs["node_type"] = "tuple_array"
+                return
             grp = parent.create_group(name)
             grp.attrs["node_type"] = "tuple"
             for idx, item in enumerate(value):
@@ -1786,6 +1796,16 @@ class JAXSEDFit:
 
         raise TypeError(f"Unsupported value type in posterior bundle: {type(value)!r}")
 
+    @staticmethod
+    def _compact_scalar_sequence(value):
+        """Return a storable array for a homogeneous scalar sequence."""
+        if not value or not all(
+            isinstance(item, (bool, int, float, np.bool_, np.integer, np.floating))
+            for item in value
+        ):
+            return None
+        return np.asarray(value)
+
     @classmethod
     def _read_hdf5_node(cls, parent, name):
         """Read one recursively serialized Python value from an HDF5 group.
@@ -1811,6 +1831,10 @@ class JAXSEDFit:
                 return int(value)
             if node_type == "scalar_float":
                 return float(value)
+            if node_type == "list_array":
+                return np.asarray(value).tolist()
+            if node_type == "tuple_array":
+                return tuple(np.asarray(value).tolist())
             return np.asarray(value)
 
         node_type = node.attrs.get("node_type", "")
@@ -1869,7 +1893,10 @@ class JAXSEDFit:
         return resolved / f"{object_id}_samples{cls._POSTERIOR_BUNDLE_SUFFIX}"
 
     def save(self, output_dir: str | Path | None = None, *, _state: _FitState | None = None) -> Path:
-        """Serialize config, posterior samples, and predictive outputs to HDF5.
+        """Serialize config and resume-ready posterior samples to HDF5.
+
+        Deterministic model evaluations and cached predictive products are not
+        persisted. They are regenerated on demand after :meth:`load`.
 
         Parameters
         ----------
@@ -1885,18 +1912,14 @@ class JAXSEDFit:
         """
         state = self._ensure_fit_state() if _state is None else _state
         out = self._posterior_bundle_path(output_dir, self.config.observation.object_id)
-        samples = {k: np.asarray(v) for k, v in (state.samples or {}).items()}
-        predictive = {k: np.asarray(v) for k, v in self.predict(_state=state).items()} if state.samples is not None else {}
+        samples = self._resume_samples(state)
 
         with h5py.File(out, "w") as h5f:
-            h5f.attrs["posterior_bundle_format"] = "jaxsedfit_samples_meta_v1"
+            h5f.attrs["posterior_bundle_format"] = "jaxsedfit_samples_meta_v2"
             self._write_hdf5_node(h5f, "config", serialize_config(self.config))
-            self._write_hdf5_node(h5f, "summary", self.summary(_state=state) if state.samples is not None else None)
             self._write_hdf5_node(h5f, "mw_ebv", self.context.mw_ebv)
             samples_grp = h5f.create_group("samples")
             self._write_array_group(samples_grp, samples)
-            predictive_grp = h5f.create_group("predictive")
-            self._write_array_group(predictive_grp, predictive)
             if isinstance(state.nuts_result, dict):
                 diagnostics = {
                     key: state.nuts_result[key]
@@ -1912,6 +1935,45 @@ class JAXSEDFit:
                 self._write_hdf5_node(h5f, "nuts_diagnostics", diagnostics)
         state.path = out
         return out
+
+    def _resume_samples(self, state: _FitState) -> dict[str, np.ndarray]:
+        """Keep only posterior sites required to reproduce model predictions."""
+        samples = {k: np.asarray(v) for k, v in (state.samples or {}).items()}
+        if not samples:
+            return samples
+        latent_names = None
+        require_all_latents = False
+        if isinstance(state.nuts_result, Mapping):
+            mcmc = state.nuts_result.get("mcmc")
+            latent_values = getattr(getattr(mcmc, "last_state", None), "z", None)
+            if isinstance(latent_values, Mapping):
+                require_all_latents = True
+                latent_names = set(latent_values)
+                for physical_name, auxiliary_name in state.nuts_result.get(
+                    "reparameterized_sites", {}
+                ).items():
+                    latent_names.discard(auxiliary_name)
+                    latent_names.add(physical_name)
+        if latent_names is None:
+            try:
+                traced_names = set(
+                    _trace_latent_values(self._model, self.config.inference.seed)
+                )
+            except Exception as exc:
+                raise RuntimeError(
+                    "Could not identify active model sites for a resume-ready "
+                    "posterior bundle."
+                ) from exc
+            # Legacy bundles may already be missing a latent site. Retain every
+            # available latent while still discarding deterministics.
+            latent_names = traced_names.intersection(samples)
+        missing = latent_names.difference(samples)
+        if require_all_latents and missing:
+            raise ValueError(
+                "Posterior samples lack active model sites required for resume: "
+                f"{sorted(missing)}"
+            )
+        return {name: samples[name] for name in samples if name in latent_names}
 
     @staticmethod
     def _resolve_posterior_path(path: str | Path | None = None) -> Path:
@@ -1953,8 +2015,9 @@ class JAXSEDFit:
         Returns
         -------
         JAXSEDFit
-            A configured fitter with posterior samples and cached predictive
-            outputs restored from disk.
+            A configured fitter with posterior samples restored from disk.
+            Predictive products from legacy bundles are restored when present;
+            compact bundles regenerate them on demand.
         """
         posterior_path = cls._resolve_posterior_path(path)
         with h5py.File(posterior_path, "r") as h5f:
@@ -1965,7 +2028,11 @@ class JAXSEDFit:
                 "summary": cls._read_hdf5_node(h5f, "summary") if "summary" in h5f else None,
                 "mw_ebv": cls._read_hdf5_node(h5f, "mw_ebv") if "mw_ebv" in h5f else None,
                 "samples": {k: np.asarray(h5f["samples"][k][()]) for k in h5f["samples"].keys()},
-                "predictive": {k: np.asarray(h5f["predictive"][k][()]) for k in h5f.get("predictive", {}).keys()},
+                "predictive": (
+                    {k: np.asarray(h5f["predictive"][k][()]) for k in h5f["predictive"].keys()}
+                    if "predictive" in h5f
+                    else None
+                ),
                 "nuts_diagnostics": (
                     cls._read_hdf5_node(h5f, "nuts_diagnostics")
                     if "nuts_diagnostics" in h5f
