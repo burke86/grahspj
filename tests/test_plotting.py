@@ -212,7 +212,12 @@ def test_plot_fit_sed_uses_likelihood_photometry_and_saved_chi2():
         if container.get_label() == "Observed photometry"
     )
     np.testing.assert_allclose(observed.lines[0].get_ydata(), context.fluxes)
-    assert any("2.00" in text.get_text() for text in fig.axes[1].texts)
+    chi2_labels = [
+        text for text in fig.axes[1].texts if r"\chi^2_\nu" in text.get_text()
+    ]
+    assert len(chi2_labels) == 1
+    assert chi2_labels[0].get_text() == r"$\chi^2_\nu = 2.00$"
+    assert chi2_labels[0].get_color() == "black"
 
 
 def test_median_effective_variance_matches_nebular_and_lyman_terms():

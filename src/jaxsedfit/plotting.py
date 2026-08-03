@@ -880,11 +880,11 @@ def plot_fit_sed(
             ax_resid.text(
                 0.98,
                 0.05,
-                rf"$\mathrm{{median}}(\chi^2/N_\mathrm{{eff}}) = {reduced_chi2:.2f}$",
+                rf"$\chi^2_\nu = {reduced_chi2:.2f}$",
                 transform=ax_resid.transAxes,
                 va="bottom",
                 ha="right",
-                color="#c53030",
+                color="black",
                 fontsize=10,
             )
 
