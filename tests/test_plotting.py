@@ -453,6 +453,10 @@ def test_grouped_trace_samples_hide_internal_reparameterization_sites():
 def test_jaxsedfit_corner_and_trace_methods_delegate(monkeypatch):
     import jaxsedfit.plotting as plotting
 
+    missing = object()
+    package = sys.modules["jaxsedfit"]
+    original_core_module = sys.modules.get("jaxsedfit.core", missing)
+    original_core_attribute = getattr(package, "core", missing)
     model = types.ModuleType("jaxsedfit.model")
     model.grahsp_photometric_model = lambda *args, **kwargs: None
     preload = types.ModuleType("jaxsedfit.preload")
@@ -502,4 +506,12 @@ def test_jaxsedfit_corner_and_trace_methods_delegate(monkeypatch):
         assert calls["trace"][0] is fitter
         assert calls["trace"][1]["output_path"] == "result_trace.pdf"
     finally:
-        sys.modules.pop("jaxsedfit.core", None)
+        if original_core_module is missing:
+            sys.modules.pop("jaxsedfit.core", None)
+        else:
+            sys.modules["jaxsedfit.core"] = original_core_module
+        if original_core_attribute is missing:
+            if hasattr(package, "core"):
+                delattr(package, "core")
+        else:
+            package.core = original_core_attribute

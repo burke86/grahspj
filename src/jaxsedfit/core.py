@@ -622,6 +622,101 @@ class JAXSEDFit:
         return {key: np.expand_dims(np.asarray(value), axis=0) for key, value in median_mapping(samples).items()}
 
     @staticmethod
+    def _prediction_draw_count(samples: Mapping[str, Any]) -> int:
+        """Return the common leading posterior-draw dimension."""
+        draw_counts = {
+            int(arr.shape[0])
+            for value in samples.values()
+            if (arr := np.asarray(value)).ndim > 0
+        }
+        if not draw_counts:
+            raise ValueError("Posterior samples do not contain a draw dimension.")
+        if len(draw_counts) != 1:
+            raise ValueError(
+                "Posterior sample sites must share one leading draw dimension; "
+                f"received {sorted(draw_counts)}."
+            )
+        draw_count = draw_counts.pop()
+        if draw_count < 1:
+            raise ValueError("Posterior samples contain no draws.")
+        return draw_count
+
+    def _stream_predictive_draws(
+        self,
+        samples: Mapping[str, Any],
+        *,
+        kind: str,
+        rng_key: Any,
+    ) -> dict[str, np.ndarray]:
+        """Evaluate posterior predictions one draw at a time.
+
+        NumPyro maps a multi-draw ``Predictive`` call through a compiled
+        ``lax.map``.  Large joint SED and spectrum models can require many
+        gigabytes while compiling and executing that map even when its output
+        is comparatively small.  Single-draw calls reuse one compiled model
+        executable and bound peak memory to one model evaluation plus the
+        returned host arrays.
+        """
+        draw_count = self._prediction_draw_count(samples)
+        rng_keys = (
+            (rng_key,)
+            if draw_count == 1
+            else tuple(jax.random.split(rng_key, draw_count))
+        )
+        include_components = kind == "plot"
+        model = lambda: grahsp_photometric_model(
+            self.context,
+            include_components=include_components,
+            force_component_fluxes=(kind == "photometry"),
+        )
+        return_sites = self._predictive_return_sites(kind)
+        streamed: dict[str, np.ndarray] | None = None
+
+        for draw_index, draw_rng_key in enumerate(rng_keys):
+            one_draw = {
+                key: (
+                    value
+                    if (arr := np.asarray(value)).ndim == 0
+                    else arr[draw_index : draw_index + 1]
+                )
+                for key, value in samples.items()
+            }
+            prediction = Predictive(
+                model,
+                posterior_samples=one_draw,
+                return_sites=return_sites,
+            )(draw_rng_key)
+            host_prediction = {key: np.asarray(value) for key, value in prediction.items()}
+
+            if streamed is None:
+                streamed = {}
+                for key, value in host_prediction.items():
+                    if value.ndim == 0 or value.shape[0] != 1:
+                        raise ValueError(
+                            "Single-draw Predictive outputs must have a leading "
+                            f"dimension of one; site {key!r} has shape {value.shape}."
+                        )
+                    streamed[key] = np.empty(
+                        (draw_count,) + value.shape[1:],
+                        dtype=value.dtype,
+                    )
+            elif set(host_prediction) != set(streamed):
+                raise ValueError(
+                    "Predictive site names changed between posterior draws."
+                )
+
+            for key, value in host_prediction.items():
+                expected_shape = (1,) + streamed[key].shape[1:]
+                if value.shape != expected_shape:
+                    raise ValueError(
+                        f"Predictive site {key!r} changed shape between draws: "
+                        f"expected {expected_shape}, received {value.shape}."
+                    )
+                streamed[key][draw_index] = value[0]
+
+        return {} if streamed is None else streamed
+
+    @staticmethod
     def _predictive_return_sites(kind: str) -> list[str]:
         """Return deterministic sites needed for a prediction product set.
 
@@ -867,19 +962,13 @@ class JAXSEDFit:
         cache_key = f"{kind}:{'all' if max_draws is None else int(max_draws)}"
         if cache and posterior_samples is None and state.predictive_cache is not None and cache_key in state.predictive_cache:
             return dict(state.predictive_cache[cache_key])
-        include_components = kind == "plot"
         draw_samples = self._subset_prediction_samples(samples, max_draws)
         rng_key = jax.random.PRNGKey(self.config.inference.seed + 17)
-        pred = Predictive(
-            lambda: grahsp_photometric_model(
-                self.context,
-                include_components=include_components,
-                force_component_fluxes=(kind == "photometry"),
-            ),
-            posterior_samples=draw_samples,
-            return_sites=self._predictive_return_sites(kind),
-        )(rng_key)
-        predictive = {k: np.asarray(v) for k, v in pred.items()}
+        predictive = self._stream_predictive_draws(
+            draw_samples,
+            kind=kind,
+            rng_key=rng_key,
+        )
         if cache and posterior_samples is None:
             if state.predictive_cache is None:
                 state.predictive_cache = {}
