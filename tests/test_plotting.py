@@ -10,6 +10,7 @@ from jaxsedfit.plotting import (
     _COMPONENT_STYLE,
     _bridged_jaxsedfit_agn_lines,
     _grouped_trace_samples,
+    _median_effective_variance,
     plot_corner,
     plot_fit_sed,
     plot_trace,
@@ -170,6 +171,93 @@ def test_plot_fit_sed_can_disable_band_annotations(tmp_path):
     assert fig is not None
     assert output.exists()
     assert output.stat().st_size > 0
+
+
+def test_plot_fit_sed_uses_likelihood_photometry_and_saved_chi2():
+    class _Filter:
+        def __init__(self, wavelength):
+            self.effective_wavelength = wavelength
+
+    config = types.SimpleNamespace(
+        observation=types.SimpleNamespace(object_id="dereddened"),
+        photometry=types.SimpleNamespace(
+            fluxes=[1.0, 1.0],
+            errors=[0.1, 0.1],
+            filter_names=["f1", "f2"],
+        ),
+    )
+    context = types.SimpleNamespace(
+        filters=[_Filter(2000.0), _Filter(4000.0)],
+        fluxes=np.array([2.0, 4.0]),
+        errors=np.array([0.2, 0.4]),
+        upper_limits=np.array([False, False]),
+    )
+    prediction = {
+        "obs_wave": np.array([[1000.0, 2000.0, 4000.0]]),
+        "pred_fluxes": np.array([[1.5, 3.5], [1.7, 3.7]]),
+        "total_obs_sed": np.array([[1.0, 2.0, 1.0]]),
+        "sed_reduced_chi2": np.array([1.0, 3.0]),
+    }
+    fitter = types.SimpleNamespace(
+        config=config,
+        context=context,
+        predict=lambda posterior="latest": prediction,
+    )
+
+    fig = plot_fit_sed(fitter)
+
+    observed = next(
+        container
+        for container in fig.axes[0].containers
+        if container.get_label() == "Observed photometry"
+    )
+    np.testing.assert_allclose(observed.lines[0].get_ydata(), context.fluxes)
+    chi2_labels = [
+        text for text in fig.axes[1].texts if r"\chi^2_\nu" in text.get_text()
+    ]
+    assert len(chi2_labels) == 1
+    assert chi2_labels[0].get_text() == r"$\chi^2_\nu = 2.00$"
+    assert chi2_labels[0].get_color() == "black"
+
+
+def test_median_effective_variance_matches_nebular_and_lyman_terms():
+    filters = [
+        types.SimpleNamespace(effective_wavelength=1000.0),
+        types.SimpleNamespace(effective_wavelength=2000.0),
+    ]
+    likelihood = types.SimpleNamespace(
+        systematics_width=0.0,
+        agn_systematics_width=0.0,
+        variability_uncertainty=False,
+        attenuation_model_uncertainty=False,
+        lyman_break_uncertainty=True,
+        local_nebular_line_uncertainty_dex=0.1,
+    )
+    fitter = types.SimpleNamespace(
+        config=types.SimpleNamespace(
+            likelihood=likelihood,
+            photometry=types.SimpleNamespace(errors=[0.1, 0.1], fluxes=[1.0, 1.0]),
+        ),
+        context=types.SimpleNamespace(
+            filters=filters,
+            errors=np.array([0.1, 0.1]),
+            fluxes=np.array([1.0, 1.0]),
+        ),
+    )
+    pred = {
+        "pred_fluxes": np.array([[1.0, 1.0]]),
+        "nebular_lines_fluxes": np.array([[2.0, 2.0]]),
+        "redshift_fit": np.array([0.0]),
+    }
+
+    variance = _median_effective_variance(fitter, pred)
+
+    nebular_sigma = np.expm1(np.log(10.0) * 0.1)
+    nebular_variance = (2.0 * nebular_sigma) ** 2
+    np.testing.assert_allclose(
+        variance,
+        [0.1**2 + nebular_variance + 1.0e16, 0.1**2 + nebular_variance],
+    )
 
 
 def test_plot_corner_writes_output_and_calls_corner(tmp_path, monkeypatch):
@@ -370,6 +458,10 @@ def test_grouped_trace_samples_hide_internal_reparameterization_sites():
 def test_jaxsedfit_corner_and_trace_methods_delegate(monkeypatch):
     import jaxsedfit.plotting as plotting
 
+    missing = object()
+    package = sys.modules["jaxsedfit"]
+    original_core_module = sys.modules.get("jaxsedfit.core", missing)
+    original_core_attribute = getattr(package, "core", missing)
     model = types.ModuleType("jaxsedfit.model")
     model.grahsp_photometric_model = lambda *args, **kwargs: None
     preload = types.ModuleType("jaxsedfit.preload")
@@ -419,4 +511,12 @@ def test_jaxsedfit_corner_and_trace_methods_delegate(monkeypatch):
         assert calls["trace"][0] is fitter
         assert calls["trace"][1]["output_path"] == "result_trace.pdf"
     finally:
-        sys.modules.pop("jaxsedfit.core", None)
+        if original_core_module is missing:
+            sys.modules.pop("jaxsedfit.core", None)
+        else:
+            sys.modules["jaxsedfit.core"] = original_core_module
+        if original_core_attribute is missing:
+            if hasattr(package, "core"):
+                delattr(package, "core")
+        else:
+            package.core = original_core_attribute

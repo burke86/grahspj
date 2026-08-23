@@ -124,6 +124,54 @@ def test_fit_quality_metadata_includes_reduced_chi2_and_divergence_fraction():
     assert metadata["divergence_fraction"] == pytest.approx(0.5)
 
 
+def test_fit_quality_metadata_uses_likelihood_lyman_threshold():
+    fitter = type(
+        "_LymanThresholdFitter",
+        (),
+        {
+            "nuts_result": None,
+            "predict": lambda self: {
+                "pred_fluxes": np.array([[100.0]]),
+                "agn_fluxes": np.zeros((1, 1)),
+                "redshift_fit": np.array([0.0]),
+            },
+            "context": type(
+                "_Ctx",
+                (),
+                {
+                    "fluxes": np.array([1.0]),
+                    "errors": np.array([0.1]),
+                    "upper_limits": np.array([False]),
+                    "filters": [
+                        type("_Filter", (), {"effective_wavelength": 1400.0})()
+                    ],
+                },
+            )(),
+            "config": type(
+                "_Cfg",
+                (),
+                {
+                    "likelihood": type(
+                        "_Likelihood",
+                        (),
+                        {
+                            "systematics_width": 0.0,
+                            "agn_systematics_width": 0.0,
+                            "variability_uncertainty": False,
+                            "attenuation_model_uncertainty": False,
+                            "lyman_break_uncertainty": True,
+                        },
+                    )()
+                },
+            )(),
+        },
+    )()
+
+    metadata = fit_quality_metadata(fitter)
+
+    assert metadata["reduced_chi2"] < 1.0e-10
+
+
 def test_fit_quality_metadata_uses_saved_transition_diagnostics_without_mcmc():
     fitter = type(
         "_LoadedDiagnosticFitter",

@@ -49,8 +49,10 @@ class PhotometryData:
     ``model``, ``cmodel``, and ``petrosian`` are treated as total-flux
     measurements and receive the full host model. ``psf``, ``aperture``, and
     ``fiber`` measurements use their PSF/aperture scale to estimate captured
-    host light. ``catalog``, ``unknown``, and missing labels retain the legacy
-    scale-based behavior when a spatial scale is supplied. Use ``psf`` for point-source/PSF-like
+    host light. If a non-total measurement has no usable spatial scale, the
+    model infers an independent host-capture fraction on ``[0, 1]`` instead of
+    assuming total host capture. ``catalog``, ``unknown``, and missing labels
+    use the same scale-based behavior when a spatial scale is supplied. Use ``psf`` for point-source/PSF-like
     measurements, ``profile`` for profile-fit photometry, ``aperture`` for
     explicit fixed apertures, ``auto`` for Kron/AUTO-like photometry,
     ``model``/``cmodel``/``petrosian`` for extended-source model measurements,

@@ -623,6 +623,101 @@ class JAXSEDFit:
         return {key: np.expand_dims(np.asarray(value), axis=0) for key, value in median_mapping(samples).items()}
 
     @staticmethod
+    def _prediction_draw_count(samples: Mapping[str, Any]) -> int:
+        """Return the common leading posterior-draw dimension."""
+        draw_counts = {
+            int(arr.shape[0])
+            for value in samples.values()
+            if (arr := np.asarray(value)).ndim > 0
+        }
+        if not draw_counts:
+            raise ValueError("Posterior samples do not contain a draw dimension.")
+        if len(draw_counts) != 1:
+            raise ValueError(
+                "Posterior sample sites must share one leading draw dimension; "
+                f"received {sorted(draw_counts)}."
+            )
+        draw_count = draw_counts.pop()
+        if draw_count < 1:
+            raise ValueError("Posterior samples contain no draws.")
+        return draw_count
+
+    def _stream_predictive_draws(
+        self,
+        samples: Mapping[str, Any],
+        *,
+        kind: str,
+        rng_key: Any,
+    ) -> dict[str, np.ndarray]:
+        """Evaluate posterior predictions one draw at a time.
+
+        NumPyro maps a multi-draw ``Predictive`` call through a compiled
+        ``lax.map``.  Large joint SED and spectrum models can require many
+        gigabytes while compiling and executing that map even when its output
+        is comparatively small.  Single-draw calls reuse one compiled model
+        executable and bound peak memory to one model evaluation plus the
+        returned host arrays.
+        """
+        draw_count = self._prediction_draw_count(samples)
+        rng_keys = (
+            (rng_key,)
+            if draw_count == 1
+            else tuple(jax.random.split(rng_key, draw_count))
+        )
+        include_components = kind == "plot"
+        model = lambda: grahsp_photometric_model(
+            self.context,
+            include_components=include_components,
+            force_component_fluxes=(kind == "photometry"),
+        )
+        return_sites = self._predictive_return_sites(kind)
+        streamed: dict[str, np.ndarray] | None = None
+
+        for draw_index, draw_rng_key in enumerate(rng_keys):
+            one_draw = {
+                key: (
+                    value
+                    if (arr := np.asarray(value)).ndim == 0
+                    else arr[draw_index : draw_index + 1]
+                )
+                for key, value in samples.items()
+            }
+            prediction = Predictive(
+                model,
+                posterior_samples=one_draw,
+                return_sites=return_sites,
+            )(draw_rng_key)
+            host_prediction = {key: np.asarray(value) for key, value in prediction.items()}
+
+            if streamed is None:
+                streamed = {}
+                for key, value in host_prediction.items():
+                    if value.ndim == 0 or value.shape[0] != 1:
+                        raise ValueError(
+                            "Single-draw Predictive outputs must have a leading "
+                            f"dimension of one; site {key!r} has shape {value.shape}."
+                        )
+                    streamed[key] = np.empty(
+                        (draw_count,) + value.shape[1:],
+                        dtype=value.dtype,
+                    )
+            elif set(host_prediction) != set(streamed):
+                raise ValueError(
+                    "Predictive site names changed between posterior draws."
+                )
+
+            for key, value in host_prediction.items():
+                expected_shape = (1,) + streamed[key].shape[1:]
+                if value.shape != expected_shape:
+                    raise ValueError(
+                        f"Predictive site {key!r} changed shape between draws: "
+                        f"expected {expected_shape}, received {value.shape}."
+                    )
+                streamed[key][draw_index] = value[0]
+
+        return {} if streamed is None else streamed
+
+    @staticmethod
     def _predictive_return_sites(kind: str) -> list[str]:
         """Return deterministic sites needed for a prediction product set.
 
@@ -633,6 +728,8 @@ class JAXSEDFit:
         """
         photometry_sites = [
             "pred_fluxes",
+            "variable_agn_fluxes",
+            "constant_agn_fluxes",
             SpectralSites.MODEL_FLUX,
             SpectralSites.CONTINUUM_FLUX,
             SpectralSites.HOST_FLUX,
@@ -646,6 +743,15 @@ class JAXSEDFit:
             "spectrum_host_capture_fraction",
             "spectroscopy_loglike",
             "spectroscopy_likelihood_weight",
+            "sed_chi2",
+            "sed_n_eff",
+            "sed_reduced_chi2",
+            "spectroscopy_chi2",
+            "spectroscopy_n_eff",
+            "spectroscopy_reduced_chi2",
+            "joint_chi2",
+            "joint_n_eff",
+            "joint_reduced_chi2",
             "spectral_continuum_model",
             SpectralSites.LINE_FLUX,
             SpectralSites.LINE_APERTURE_FLUX,
@@ -856,15 +962,13 @@ class JAXSEDFit:
         cache_key = f"{kind}:{'all' if max_draws is None else int(max_draws)}"
         if cache and posterior_samples is None and state.predictive_cache is not None and cache_key in state.predictive_cache:
             return dict(state.predictive_cache[cache_key])
-        include_components = kind == "plot"
         draw_samples = self._subset_prediction_samples(samples, max_draws)
         rng_key = jax.random.PRNGKey(self.config.inference.seed + 17)
-        pred = Predictive(
-            lambda: grahsp_photometric_model(self.context, include_components=include_components),
-            posterior_samples=draw_samples,
-            return_sites=self._predictive_return_sites(kind),
-        )(rng_key)
-        predictive = {k: np.asarray(v) for k, v in pred.items()}
+        predictive = self._stream_predictive_draws(
+            draw_samples,
+            kind=kind,
+            rng_key=rng_key,
+        )
         if cache and posterior_samples is None:
             if state.predictive_cache is None:
                 state.predictive_cache = {}
@@ -1758,6 +1862,11 @@ class JAXSEDFit:
             return
 
         if isinstance(value, list):
+            compact = cls._compact_scalar_sequence(value)
+            if compact is not None:
+                ds = parent.create_dataset(name, data=compact, compression="gzip", shuffle=True)
+                ds.attrs["node_type"] = "list_array"
+                return
             grp = parent.create_group(name)
             grp.attrs["node_type"] = "list"
             for idx, item in enumerate(value):
@@ -1765,6 +1874,11 @@ class JAXSEDFit:
             return
 
         if isinstance(value, tuple):
+            compact = cls._compact_scalar_sequence(value)
+            if compact is not None:
+                ds = parent.create_dataset(name, data=compact, compression="gzip", shuffle=True)
+                ds.attrs["node_type"] = "tuple_array"
+                return
             grp = parent.create_group(name)
             grp.attrs["node_type"] = "tuple"
             for idx, item in enumerate(value):
@@ -1803,6 +1917,16 @@ class JAXSEDFit:
 
         raise TypeError(f"Unsupported value type in posterior bundle: {type(value)!r}")
 
+    @staticmethod
+    def _compact_scalar_sequence(value):
+        """Return a storable array for a homogeneous scalar sequence."""
+        if not value or not all(
+            isinstance(item, (bool, int, float, np.bool_, np.integer, np.floating))
+            for item in value
+        ):
+            return None
+        return np.asarray(value)
+
     @classmethod
     def _read_hdf5_node(cls, parent, name):
         """Read one recursively serialized Python value from an HDF5 group.
@@ -1828,6 +1952,10 @@ class JAXSEDFit:
                 return int(value)
             if node_type == "scalar_float":
                 return float(value)
+            if node_type == "list_array":
+                return np.asarray(value).tolist()
+            if node_type == "tuple_array":
+                return tuple(np.asarray(value).tolist())
             return np.asarray(value)
 
         node_type = node.attrs.get("node_type", "")
@@ -1886,7 +2014,10 @@ class JAXSEDFit:
         return resolved / f"{object_id}_samples{cls._POSTERIOR_BUNDLE_SUFFIX}"
 
     def save(self, output_dir: str | Path | None = None, *, _state: _FitState | None = None) -> Path:
-        """Serialize config, posterior samples, and predictive outputs to HDF5.
+        """Serialize config and resume-ready posterior samples to HDF5.
+
+        Deterministic model evaluations and cached predictive products are not
+        persisted. They are regenerated on demand after :meth:`load`.
 
         Parameters
         ----------
@@ -1902,18 +2033,14 @@ class JAXSEDFit:
         """
         state = self._ensure_fit_state() if _state is None else _state
         out = self._posterior_bundle_path(output_dir, self.config.observation.object_id)
-        samples = {k: np.asarray(v) for k, v in (state.samples or {}).items()}
-        predictive = {k: np.asarray(v) for k, v in self.predict(_state=state).items()} if state.samples is not None else {}
+        samples = self._resume_samples(state)
 
         with h5py.File(out, "w") as h5f:
-            h5f.attrs["posterior_bundle_format"] = "jaxsedfit_samples_meta_v1"
+            h5f.attrs["posterior_bundle_format"] = "jaxsedfit_samples_meta_v2"
             self._write_hdf5_node(h5f, "config", serialize_config(self.config))
-            self._write_hdf5_node(h5f, "summary", self.summary(_state=state) if state.samples is not None else None)
             self._write_hdf5_node(h5f, "mw_ebv", self.context.mw_ebv)
             samples_grp = h5f.create_group("samples")
             self._write_array_group(samples_grp, samples)
-            predictive_grp = h5f.create_group("predictive")
-            self._write_array_group(predictive_grp, predictive)
             if isinstance(state.nuts_result, dict):
                 diagnostics = {
                     key: state.nuts_result[key]
@@ -1929,6 +2056,45 @@ class JAXSEDFit:
                 self._write_hdf5_node(h5f, "nuts_diagnostics", diagnostics)
         state.path = out
         return out
+
+    def _resume_samples(self, state: _FitState) -> dict[str, np.ndarray]:
+        """Keep only posterior sites required to reproduce model predictions."""
+        samples = {k: np.asarray(v) for k, v in (state.samples or {}).items()}
+        if not samples:
+            return samples
+        latent_names = None
+        require_all_latents = False
+        if isinstance(state.nuts_result, Mapping):
+            mcmc = state.nuts_result.get("mcmc")
+            latent_values = getattr(getattr(mcmc, "last_state", None), "z", None)
+            if isinstance(latent_values, Mapping):
+                require_all_latents = True
+                latent_names = set(latent_values)
+                for physical_name, auxiliary_name in state.nuts_result.get(
+                    "reparameterized_sites", {}
+                ).items():
+                    latent_names.discard(auxiliary_name)
+                    latent_names.add(physical_name)
+        if latent_names is None:
+            try:
+                traced_names = set(
+                    _trace_latent_values(self._model, self.config.inference.seed)
+                )
+            except Exception as exc:
+                raise RuntimeError(
+                    "Could not identify active model sites for a resume-ready "
+                    "posterior bundle."
+                ) from exc
+            # Legacy bundles may already be missing a latent site. Retain every
+            # available latent while still discarding deterministics.
+            latent_names = traced_names.intersection(samples)
+        missing = latent_names.difference(samples)
+        if require_all_latents and missing:
+            raise ValueError(
+                "Posterior samples lack active model sites required for resume: "
+                f"{sorted(missing)}"
+            )
+        return {name: samples[name] for name in samples if name in latent_names}
 
     @staticmethod
     def _resolve_posterior_path(path: str | Path | None = None) -> Path:
@@ -1970,8 +2136,9 @@ class JAXSEDFit:
         Returns
         -------
         JAXSEDFit
-            A configured fitter with posterior samples and cached predictive
-            outputs restored from disk.
+            A configured fitter with posterior samples restored from disk.
+            Predictive products from legacy bundles are restored when present;
+            compact bundles regenerate them on demand.
         """
         posterior_path = cls._resolve_posterior_path(path)
         with h5py.File(posterior_path, "r") as h5f:
@@ -1982,7 +2149,11 @@ class JAXSEDFit:
                 "summary": cls._read_hdf5_node(h5f, "summary") if "summary" in h5f else None,
                 "mw_ebv": cls._read_hdf5_node(h5f, "mw_ebv") if "mw_ebv" in h5f else None,
                 "samples": {k: np.asarray(h5f["samples"][k][()]) for k in h5f["samples"].keys()},
-                "predictive": {k: np.asarray(h5f["predictive"][k][()]) for k in h5f.get("predictive", {}).keys()},
+                "predictive": (
+                    {k: np.asarray(h5f["predictive"][k][()]) for k in h5f["predictive"].keys()}
+                    if "predictive" in h5f
+                    else None
+                ),
                 "nuts_diagnostics": (
                     cls._read_hdf5_node(h5f, "nuts_diagnostics")
                     if "nuts_diagnostics" in h5f
@@ -2184,6 +2355,69 @@ class JAXSEDFit:
         """
         flux_lambda_obs = np.asarray(flux_lambda_obs, dtype=float)
         return flux_lambda_obs * 1.0e3 * (1.0 + float(redshift)) / 1.0e-17
+
+    def _sdss_psf_photometry_for_spectral_plot(
+        self,
+    ) -> tuple[list[str], np.ndarray, np.ndarray]:
+        """Return valid SDSS PSF photometry in the plotting API's AB units.
+
+        The model context stores the photometry used by the fit in mJy,
+        including any configured Milky Way dereddening.  The shared
+        PyQSOFit-style spectral plotter instead accepts ``psf_mags`` and
+        ``psf_mag_errs``, so convert only native ugriz PSF measurements and
+        retain their canonical band order.
+        """
+        photometry = getattr(self.config, "photometry", None)
+        if photometry is None or getattr(photometry, "photometry_method", None) is None:
+            return [], np.asarray([], dtype=float), np.asarray([], dtype=float)
+
+        filter_names = np.asarray(getattr(photometry, "filter_names", []), dtype=object)
+        methods = np.asarray(photometry.photometry_method, dtype=object)
+        fluxes = np.asarray(getattr(self.context, "fluxes", []), dtype=float)
+        errors = np.asarray(getattr(self.context, "errors", []), dtype=float)
+        data_mask = np.asarray(
+            getattr(self.context, "data_mask", np.ones(fluxes.shape, dtype=bool)),
+            dtype=bool,
+        )
+        sizes = {filter_names.size, methods.size, fluxes.size, errors.size, data_mask.size}
+        if len(sizes) != 1:
+            raise ValueError("Photometry metadata and model-context arrays must have matching lengths.")
+
+        bands: list[str] = []
+        magnitudes: list[float] = []
+        magnitude_errors: list[float] = []
+        for band in ("u", "g", "r", "i", "z"):
+            matches = np.flatnonzero(
+                (filter_names == f"{band}_sdss")
+                & (methods == "psf")
+            )
+            if matches.size > 1:
+                raise ValueError(
+                    f"Expected at most one PSF measurement for filter '{band}_sdss'; "
+                    f"found {matches.size}."
+                )
+            if matches.size == 0:
+                continue
+            idx = int(matches[0])
+            flux_mjy = float(fluxes[idx])
+            error_mjy = float(errors[idx])
+            if (
+                not data_mask[idx]
+                or not np.isfinite(flux_mjy)
+                or not np.isfinite(error_mjy)
+                or flux_mjy <= 0.0
+                or error_mjy <= 0.0
+            ):
+                continue
+            bands.append(band)
+            magnitudes.append(-2.5 * np.log10(flux_mjy * 1.0e-26) - 48.60)
+            magnitude_errors.append((2.5 / np.log(10.0)) * error_mjy / flux_mjy)
+
+        return (
+            bands,
+            np.asarray(magnitudes, dtype=float),
+            np.asarray(magnitude_errors, dtype=float),
+        )
 
     def plot_spectrum(
         self,
@@ -2505,7 +2739,11 @@ class JAXSEDFit:
                 if band is not None:
                     pred_bands[name] = band
         plotter.pred_bands = pred_bands
-        plotter.use_psf_phot = False
+        psf_bands, psf_mags, psf_mag_errs = self._sdss_psf_photometry_for_spectral_plot()
+        plotter.use_psf_phot = bool(psf_bands)
+        plotter.psf_bands = psf_bands
+        plotter.psf_mags = psf_mags
+        plotter.psf_mag_errs = psf_mag_errs
         plotter.psf_model = np.array([])
         plotter.host_psf = np.array([])
         plotter.scale_psf = 1.0

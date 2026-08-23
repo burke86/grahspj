@@ -17,6 +17,21 @@ from jaxsedfit.core import JAXSEDFit
 from jaxsedfit.results import FitResult, PredictionResult
 
 
+@pytest.fixture(autouse=True)
+def _stub_active_model_sites(monkeypatch):
+    names = {
+        "joint_reduced_chi2",
+        "log_spectrum_scale",
+        "log_stellar_mass",
+        "sed_reduced_chi2",
+        "spectroscopy_reduced_chi2",
+    }
+    monkeypatch.setattr(
+        "jaxsedfit.core._trace_latent_values",
+        lambda model, seed: {name: np.array(0.0) for name in names},
+    )
+
+
 def _minimal_config() -> FitConfig:
     return FitConfig(
         observation=Observation(object_id="roundtrip", redshift=0.2),
@@ -117,22 +132,42 @@ def test_prediction_result_labels_line_components_and_groups():
 def test_load_from_samples_roundtrip(monkeypatch, tmp_path):
     monkeypatch.setattr("jaxsedfit.core.build_model_context", lambda config: SimpleNamespace(mw_ebv=0.03))
     fitter = JAXSEDFit(_minimal_config())
-    fitter.samples = {"log_stellar_mass": np.array([10.0, 10.2, 10.4])}
+    fitter.samples = {
+        "log_stellar_mass": np.array([10.0, 10.2, 10.4]),
+        "sed_reduced_chi2": np.array([0.9, 1.0, 1.1]),
+        "spectroscopy_reduced_chi2": np.array([1.1, 1.2, 1.3]),
+        "joint_reduced_chi2": np.array([1.0, 1.1, 1.2]),
+    }
     fitter.predictive = {"pred_fluxes": np.array([[0.9], [1.0], [1.1]])}
+    monkeypatch.setattr(
+        fitter,
+        "predict",
+        lambda *args, **kwargs: pytest.fail("save must not evaluate predictions"),
+    )
 
     saved_path = fitter.save(tmp_path)
     assert saved_path.name == "roundtrip_samples.h5"
     with h5py.File(saved_path, "r") as h5f:
-        assert h5f.attrs["posterior_bundle_format"] == "jaxsedfit_samples_meta_v1"
+        assert h5f.attrs["posterior_bundle_format"] == "jaxsedfit_samples_meta_v2"
         assert "log_stellar_mass" in h5f["samples"]
-        assert "pred_fluxes" in h5f["predictive"]
+        assert "predictive" not in h5f
+        assert "summary" not in h5f
     loaded = JAXSEDFit.load(saved_path)
 
     assert loaded.config.observation.object_id == "roundtrip"
     assert loaded.config.observation.redshift == 0.2
     assert loaded._loaded_posterior_path == saved_path
     np.testing.assert_allclose(loaded.samples["log_stellar_mass"], [10.0, 10.2, 10.4])
-    np.testing.assert_allclose(loaded.predictive["pred_fluxes"], [[0.9], [1.0], [1.1]])
+    np.testing.assert_allclose(loaded.samples["sed_reduced_chi2"], [0.9, 1.0, 1.1])
+    np.testing.assert_allclose(
+        loaded.samples["spectroscopy_reduced_chi2"],
+        [1.1, 1.2, 1.3],
+    )
+    np.testing.assert_allclose(
+        loaded.samples["joint_reduced_chi2"],
+        [1.0, 1.1, 1.2],
+    )
+    assert loaded.predictive is None
 
 
 def test_nuts_geometry_diagnostics_roundtrip(monkeypatch, tmp_path):
@@ -267,7 +302,54 @@ def test_fit_result_save_uses_captured_state(monkeypatch, tmp_path):
 
     with h5py.File(saved_path, "r") as h5f:
         np.testing.assert_allclose(h5f["samples"]["log_stellar_mass"][()], [9.8, 10.0])
-        np.testing.assert_allclose(h5f["predictive"]["pred_fluxes"][()], [[1.0], [1.2]])
+        assert "predictive" not in h5f
+
+
+def test_save_keeps_only_nuts_latent_samples(monkeypatch, tmp_path):
+    monkeypatch.setattr("jaxsedfit.core.build_model_context", lambda config: SimpleNamespace(mw_ebv=0.0))
+    fitter = JAXSEDFit(_minimal_config())
+    fitter.samples = {
+        "log_stellar_mass": np.array([9.8, 10.0]),
+        "physical_scale": np.array([0.9, 1.1]),
+        "pred_spectrum_fluxes": np.ones((2, 3840)),
+    }
+    fitter.nuts_result = {
+        "mcmc": SimpleNamespace(
+            last_state=SimpleNamespace(
+                z={
+                    "log_stellar_mass": np.array(10.0),
+                    "scale_aux": np.array(1.0),
+                }
+            )
+        ),
+        "reparameterized_sites": {"physical_scale": "scale_aux"},
+    }
+
+    saved_path = fitter.save(tmp_path)
+
+    with h5py.File(saved_path, "r") as h5f:
+        assert set(h5f["samples"]) == {"log_stellar_mass", "physical_scale"}
+
+
+def test_numeric_lists_use_compact_hdf5_datasets(monkeypatch, tmp_path):
+    monkeypatch.setattr("jaxsedfit.core.build_model_context", lambda config: SimpleNamespace(mw_ebv=0.0))
+    fitter = JAXSEDFit(_minimal_config())
+    fitter.samples = {"log_stellar_mass": np.array([9.8, 10.0])}
+
+    saved_path = fitter.save(tmp_path)
+
+    with h5py.File(saved_path, "r") as h5f:
+        compact_sequences = []
+        h5f["config"].visititems(
+            lambda name, node: compact_sequences.append(name)
+            if isinstance(node, h5py.Dataset)
+            and node.attrs.get("node_type") == "list_array"
+            else None
+        )
+        assert len(compact_sequences) == 4
+    loaded = JAXSEDFit.load(saved_path)
+    assert loaded.config.photometry.fluxes == [1.0]
+    assert loaded.config.filters.curves[0].wave == [1000.0, 2000.0, 3000.0]
 
 
 def test_load_from_samples_requires_unique_posterior_file(monkeypatch, tmp_path):

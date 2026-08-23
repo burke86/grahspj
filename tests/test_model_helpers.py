@@ -1031,6 +1031,112 @@ def test_upper_limit_likelihood_uses_standard_deviation_not_variance():
     assert chi2_scaled == pytest.approx(chi2, rel=1.0e-12)
 
 
+def test_photometric_chi2_diagnostics_exclude_upper_limits_and_inactive_bands():
+    _, diagnostics = photometric_loglike(
+        pred_fluxes=np.asarray([1.2, 1.5, 30.0]),
+        obs_fluxes=np.asarray([1.0, 1.0, 2.0]),
+        obs_errors=np.asarray([0.1, 0.2, 0.3]),
+        upper_limits=np.asarray([False, True, False]),
+        data_mask=np.asarray([True, False, False]),
+        systematics_width=0.0,
+        likelihood_family="student_t",
+        student_t_df=5.0,
+        agn_component=np.zeros(3),
+        agn_bol_lum_w=1.0e38,
+        agn_nev=0.1,
+        variability_uncertainty=False,
+        attenuation_model_uncertainty=False,
+        transmitted_fraction=np.ones(3),
+        lyman_break_uncertainty=False,
+        filter_wavelength=np.asarray([5000.0, 6000.0, 7000.0]),
+        redshift=0.1,
+        return_diagnostics=True,
+    )
+
+    assert float(diagnostics["n_eff"]) == 1.0
+    assert float(diagnostics["chi2"]) == pytest.approx(4.0)
+    assert float(diagnostics["reduced_chi2"]) == pytest.approx(4.0)
+
+
+def test_photometric_chi2_diagnostics_use_complete_effective_variance():
+    pred = 10.0
+    obs = 8.0
+    obs_error = 1.0
+    agn_component = 3.0
+    transmitted_fraction = 0.5
+    nebular_component = 2.0
+    agn_nev = 0.1
+    _, diagnostics = photometric_loglike(
+        pred_fluxes=np.asarray([pred]),
+        obs_fluxes=np.asarray([obs]),
+        obs_errors=np.asarray([obs_error]),
+        upper_limits=np.asarray([False]),
+        data_mask=np.asarray([True]),
+        systematics_width=0.1,
+        agn_systematics_width=0.2,
+        likelihood_family="student_t",
+        student_t_df=5.0,
+        agn_component=np.asarray([agn_component]),
+        agn_bol_lum_w=1.0e38,
+        agn_nev=agn_nev,
+        variability_uncertainty=True,
+        attenuation_model_uncertainty=True,
+        transmitted_fraction=np.asarray([transmitted_fraction]),
+        lyman_break_uncertainty=True,
+        filter_wavelength=np.asarray([1400.0]),
+        redshift=0.0,
+        nebular_line_component=np.asarray([nebular_component]),
+        local_nebular_line_uncertainty_dex=0.1,
+        return_diagnostics=True,
+    )
+
+    variability_nev = float(_agn_variability_nev(1.0e38, agn_nev))
+    neg_log = -np.log10(transmitted_fraction + 1.0e-4)
+    attenuation_fraction = 10.0 ** min(-4.0 + 2.0 * neg_log, -1.0) / transmitted_fraction
+    nebular_fraction = np.expm1(np.log(10.0) * 0.1)
+    expected_variance = (
+        obs_error**2
+        + (0.1 * obs) ** 2
+        + (0.2 * agn_component) ** 2
+        + variability_nev * agn_component**2
+        + (attenuation_fraction * pred) ** 2
+        + (1.0e8 * pred) ** 2
+        + (nebular_fraction * nebular_component) ** 2
+    )
+    expected_chi2 = (obs - pred) ** 2 / expected_variance
+
+    assert float(diagnostics["n_eff"]) == 1.0
+    assert float(diagnostics["chi2"]) == pytest.approx(expected_chi2, rel=1.0e-12)
+    assert float(diagnostics["reduced_chi2"]) == pytest.approx(expected_chi2, rel=1.0e-12)
+
+
+def test_photometric_chi2_diagnostics_return_nan_without_detections():
+    _, diagnostics = photometric_loglike(
+        pred_fluxes=np.asarray([1.0]),
+        obs_fluxes=np.asarray([1.0]),
+        obs_errors=np.asarray([0.1]),
+        upper_limits=np.asarray([True]),
+        data_mask=np.asarray([False]),
+        systematics_width=0.0,
+        likelihood_family="student_t",
+        student_t_df=5.0,
+        agn_component=np.zeros(1),
+        agn_bol_lum_w=1.0e38,
+        agn_nev=0.1,
+        variability_uncertainty=False,
+        attenuation_model_uncertainty=False,
+        transmitted_fraction=np.ones(1),
+        lyman_break_uncertainty=False,
+        filter_wavelength=np.asarray([5000.0]),
+        redshift=0.1,
+        return_diagnostics=True,
+    )
+
+    assert float(diagnostics["n_eff"]) == 0.0
+    assert np.isnan(float(diagnostics["chi2"]))
+    assert np.isnan(float(diagnostics["reduced_chi2"]))
+
+
 def test_upper_limit_uses_configured_sampling_family():
     kwargs = dict(
         pred_fluxes=np.asarray([1.5]),
@@ -1284,6 +1390,39 @@ def test_spectroscopic_likelihood_ignores_nonfinite_masked_predictions():
     )
 
     assert logl == pytest.approx(0.0)
+
+
+def test_spectroscopic_chi2_diagnostics_use_mask_and_systematics_variance():
+    _, diagnostics = spectroscopic_log_likelihood(
+        np.asarray([1.0, 3.0, 4.0]),
+        np.asarray([2.0, 2.0, 9.0]),
+        np.asarray([1.0, 1.0, 1.0]),
+        np.asarray([True, True, False]),
+        0.5,
+        5.0,
+        return_diagnostics=True,
+    )
+    expected_chi2 = 1.0 / (1.0 + 0.5**2) + 1.0 / (1.0 + (0.5 * 3.0) ** 2)
+
+    assert float(diagnostics["n_eff"]) == 2.0
+    assert float(diagnostics["chi2"]) == pytest.approx(expected_chi2)
+    assert float(diagnostics["reduced_chi2"]) == pytest.approx(expected_chi2 / 2.0)
+
+
+def test_spectroscopic_chi2_diagnostics_return_nan_without_valid_pixels():
+    _, diagnostics = spectroscopic_log_likelihood(
+        np.asarray([np.nan]),
+        np.asarray([1.0]),
+        np.asarray([0.1]),
+        np.asarray([False]),
+        0.0,
+        5.0,
+        return_diagnostics=True,
+    )
+
+    assert float(diagnostics["n_eff"]) == 0.0
+    assert np.isnan(float(diagnostics["chi2"]))
+    assert np.isnan(float(diagnostics["reduced_chi2"]))
 
 
 def test_spectroscopic_likelihood_weight_uses_resolution_elements():
@@ -1882,12 +2021,14 @@ def test_spectral_spectrum_resolution_host_basis_uses_host_kinematics(monkeypatc
         likelihood=LikelihoodConfig(
             variability_uncertainty=False,
             fit_spectrum_scale=False,
+            spectrum_weight_mode="resolution_elements",
         ),
         spectroscopy=SpectroscopyData(
-            wave_obs=[5000.0, 5100.0, 5200.0],
+            wave_obs=[5000.0, 5001.0, 5002.0],
             fluxes=[2.0, 4.0, 5.0],
             errors=[0.1, 0.1, 0.1],
             instrument="sdss",
+            resolving_power=2000.0,
         ),
         inference=InferenceConfig(map_steps=2),
         prior_config=PriorConfig(stellar_mass=dist.Normal(8.0, 1.0e-6)),
@@ -1911,6 +2052,38 @@ def test_spectral_spectrum_resolution_host_basis_uses_host_kinematics(monkeypatc
     # second time on the coarse global SED grid produces Fourier ringing.
     assert broadened_grids == [len(cfg.spectroscopy.wave_obs)]
     assert np.asarray(tr["pred_spectrum_fluxes"]["value"]).shape == (3,)
+    diagnostic_names = {
+        "sed_chi2",
+        "sed_n_eff",
+        "sed_reduced_chi2",
+        "spectroscopy_chi2",
+        "spectroscopy_n_eff",
+        "spectroscopy_reduced_chi2",
+        "joint_chi2",
+        "joint_n_eff",
+        "joint_reduced_chi2",
+    }
+    assert diagnostic_names <= set(tr)
+    assert float(np.asarray(tr["sed_n_eff"]["value"])) == 1.0
+    spectral_weight = float(
+        np.asarray(tr["spectroscopy_likelihood_weight"]["value"])
+    )
+    assert spectral_weight < 1.0
+    expected_spectral_n_eff = spectral_weight * 3.0
+    expected_joint_n_eff = 1.0 + expected_spectral_n_eff
+    assert float(np.asarray(tr["spectroscopy_n_eff"]["value"])) == pytest.approx(
+        expected_spectral_n_eff
+    )
+    assert float(np.asarray(tr["joint_n_eff"]["value"])) == pytest.approx(
+        expected_joint_n_eff
+    )
+    assert float(np.asarray(tr["joint_chi2"]["value"])) == pytest.approx(
+        float(np.asarray(tr["sed_chi2"]["value"]))
+        + float(np.asarray(tr["spectroscopy_chi2"]["value"]))
+    )
+    assert float(np.asarray(tr["joint_reduced_chi2"]["value"])) == pytest.approx(
+        float(np.asarray(tr["joint_chi2"]["value"])) / expected_joint_n_eff
+    )
 
 
 def test_spectral_engine_keeps_nebular_width_fixed_without_nebular_prior(monkeypatch):
@@ -2110,6 +2283,12 @@ def test_jaxsedfit_spectral_engine_uses_nested_tied_line_config(monkeypatch):
     assert np.asarray(tr["spectral_extrapolated_broad_photometry"]["value"]).shape == (1,)
     assert np.asarray(tr["spectral_extrapolated_narrow_photometry"]["value"]).shape == (1,)
     assert np.asarray(tr["pred_spectrum_fluxes"]["value"]).shape == (3,)
+    assert np.all(np.asarray(tr["constant_agn_fluxes"]["value"]) >= 0.0)
+    np.testing.assert_allclose(
+        np.asarray(tr["variable_agn_fluxes"]["value"])
+        + np.asarray(tr["constant_agn_fluxes"]["value"]),
+        np.asarray(tr["agn_fluxes"]["value"]),
+    )
     for site in (
         "agn_lines_local_obs_wave",
         "agn_lines_local_obs_sed",
@@ -2225,6 +2404,13 @@ def test_spectral_tied_line_model_runs_svi_jit(monkeypatch):
     assert "log_agn_amp" in result.median
     assert np.asarray(fitter.map_result["losses"]).shape == (1,)
     assert np.isfinite(float(np.asarray(fitter.map_result["losses"])[0]))
+    diagnostics = result.predict(kind="photometry").median
+    assert float(diagnostics["sed_n_eff"]) == 1.0
+    assert float(diagnostics["spectroscopy_n_eff"]) == 3.0
+    assert float(diagnostics["joint_n_eff"]) == 4.0
+    assert np.isfinite(float(diagnostics["sed_reduced_chi2"]))
+    assert np.isfinite(float(diagnostics["spectroscopy_reduced_chi2"]))
+    assert np.isfinite(float(diagnostics["joint_reduced_chi2"]))
 
 
 def test_plot_spectrum_adapts_joint_predictive(monkeypatch):
@@ -2240,6 +2426,10 @@ def test_plot_spectrum_adapts_joint_predictive(monkeypatch):
         captured["custom_components"] = dict(self.custom_components)
         captured["custom_line_components"] = dict(self.custom_line_components)
         captured["pred_bands"] = self.pred_bands
+        captured["use_psf_phot"] = self.use_psf_phot
+        captured["psf_bands"] = list(self.psf_bands)
+        captured["psf_mags"] = np.asarray(self.psf_mags)
+        captured["psf_mag_errs"] = np.asarray(self.psf_mag_errs)
         captured["kwargs"] = kwargs
         self.fig = "fig"
 
@@ -2248,8 +2438,15 @@ def test_plot_spectrum_adapts_joint_predictive(monkeypatch):
     fitter = JAXSEDFit.__new__(JAXSEDFit)
     fitter.config = SimpleNamespace(
         observation=SimpleNamespace(object_id="obj", redshift=1.0),
+        photometry=SimpleNamespace(
+            filter_names=["W1", "r_sdss", "u_sdss", "g_sdss", "z_sdss", "i_sdss"],
+            photometry_method=["catalog", "psf", "psf", "catalog", "psf", "psf"],
+        ),
     )
     fitter.context = SimpleNamespace(
+        fluxes=np.asarray([1.0, 2.0, 4.0, 3.0, 5.0, -1.0]),
+        errors=np.asarray([0.1, 0.2, 0.8, 0.3, 0.5, 0.1]),
+        data_mask=np.asarray([True, True, True, True, False, True]),
         spec_wave_obs=np.asarray([4000.0, 5000.0, 6000.0]),
         spec_fluxes=np.asarray([1.0, 2.0, 3.0]),
         spec_errors=np.asarray([0.1, 0.2, 0.3]),
@@ -2320,6 +2517,16 @@ def test_plot_spectrum_adapts_joint_predictive(monkeypatch):
     assert "jaxsedfit_torus" in captured["pred_bands"]
     assert "broad_lines" in captured["pred_bands"]
     assert "narrow_lines" in captured["pred_bands"]
+    assert captured["use_psf_phot"] is True
+    assert captured["psf_bands"] == ["u", "r"]
+    np.testing.assert_allclose(
+        captured["psf_mags"],
+        -2.5 * np.log10(np.asarray([4.0, 2.0]) * 1.0e-26) - 48.60,
+    )
+    np.testing.assert_allclose(
+        captured["psf_mag_errs"],
+        (2.5 / np.log(10.0)) * np.asarray([0.8 / 4.0, 0.2 / 2.0]),
+    )
     lo, hi = captured["pred_bands"]["total_model"]
     assert lo.shape == captured["wave"].shape
     assert hi.shape == captured["wave"].shape
@@ -2333,6 +2540,52 @@ def test_plot_spectrum_adapts_joint_predictive(monkeypatch):
     assert "jaxsedfit_sed_lines" not in captured["custom_components"]
     assert np.nanmax(captured["custom_components"]["jaxsedfit_nebular_lines"]) > 0.0
     assert "jaxsedfit_nebular_lines" in captured["pred_bands"]
+
+
+def test_spectral_plot_psf_photometry_rejects_duplicate_band():
+    fitter = JAXSEDFit.__new__(JAXSEDFit)
+    fitter.config = SimpleNamespace(
+        photometry=SimpleNamespace(
+            filter_names=["u_sdss", "u_sdss"],
+            photometry_method=["psf", "psf"],
+        )
+    )
+    fitter.context = SimpleNamespace(
+        fluxes=np.asarray([1.0, 2.0]),
+        errors=np.asarray([0.1, 0.2]),
+        data_mask=np.asarray([True, True]),
+    )
+
+    with pytest.raises(ValueError, match="at most one PSF measurement.*u_sdss"):
+        fitter._sdss_psf_photometry_for_spectral_plot()
+
+
+def test_spectral_plot_photometry_helpers_return_observed_and_synthetic_points():
+    from jaxsedfit.spectral_plotting import (
+        observed_photometry_for_plot,
+        synthetic_photometry_for_plot,
+    )
+
+    plotter = SimpleNamespace(
+        use_psf_phot=True,
+        psf_bands=list("ugriz"),
+        psf_mags=np.asarray([20.0, 19.5, 19.0, 18.5, 18.0]),
+        psf_mag_errs=np.full(5, 0.1),
+        z=0.5,
+        wave=np.linspace(1800.0, 8000.0, 5000),
+        model_total=np.full(5000, 10.0),
+    )
+
+    observed = observed_photometry_for_plot(plotter)
+    synthetic = synthetic_photometry_for_plot(plotter)
+
+    assert observed is not None
+    assert synthetic is not None
+    for points in (observed, synthetic):
+        assert all(np.asarray(values).shape == (5,) for values in points)
+        assert all(np.all(np.isfinite(values)) for values in points)
+    assert np.all(observed[2] > 0.0)
+    assert np.all(synthetic[2] > 0.0)
 
 
 def test_config_rejects_invalid_redshift_pdf():

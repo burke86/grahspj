@@ -527,6 +527,18 @@ def _median_effective_variance(fitter, pred: dict[str, Any]) -> np.ndarray:
         else float(getattr(cfg, "agn_systematics_width", 0.0))
     )
     sys_variance = (systematics_width * obs_fluxes) ** 2 + (agn_systematics_width * agn_fluxes) ** 2
+    if "nebular_lines_fluxes" in pred:
+        nebular_lines = np.asarray(
+            _median_site(pred, "nebular_lines_fluxes"), dtype=float
+        )
+        nebular_line_uncertainty_dex = max(
+            float(getattr(cfg, "local_nebular_line_uncertainty_dex", 0.0)),
+            0.0,
+        )
+        nebular_line_sigma = np.expm1(
+            np.log(10.0) * nebular_line_uncertainty_dex
+        )
+        sys_variance = sys_variance + (nebular_line_sigma * nebular_lines) ** 2
     var_variance = np.where(bool(cfg.variability_uncertainty), agn_variability_nev * agn_fluxes**2, 0.0)
     if cfg.attenuation_model_uncertainty:
         tf = np.clip(transmitted_fraction, 1e-4, 1.0)
@@ -535,7 +547,7 @@ def _median_effective_variance(fitter, pred: dict[str, Any]) -> np.ndarray:
         att_unc = 10 ** log_unc_frac / tf
         sys_variance = sys_variance + (att_unc * pred_fluxes) ** 2
     if cfg.lyman_break_uncertainty:
-        ly_unc = np.where(filter_wavelength / (1.0 + redshift) < 150.0, 1.0e8, 0.0)
+        ly_unc = np.where(filter_wavelength / (1.0 + redshift) < 1500.0, 1.0e8, 0.0)
         sys_variance = sys_variance + (ly_unc * pred_fluxes) ** 2
     return np.nan_to_num(obs_variance + sys_variance + var_variance, nan=1.0e30, posinf=1.0e30, neginf=1.0e30)
 
@@ -571,8 +583,14 @@ def plot_fit_sed(
     x_max = max(1.0e6, float(np.nanmax(obs_wave)))
     model_flux = _median_site(pred, "pred_fluxes")
     phot_wave = np.asarray([flt.effective_wavelength for flt in fitter.context.filters], dtype=float)
-    obs_flux = np.asarray(fitter.config.photometry.fluxes, dtype=float)
-    obs_err = np.asarray(fitter.config.photometry.errors, dtype=float)
+    obs_flux = np.asarray(
+        getattr(fitter.context, "fluxes", fitter.config.photometry.fluxes),
+        dtype=float,
+    )
+    obs_err = np.asarray(
+        getattr(fitter.context, "errors", fitter.config.photometry.errors),
+        dtype=float,
+    )
     labels = list(fitter.config.photometry.filter_names)
     plotted_components: list[np.ndarray] = []
     legend_labels_seen: set[str] = set()
@@ -849,12 +867,16 @@ def plot_fit_sed(
         ax_resid.axhline(0.0, color="black", lw=1.0, ls="--")
         upper_limits = np.asarray(getattr(fitter.context, "upper_limits", np.zeros_like(obs_flux, dtype=bool)), dtype=bool)
         finite_chi2 = np.isfinite(obs_flux) & np.isfinite(model_flux) & np.isfinite(eff_sigma) & (eff_sigma > 0.0) & (~upper_limits)
-        if np.any(finite_chi2):
+        if "sed_reduced_chi2" in pred:
+            reduced_chi2 = float(
+                np.median(np.asarray(pred["sed_reduced_chi2"], dtype=float))
+            )
+        elif np.any(finite_chi2):
             chi2 = float(np.sum(((obs_flux[finite_chi2] - model_flux[finite_chi2]) / eff_sigma[finite_chi2]) ** 2))
-            # For this Bayesian SED fit, counting sampled variables as "free parameters"
-            # makes the usual dof estimate meaningless and often collapses the denominator
-            # to 1. Use chi2 per valid band as a stable visual diagnostic instead.
             reduced_chi2 = chi2 / max(1, int(np.sum(finite_chi2)))
+        else:
+            reduced_chi2 = np.nan
+        if np.isfinite(reduced_chi2):
             ax_resid.text(
                 0.98,
                 0.05,
@@ -862,7 +884,7 @@ def plot_fit_sed(
                 transform=ax_resid.transAxes,
                 va="bottom",
                 ha="right",
-                color="#c53030",
+                color="black",
                 fontsize=10,
             )
 
