@@ -170,7 +170,7 @@ from :class:`jaxsedfit.SpectroscopyData`:
 .. code-block:: python
 
    cfg.spectroscopy_list[0].aperture_diameter_arcsec = 3.0  # SDSS fiber
-   cfg.spectroscopy_config.fit_scale = True
+   cfg.likelihood.fit_spectrum_scale = True
    cfg.likelihood.use_host_capture_model = True
 
 At each spectral pixel,
@@ -187,7 +187,7 @@ At each spectral pixel,
 
 where :math:`\eta_{\rm spec}` is computed from the fiber/slit aperture or PSF
 metadata and :math:`s_{\rm spec}` is the optional gray spectral scale inferred
-when ``cfg.spectroscopy_config.fit_scale = True``. This lets the broadband
+when ``cfg.likelihood.fit_spectrum_scale = True``. This lets the broadband
 photometry and the spectrum be different aperture views of the same intrinsic
 source, rather than forcing PSF photometry, large-beam photometry, and fiber
 spectroscopy to contain the same host fraction.
@@ -332,10 +332,10 @@ continuum are controlled by :class:`jaxsedfit.AGNConfig` and AGN prior fields.
    )
 
 For ordinary broadband SED fitting, the native ``jaxsedfit`` AGN components
-provide SED-scale disk, torus, and broad/narrow line corrections. For joint
-spectroscopic fitting, prefer the ``jaxqsofit`` backend for spectral Fe II,
-Balmer continuum, and emission-line structure, while keeping the broadband
-AGN continuum, torus, and dust emission in ``jaxsedfit``.
+provide SED-scale disk, torus, and broad/narrow line corrections. When a
+spectrum is present, the same AGN configuration also controls the detailed
+Fe II, Balmer-continuum, and emission-line model. The shared components are
+evaluated consistently in the spectrum and projected into the photometry.
 
 Likelihood and model-error settings
 -----------------------------------
@@ -374,9 +374,9 @@ changing the posterior. Fixing
 remaining model-error degeneracy. Increasing ``max_tree_depth`` should come
 after these checks because it can multiply runtime without improving geometry.
 
-For joint fits using the jaxqsofit backend, Fe II and Balmer-continuum
+For joint fits, Fe II and Balmer-continuum
 Normal/LogNormal priors are sampled on exact standard-Normal NUTS coordinates
-by default (``reparameterize_jaxqsofit_features=True``). This improves
+by default (``reparameterize_spectral_features=True``). This improves
 numerical scaling without changing their scientific priors, likelihood,
 predictions, or physical posterior names.
 
@@ -432,7 +432,7 @@ Add spectroscopy with :class:`jaxsedfit.SpectroscopyData`. Spectroscopic
 .. code-block:: python
 
    import numpy as np
-   from jaxsedfit import SpectroscopyConfig, SpectroscopyData
+   from jaxsedfit import SpectroscopyData
 
    cfg.spectroscopy = SpectroscopyData(
        wave_obs=np.linspace(3800.0, 9200.0, 2000),
@@ -440,31 +440,22 @@ Add spectroscopy with :class:`jaxsedfit.SpectroscopyData`. Spectroscopic
        errors=np.full(2000, 0.05),
        instrument="sdss",
        aperture_diameter_arcsec=3.0,
+       resolving_power=2000.0,
    )
-   cfg.spectroscopy_config = SpectroscopyConfig(
-       enabled=True,
-       backend="jaxsedfit",
-       fit_scale=True,
-       likelihood_weight_mode="pixels",
-   )
+   cfg.likelihood.fit_spectrum_scale = True
+   cfg.likelihood.spectrum_weight_mode = "resolution_elements"
 
-Use ``backend="jaxsedfit"`` for a self-contained SED/spectrum model. Use
-``backend="jaxqsofit"`` when the spectrum needs quasar-style Fe II, Balmer
-continuum, and tied emission-line modeling:
+Supplying spectroscopy activates the shared detailed spectral engine. Enable
+quasar-style Fe II, Balmer continuum, and tied emission-line modeling on the
+AGN configuration:
 
 .. code-block:: python
 
-   from jaxsedfit import JaxQSOFitConfig
-
-   cfg.spectroscopy_config.backend = "jaxqsofit"
-   cfg.spectroscopy_config.likelihood_weight_mode = "resolving_power"
-   cfg.spectroscopy_config.resolving_power = 2000.0
-   cfg.spectroscopy_config.jaxqsofit = JaxQSOFitConfig(
-       use_spectral_lines=True,
-       use_spectral_feii=True,
-       use_spectral_balmer_continuum=True,
-       include_elg_narrow_lines=True,
-   )
+   cfg.agn.fit_lines = True
+   cfg.agn.fit_feii = True
+   cfg.agn.fit_balmer_continuum = True
+   cfg.agn.tied_lines = True
+   cfg.agn.include_elg_narrow_lines = True
 
 When the spectrum comes from a fiber or slit, set
 ``aperture_diameter_arcsec`` or ``psf_fwhm_arcsec`` on the spectroscopy
@@ -473,7 +464,7 @@ payload and enable the host-capture model:
 .. code-block:: python
 
    cfg.likelihood.use_host_capture_model = True
-   cfg.spectroscopy_config.fit_scale = True
+   cfg.likelihood.fit_spectrum_scale = True
 
 This allows the spectroscopic host contribution to differ from broadband
 photometry while keeping compact AGN light and extended host light treated
@@ -603,7 +594,7 @@ fiber diameter:
 
    from jaxsedfit import SpectroscopyData
 
-   cfg.spectroscopy_list = [
+   cfg.spectroscopy = [
        SpectroscopyData(
            wave_obs=wave_obs,
            fluxes=spec_flux,
@@ -612,8 +603,7 @@ fiber diameter:
            aperture_diameter_arcsec=3.0,
        )
    ]
-   cfg.spectroscopy_config.enabled = True
-   cfg.spectroscopy_config.fit_scale = True
+   cfg.likelihood.fit_spectrum_scale = True
    cfg.likelihood.use_host_capture_model = True
 
 With this setup the photometry and spectrum are treated as different views of
@@ -630,7 +620,7 @@ the same intrinsic source:
   contribution when supplied with large aperture metadata, or when no spatial
   scale is supplied.
 
-``cfg.spectroscopy_config.fit_scale`` adds a gray spectral calibration/fiber
+``cfg.likelihood.fit_spectrum_scale`` adds a gray spectral calibration/fiber
 scale parameter on top of the component capture model. This is useful because
 real spectra can have additional absolute calibration or slit-loss offsets
 relative to broadband photometry.
@@ -708,7 +698,7 @@ fiber diameter:
 
    from jaxsedfit import SpectroscopyData
 
-   cfg.spectroscopy_list = [
+   cfg.spectroscopy = [
        SpectroscopyData(
            wave_obs=wave_obs,
            fluxes=spec_flux,
@@ -717,8 +707,7 @@ fiber diameter:
            aperture_diameter_arcsec=3.0,
        )
    ]
-   cfg.spectroscopy_config.enabled = True
-   cfg.spectroscopy_config.fit_scale = True
+   cfg.likelihood.fit_spectrum_scale = True
    cfg.likelihood.use_host_capture_model = True
 
 With this setup the photometry and spectrum are treated as different views of
@@ -735,7 +724,7 @@ the same intrinsic source:
   contribution when supplied with large aperture metadata, or when no spatial
   scale is supplied.
 
-``cfg.spectroscopy_config.fit_scale`` adds a gray spectral calibration/fiber
+``cfg.likelihood.fit_spectrum_scale`` adds a gray spectral calibration/fiber
 scale parameter on top of the component capture model. This is useful because
 real spectra can have additional absolute calibration or slit-loss offsets
 relative to broadband photometry.
@@ -766,18 +755,18 @@ LINER narrow-line template. This is a line-ratio/template choice for
 low-ionization narrow-line AGN; it is not a general ``type 3 quasar`` category.
 
 The ``agn_type`` setting affects the native jaxsedfit SED-scale AGN line
-corrections. When spectroscopy uses the ``jaxqsofit`` backend, the detailed
-spectral Fe II, Balmer continuum, and emission-line model is controlled by the
-``jaxqsofit`` configuration and line table. In joint fits, jaxqsofit should own
-lines covered by the spectrum, while jaxsedfit's SED-scale line corrections are
-most useful for broadband filters outside the spectral coverage.
+corrections. The detailed spectral Fe II, Balmer continuum, and emission-line
+model is controlled by the same :class:`jaxsedfit.AGNConfig` and its
+``line_table``. In joint fits, lines covered by the spectrum use that shared
+spectral model; native SED-scale corrections remain useful for broadband
+filters outside the spectral coverage.
 
-Changing jaxqsofit broad-line components
-----------------------------------------
+Changing broad-line components
+-------------------------------
 
-When spectroscopy uses the ``jaxqsofit`` backend, the number of broad
-Gaussian components is set by the line-table ``ngauss`` field. The default
-``jaxqsofit`` line table uses names such as ``Ha_br``, ``Hb_br``, ``MgII_br``,
+The number of broad Gaussian components is set by the line-table ``ngauss``
+field. The default spectral line table uses names such as ``Ha_br``,
+``Hb_br``, ``MgII_br``,
 ``CIV_br``, and ``Lya_br`` for broad components. Copy the table, adjust
 ``ngauss`` for the rows you want, and assign it before constructing
 :class:`jaxsedfit.JAXSEDFit`.
@@ -786,7 +775,7 @@ Gaussian components is set by the line-table ``ngauss`` field. The default
 
    from copy import deepcopy
 
-   from jaxqsofit.defaults import DEFAULT_LINE_PRIOR_ROWS
+   from jaxsedfit.spectral_defaults import DEFAULT_LINE_PRIOR_ROWS
 
    line_table = deepcopy(DEFAULT_LINE_PRIOR_ROWS)
 
@@ -796,5 +785,82 @@ Gaussian components is set by the line-table ``ngauss`` field. The default
        if row["linename"] in {"CIV_br", "Lya_br"}:
            row["ngauss"] = 2
 
-   cfg.spectroscopy_config.backend = "jaxqsofit"
-   cfg.spectroscopy_config.jaxqsofit.line_table = line_table
+   cfg.agn.line_table = line_table
+
+Reading spectral results
+------------------------
+
+``result.spectrum`` is the supported interface for spectral analysis. It
+provides named, unit-explicit fields and keeps internal NumPyro site names out
+of user code. Individual Gaussian components of a broad line have explicit
+names, so no array-position convention is required:
+
+.. code-block:: python
+
+   result = fitter.fit()
+
+   hb1 = result.spectrum.lines["Hb_br_1"]
+   hb2 = result.spectrum.lines["Hb_br_2"]
+
+   hb1_amplitude_draws = hb1.amplitude_mjy
+   hb1_width_draws = hb1.fwhm_kms
+   hb1_flux_draws = hb1.flux_w_m2
+
+Each numerical field retains the posterior-draw axis. Available quantities are
+``amplitude_mjy``, ``center_rest_angstrom``, ``sigma_ln_lambda``,
+``fwhm_kms``, ``velocity_offset_kms``, and ``flux_w_m2``. The amplitude and
+integrated flux describe the shared source model before per-spectrum
+calibration or aperture scaling. Scalar metadata fields are ``parent_line``,
+``component_index``, ``kind``, and ``rest_wavelength_angstrom``.
+
+Single-component lines omit the redundant ``_1`` suffix, so a line such as
+``OIII_5007`` is accessed directly. To measure the sum of all Gaussian
+components belonging to a physical line, use ``line_groups``:
+
+.. code-block:: python
+
+   result.spectrum.line_groups["Hb_br"].component_names
+   # ("Hb_br_1", "Hb_br_2", ...)
+
+   hb_total_flux_draws = result.spectrum.line_groups["Hb_br"].total_flux_w_m2
+
+The fitted spectrum and its main components use the same unit-explicit
+contract. Their shapes are ``(draw, pixel)``:
+
+.. code-block:: python
+
+   spectrum = result.spectrum
+   wave = spectrum.wavelength_obs_angstrom
+   model_draws = spectrum.model_flux_mjy
+   continuum_draws = spectrum.continuum_flux_mjy
+   line_draws = spectrum.line_flux_density_mjy
+   feii_draws = spectrum.feii_flux_density_mjy
+   balmer_draws = spectrum.balmer_flux_density_mjy
+
+For multiple input spectra, ``observations`` separates the flattened model by
+input spectrum and includes the corresponding data, errors, mask, and
+residual draws:
+
+.. code-block:: python
+
+   sdss = result.spectrum.observations[0]
+   sdss.instrument
+   sdss.wavelength_obs_angstrom
+   sdss.observed_flux_mjy
+   sdss.model_flux_mjy
+   sdss.residual_mjy
+
+The same mappings are available on a predictive result, which is useful when
+limiting the number of evaluated draws:
+
+.. code-block:: python
+
+   prediction = result.predict(max_draws=200)
+   hb1 = prediction.spectrum.lines["Hb_br_1"]
+   hb_total = prediction.spectrum.line_groups["Hb_br"]
+
+The raw predictive mapping remains available through ``prediction[...]`` for
+advanced diagnostics, but its internal site names are not the supported
+analysis contract. Saving and loading a fit preserves the predictive arrays,
+so the same ``loaded_result.spectrum`` interface is reconstructed after
+``jaxsedfit.load_result(...)``.

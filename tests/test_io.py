@@ -14,7 +14,7 @@ from jaxsedfit.config import (
     PhotometryData,
 )
 from jaxsedfit.core import JAXSEDFit
-from jaxsedfit.results import FitResult
+from jaxsedfit.results import FitResult, PredictionResult
 
 
 @pytest.fixture(autouse=True)
@@ -46,6 +46,86 @@ def _minimal_config() -> FitConfig:
             ]
         ),
         galaxy=GalaxyConfig(dsps_ssp_fn="fake.h5", n_wave=32, sfh_n_steps=8),
+    )
+
+
+def test_prediction_result_labels_line_components_and_groups():
+    metadata = {
+        "names": ["Hb_br_1", "Hb_br_2", "OIII_5007_1"],
+        "line_lambda": np.array([4862.68, 4862.68, 5008.24]),
+        "broad_mask": np.array([1.0, 1.0, 0.0]),
+    }
+    fitter = SimpleNamespace(
+        config=SimpleNamespace(observation=SimpleNamespace(redshift=0.2)),
+        spectral_line_metadata=lambda: metadata,
+        context=SimpleNamespace(
+            spec_wave_obs=np.array([5000.0, 5001.0, 7000.0, 7001.0]),
+            spec_spectrum_index=np.array([0, 0, 1, 1]),
+            spec_fluxes=np.array([1.1, 1.2, 2.1, 2.2]),
+            spec_errors=np.full(4, 0.1),
+            spec_mask=np.array([True, True, True, False]),
+            spec_instruments=("SDSS", "DESI"),
+        ),
+    )
+    amplitudes = np.array([[1.0, 2.0, 3.0], [1.5, 2.5, 3.5]])
+    centers = np.log(metadata["line_lambda"])[None, :] + np.array(
+        [[0.0, 1.0e-3, 0.0], [2.0e-4, 1.2e-3, -1.0e-4]]
+    )
+    predictive = PredictionResult(
+        {
+            "spectral_line_amp_per_component": amplitudes,
+            "spectral_line_mu_per_component": centers,
+            "spectral_line_sig_per_component": np.full((2, 3), 0.01),
+            "redshift_fit": np.array([0.2, 0.2]),
+            "spec_wave_obs": np.broadcast_to(
+                np.array([5000.0, 5001.0, 7000.0, 7001.0]), (2, 4)
+            ),
+            "spec_spectrum_index": np.broadcast_to(
+                np.array([0, 0, 1, 1]), (2, 4)
+            ),
+            "pred_spectrum_fluxes": np.array(
+                [[1.0, 1.1, 2.0, 2.1], [1.2, 1.3, 2.2, 2.3]]
+            ),
+            "spec_continuum_model_fluxes": np.ones((2, 4)),
+            "spectral_line_model": np.full((2, 4), 0.1),
+            "spectral_feii_model": np.full((2, 4), 0.2),
+            "spectral_balmer_model": np.full((2, 4), 0.3),
+            "spectrum_scale_fit": np.array([[1.0, 2.0], [1.5, 2.5]]),
+        },
+        fitter=fitter,
+    )
+
+    assert tuple(predictive.spectrum.lines) == ("Hb_br_1", "Hb_br_2", "OIII_5007")
+    np.testing.assert_allclose(
+        predictive.spectrum.lines["Hb_br_1"].amplitude_mjy, amplitudes[:, 0]
+    )
+    np.testing.assert_allclose(
+        predictive.spectrum.lines["Hb_br_2"].amplitude_mjy, amplitudes[:, 1]
+    )
+    assert predictive.spectrum.lines["Hb_br_2"].component_index == 2
+    assert predictive.spectrum.lines["OIII_5007"].kind == "narrow"
+    assert predictive.spectrum.line_groups["Hb_br"].component_names == (
+        "Hb_br_1",
+        "Hb_br_2",
+    )
+    np.testing.assert_allclose(
+        predictive.spectrum.line_groups["Hb_br"].total_flux_w_m2,
+        predictive.spectrum.lines["Hb_br_1"].flux_w_m2
+        + predictive.spectrum.lines["Hb_br_2"].flux_w_m2,
+    )
+    hb1 = predictive.spectrum.lines["Hb_br_1"]
+    np.testing.assert_allclose(hb1.amplitude_mjy, amplitudes[:, 0])
+    assert tuple(obs.instrument for obs in predictive.spectrum.observations) == (
+        "SDSS",
+        "DESI",
+    )
+    np.testing.assert_allclose(
+        predictive.spectrum.observations[1].continuum_flux_mjy,
+        [[2.0, 2.0], [2.5, 2.5]],
+    )
+    np.testing.assert_allclose(
+        predictive.spectrum.observations[0].residual_mjy,
+        [[0.1, 0.1], [-0.1, -0.1]],
     )
 
 
@@ -179,6 +259,19 @@ def test_load_result_wraps_loaded_fitter(monkeypatch, tmp_path):
     assert result.path == saved_path
     np.testing.assert_allclose(result.samples["log_stellar_mass"], [9.8, 10.0])
     assert np.isclose(result.median["log_stellar_mass"], 9.9)
+
+
+def test_top_level_load_result(monkeypatch, tmp_path):
+    monkeypatch.setattr("jaxsedfit.core.build_model_context", lambda config: SimpleNamespace(mw_ebv=0.0))
+    fitter = JAXSEDFit(_minimal_config())
+    fitter.samples = {"log_stellar_mass": np.array([9.8, 10.0])}
+    fitter.predictive = {"pred_fluxes": np.array([[1.0], [1.2]])}
+    saved_path = fitter.save(tmp_path)
+
+    result = jaxsedfit.load_result(saved_path)
+
+    assert isinstance(result, FitResult)
+    assert result.path == saved_path
 
 
 def test_fit_result_save_delegates_to_fitter(monkeypatch, tmp_path):

@@ -20,7 +20,7 @@ from astropy import units as u
 from dustmaps.sfd import SFDQuery
 import extinction
 
-from .config import EmissionLineTemplate, FeIITemplate, FilterCurve, FitConfig
+from .config import EmissionLineTemplate, FeIITemplate, FilterCurve, FitConfig, PhotometryData
 from .filters import (
     filter_effective_wavelength,
     load_filter_curve,
@@ -292,7 +292,8 @@ class ModelContext:
     spec_effective_spatial_scale_arcsec: np.ndarray
     spec_aperture_diameter_arcsec: np.ndarray
     spec_instruments: tuple[str, ...]
-    jaxqsofit_prior_config: Mapping[str, Any] | None
+    spec_resolving_power: np.ndarray
+    spectral_prior_config: Mapping[str, Any] | None
     mw_ebv: float
 
 
@@ -476,7 +477,7 @@ def _filter_response_cache_key(cfg: FitConfig) -> tuple[Any, ...]:
         cfg value.
     """
     return (
-        tuple(str(name) for name in cfg.photometry.filter_names),
+        tuple(str(name) for name in cfg.photometry.filter_names) if cfg.photometry is not None else (),
         tuple((curve.name, id(curve.wave), id(curve.transmission), curve.effective_wavelength) for curve in cfg.filters.curves),
     )
 
@@ -495,7 +496,8 @@ def _load_filter_responses(cfg: FitConfig):
         return cached
     inline_curves = {curve.name: curve for curve in cfg.filters.curves}
     responses = []
-    for filter_name in cfg.photometry.filter_names:
+    filter_names = () if cfg.photometry is None else cfg.photometry.filter_names
+    for filter_name in filter_names:
         if filter_name in inline_curves:
             responses.append(normalize_filter_curve(inline_curves[filter_name], name=filter_name))
             continue
@@ -510,8 +512,8 @@ def _load_filter_responses(cfg: FitConfig):
     return responses
 
 
-def _build_jaxqsofit_prior_config(cfg: FitConfig, spec_fluxes: np.ndarray, spec_mask: np.ndarray) -> Mapping[str, Any] | None:
-    """Build standard jaxqsofit data-scale priors for the joint spectral backend.
+def _build_spectral_prior_config(cfg: FitConfig, spec_fluxes: np.ndarray, spec_mask: np.ndarray) -> Mapping[str, Any] | None:
+    """Build standard data-scale priors for joint spectral fitting.
 
     Parameters
     ----------
@@ -522,11 +524,9 @@ def _build_jaxqsofit_prior_config(cfg: FitConfig, spec_fluxes: np.ndarray, spec_
     spec_mask : object
         spec_mask value.
     """
-    spec_cfg = cfg.spectroscopy_config
-    if str(spec_cfg.backend).lower() != "jaxqsofit":
-        return None
-    jqf_cfg = spec_cfg.jaxqsofit
-    if not bool(jqf_cfg.use_spectral_smart_priors):
+    spec_cfg = cfg.agn
+    spectral_cfg = spec_cfg
+    if not bool(spectral_cfg.use_smart_line_priors):
         return None
     try:
         from .spectroscopy import build_spectral_prior_config
@@ -540,18 +540,18 @@ def _build_jaxqsofit_prior_config(cfg: FitConfig, spec_fluxes: np.ndarray, spec_
     valid = mask & np.isfinite(flux)
     flux_for_priors = flux[valid]
     if flux_for_priors.size == 0:
-        flux_for_priors = np.asarray([max(float(jqf_cfg.line_flux_scale_mjy), 1.0e-8)], dtype=float)
+        flux_for_priors = np.asarray([max(float(spectral_cfg.line_flux_scale_mjy), 1.0e-8)], dtype=float)
     flux_rest = flux_for_priors * (1.0 + float(cfg.observation.redshift))
     prior_config = build_spectral_prior_config(
         flux_rest,
-        include_elg_narrow_lines=bool(jqf_cfg.include_elg_narrow_lines),
-        include_high_ionization_lines=bool(jqf_cfg.include_high_ionization_lines),
+        include_elg_narrow_lines=bool(spectral_cfg.include_elg_narrow_lines),
+        include_high_ionization_lines=bool(spectral_cfg.include_high_ionization_lines),
     )
     if hasattr(prior_config, "to_mapping"):
         prior_config = prior_config.to_mapping()
     else:
         prior_config = dict(prior_config)
-    # Match the native jaxqsofit NUTS geometry: amplitudes and active width
+    # Use stable NUTS geometry: amplitudes and active width
     # coordinates live on standardized prior coordinates before block-dense
     # mass adaptation.
     prior_config["standardize_active_priors"] = True
@@ -566,10 +566,7 @@ def _load_templates(cfg: FitConfig) -> LoadedTemplates:
     cfg : object
         cfg value.
     """
-    need_agn_templates = bool(cfg.agn.fit_agn) or (
-        bool(cfg.spectroscopy_config.enabled)
-        and str(cfg.spectroscopy_config.backend).lower() == "jaxqsofit"
-    )
+    need_agn_templates = bool(cfg.agn.fit_agn or cfg.spectroscopy_list)
     need_dust_templates = bool(cfg.galaxy.fit_host and cfg.galaxy.use_energy_balance)
     # Keep lightweight/legacy config-like objects compatible with the
     # pre-DL07 API. Full FitConfig instances always provide these fields.
@@ -832,7 +829,14 @@ def _pack_loaded_filters(filters: Sequence[LoadedFilter]) -> PackedFilters:
         filters value.
     """
     if not filters:
-        raise ValueError("At least one filter is required to build a model context.")
+        return PackedFilters(
+            interp_indices=np.zeros((0, 1), dtype=int),
+            interp_weight=np.zeros((0, 1), dtype=float),
+            transmission=np.zeros((0, 1), dtype=float),
+            work_wave=np.zeros((0, 1), dtype=float),
+            effective_wavelength=np.zeros(0, dtype=float),
+            valid_mask=np.zeros((0, 1), dtype=bool),
+        )
     n_filters = len(filters)
     max_points = max(f.work_wave.size for f in filters)
     interp_indices = np.zeros((n_filters, max_points), dtype=int)
@@ -891,7 +895,12 @@ def _pack_filter_curves_jax(filters: Sequence[LoadedFilter]) -> PackedFilterCurv
         filters value.
     """
     if not filters:
-        raise ValueError("At least one filter is required to build a model context.")
+        return PackedFilterCurvesJax(
+            wave=jnp.zeros((0, 1), dtype=jnp.float64),
+            transmission=jnp.zeros((0, 1), dtype=jnp.float64),
+            valid_mask=jnp.zeros((0, 1), dtype=bool),
+            denom=jnp.zeros(0, dtype=jnp.float64),
+        )
     n_filters = len(filters)
     max_points = max(f.wave.size for f in filters)
     wave = np.zeros((n_filters, max_points), dtype=float)
@@ -1926,19 +1935,20 @@ def build_model_context(cfg: FitConfig) -> ModelContext:
         cfg value.
     """
     cfg.validate()
-    raw_fluxes = np.asarray(cfg.photometry.fluxes, dtype=float)
-    raw_errors = np.asarray(cfg.photometry.errors, dtype=float)
+    photometry = cfg.photometry or PhotometryData(filter_names=(), fluxes=(), errors=())
+    raw_fluxes = np.asarray(photometry.fluxes, dtype=float)
+    raw_errors = np.asarray(photometry.errors, dtype=float)
     fluxes = np.asarray(raw_fluxes, dtype=float)
     errors = np.asarray(raw_errors, dtype=float)
-    upper_limits = np.asarray(cfg.photometry.is_upper_limit if cfg.photometry.is_upper_limit is not None else np.zeros_like(fluxes, dtype=bool), dtype=bool)
+    upper_limits = np.asarray(photometry.is_upper_limit if photometry.is_upper_limit is not None else np.zeros_like(fluxes, dtype=bool), dtype=bool)
     data_mask = (~upper_limits) & np.isfinite(raw_fluxes) & np.isfinite(raw_errors) & (raw_errors > 0.0)
     positive_detected_mask = (~upper_limits) & np.isfinite(raw_fluxes) & (raw_fluxes > 0.0)
     psf_fwhm_arcsec = np.asarray(
-        cfg.photometry.psf_fwhm_arcsec if cfg.photometry.psf_fwhm_arcsec is not None else np.full_like(fluxes, np.nan, dtype=float),
+        photometry.psf_fwhm_arcsec if photometry.psf_fwhm_arcsec is not None else np.full_like(fluxes, np.nan, dtype=float),
         dtype=float,
     )
     aperture_diameter_arcsec = np.asarray(
-        cfg.photometry.aperture_diameter_arcsec if cfg.photometry.aperture_diameter_arcsec is not None else np.full_like(fluxes, np.nan, dtype=float),
+        photometry.aperture_diameter_arcsec if photometry.aperture_diameter_arcsec is not None else np.full_like(fluxes, np.nan, dtype=float),
         dtype=float,
     )
     # Put circular apertures and Gaussian PSFs on the same effective-radius
@@ -1951,8 +1961,8 @@ def build_model_context(cfg: FitConfig) -> ModelContext:
         psf_effective_radius_arcsec,
     )
     photometry_methods = np.asarray(
-        cfg.photometry.photometry_method
-        if cfg.photometry.photometry_method is not None
+        photometry.photometry_method
+        if photometry.photometry_method is not None
         else [None] * len(fluxes),
         dtype=object,
     )
@@ -1964,10 +1974,19 @@ def build_model_context(cfg: FitConfig) -> ModelContext:
     errors = np.nan_to_num(errors, nan=1.0e30, posinf=1.0e30, neginf=1.0e30)
     errors = np.clip(np.abs(errors), 1.0e-30, 1.0e30)
 
-    spectra = cfg.spectroscopy_list if cfg.spectroscopy_config.enabled else []
+    spectra = cfg.spectroscopy_list
     spec_instruments = tuple(
         str(spectrum.instrument) if spectrum.instrument is not None else f"spectrum_{i}"
         for i, spectrum in enumerate(spectra)
+    )
+    spec_resolving_power = np.asarray(
+        [
+            float(spectrum.resolving_power)
+            if spectrum.resolving_power is not None
+            else np.nan
+            for spectrum in spectra
+        ],
+        dtype=float,
     )
     spec_aperture_diameter_arcsec = np.asarray(
         [
@@ -2053,6 +2072,7 @@ def build_model_context(cfg: FitConfig) -> ModelContext:
         spec_effective_spatial_scale_arcsec = np.array([], dtype=float)
         spec_aperture_diameter_arcsec = np.array([], dtype=float)
         spec_instruments = ()
+        spec_resolving_power = np.array([], dtype=float)
 
     rest_wave = np.geomspace(cfg.galaxy.rest_wave_min, cfg.galaxy.rest_wave_max, cfg.galaxy.n_wave).astype(float)
     obs_wave = rest_wave * (1.0 + max(cfg.observation.redshift, 0.0))
@@ -2077,8 +2097,7 @@ def build_model_context(cfg: FitConfig) -> ModelContext:
     spec_host_basis_jax = None
     needs_spec_host_basis = bool(
         cfg.galaxy.fit_host
-        and cfg.spectroscopy_config.enabled
-        and str(cfg.spectroscopy_config.backend).lower() == "jaxqsofit"
+        and bool(cfg.spectroscopy_list)
         and spec_wave_obs.size > 0
         and not cfg.observation.fits_redshift
     )
@@ -2179,7 +2198,7 @@ def build_model_context(cfg: FitConfig) -> ModelContext:
             spec_fluxes = spec_fluxes / np.clip(spec_factors, 1e-12, None)
             spec_errors = spec_errors / np.clip(spec_factors, 1e-12, None)
 
-    jaxqsofit_prior_config = _build_jaxqsofit_prior_config(cfg, spec_fluxes, spec_mask)
+    spectral_prior_config = _build_spectral_prior_config(cfg, spec_fluxes, spec_mask)
 
     return ModelContext(
         fit_config=cfg,
@@ -2235,6 +2254,7 @@ def build_model_context(cfg: FitConfig) -> ModelContext:
         spec_effective_spatial_scale_arcsec=np.asarray(spec_effective_spatial_scale_arcsec, dtype=float),
         spec_aperture_diameter_arcsec=np.asarray(spec_aperture_diameter_arcsec, dtype=float),
         spec_instruments=spec_instruments,
-        jaxqsofit_prior_config=jaxqsofit_prior_config,
+        spec_resolving_power=spec_resolving_power,
+        spectral_prior_config=spectral_prior_config,
         mw_ebv=mw_ebv,
     )

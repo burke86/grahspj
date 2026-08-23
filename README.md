@@ -128,6 +128,62 @@ plot_fit_sed(fitter, output_path="sed_fit.png")
 
 This uses the lazy predictive path, so the component spectra are generated when you first call `plot_sed()` or `plot_fit_sed(...)`.
 
+### Custom spectral components
+
+One custom-component definition is shared by standalone spectral fits and
+joint spectrum+photometry fits. Evaluators must be JAX-compatible and return
+observed flux density in mJy on the wavelength grid they receive. Use
+`frame="rest"` (the default) or `frame="observed"` explicitly.
+
+```python
+import jax.numpy as jnp
+import numpyro.distributions as dist
+
+from jaxsedfit import make_custom_component
+
+
+def extra_continuum(wave, params, metadata):
+    pivot = metadata["pivot"]
+    return params["amplitude"] * (wave / pivot) ** params["slope"]
+
+
+component = make_custom_component(
+    "extra_continuum",
+    {
+        "amplitude": dist.LogNormal(jnp.log(0.1), 0.5),
+        "slope": dist.Normal(0.0, 1.0),
+    },
+    extra_continuum,
+    metadata={"pivot": 5100.0},
+    frame="rest",
+)
+
+cfg.agn.custom_components = (component,)
+```
+
+The parameters are sampled once and the same realization is rendered on the
+spectral pixels, native photometric filter grids, and posterior SED grid.
+Use `make_custom_line_component(..., line_kind="broad" | "narrow")` for an
+additive line profile. Narrow custom lines receive the same host-aperture
+capture treatment as built-in narrow lines.
+
+Spectroscopy is enabled by supplying one or more `SpectroscopyData` objects;
+there is no separate backend or enabled switch. Photometry is optional, so a
+spectrum-only fit can be configured directly:
+
+```python
+from jaxsedfit import FitConfig, SpectroscopyData
+
+cfg = FitConfig(
+    observation=observation,
+    spectroscopy=SpectroscopyData(
+        wave_obs=wave,
+        fluxes=flux,
+        errors=error,
+        resolving_power=2000,
+    ),
+)
+```
 ## Fit-quality chi-square diagnostics
 
 Joint fits expose scalar posterior sites for the photometric SED, spectrum, and

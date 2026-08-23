@@ -4,7 +4,7 @@ Fitting Interface
 .. currentmodule:: jaxsedfit
 
 .. autoclass:: JAXSEDFit
-   :members: fit, fit_map, fit_nuts, fit_ns, predict, save, load, load_result, plot_sed, plot_corner, plot_trace, plot_jaxqsofit_spectrum
+   :members: fit, fit_map, fit_nuts, fit_ns, predict, save, load, load_result, plot_sed, plot_corner, plot_trace, plot_spectrum
    :show-inheritance:
 
 .. autoclass:: FitResult

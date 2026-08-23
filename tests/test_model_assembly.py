@@ -14,13 +14,11 @@ from jaxsedfit.config import (
     FitConfig,
     GalaxyConfig,
     InferenceConfig,
-    JaxQSOFitConfig,
     LikelihoodConfig,
     NebularConfig,
     Observation,
     PhotometryData,
     PriorConfig,
-    SpectroscopyConfig,
     SpectroscopyData,
 )
 from jaxsedfit.core import JAXSEDFit
@@ -100,7 +98,6 @@ def _cfg(
             if spectroscopy_enabled
             else None
         ),
-        spectroscopy_config=SpectroscopyConfig(enabled=spectroscopy_enabled),
         nebular=NebularConfig(enabled=True, f_esc=0.0, f_dust=0.2, zgas=0.02, lines_width=300.0),
         inference=InferenceConfig(map_steps=2),
         prior_config=PriorConfig(stellar_mass=dist.Normal(8.0, 1.0e-6)),
@@ -111,6 +108,35 @@ def _deterministic_trace(context, data=None):
     data = {} if data is None else data
     model = substitute(lambda: grahsp_photometric_model(context, include_components=True), data=data)
     return trace(seed(model, 0)).get_trace()
+
+
+def test_spectrum_only_context_and_likelihood(monkeypatch):
+    _patch_ssp(monkeypatch)
+    cfg = _cfg(spectroscopy_enabled=True, fit_host=False, n_wave=256)
+    cfg.photometry = None
+    cfg.filters = FilterSet()
+    cfg.agn.fit_lines = False
+    cfg.agn.use_smart_line_priors = False
+    context = build_model_context(cfg)
+
+    assert context.fluxes.size == 0
+    assert context.filters == []
+    assert context.spec_wave_obs.size == 3
+    tr = _deterministic_trace(context, _fixed_component_data())
+    assert "spectroscopy_loglike_factor" in tr
+    assert "photometry_obs" not in tr
+
+
+def test_fit_config_requires_at_least_one_dataset():
+    cfg = FitConfig(observation=Observation(redshift=0.1))
+    with pytest.raises(ValueError, match="photometry, spectroscopy, or both"):
+        cfg.validate()
+
+
+def test_spectroscopy_validates_resolving_power():
+    spectrum = SpectroscopyData(wave_obs=[5000.0], fluxes=[1.0], errors=[0.1], resolving_power=0.0)
+    with pytest.raises(ValueError, match="resolving_power"):
+        spectrum.validate()
 
 
 def _deterministic_likelihood_trace(context, data=None):
@@ -778,10 +804,9 @@ def test_host_kinematics_enabled_with_spectroscopy_samples_and_broadens(monkeypa
 def test_joint_continuum_stage_keeps_feii_and_balmer_but_omits_lines(monkeypatch):
     _patch_ssp(monkeypatch)
     cfg = _cfg(fit_host=False, spectroscopy_enabled=True)
-    cfg.spectroscopy_config.backend = "jaxqsofit"
-    cfg.spectroscopy_config.jaxqsofit.use_spectral_lines = True
-    cfg.spectroscopy_config.jaxqsofit.use_spectral_feii = True
-    cfg.spectroscopy_config.jaxqsofit.use_spectral_balmer_continuum = True
+    cfg.agn.fit_lines = True
+    cfg.agn.fit_feii = True
+    cfg.agn.fit_balmer_continuum = True
     context = build_model_context(cfg)
 
     tr = trace(
@@ -796,10 +821,10 @@ def test_joint_continuum_stage_keeps_feii_and_balmer_but_omits_lines(monkeypatch
         )
     ).get_trace()
 
-    assert "jqf_feii_norm" in tr
-    assert "jqf_balmer_norm" in tr
-    assert not any(name.startswith("jqf_line_amp") for name in tr)
-    assert not any(name.startswith("jqf_line_fwhm") for name in tr)
+    assert "spectral_feii_norm" in tr
+    assert "spectral_balmer_norm" in tr
+    assert not any(name.startswith("spectral_line_amp") for name in tr)
+    assert not any(name.startswith("spectral_line_fwhm") for name in tr)
 
 
 def test_agn_only_context_skips_host_ssp_loading(monkeypatch):
@@ -898,18 +923,18 @@ def test_feii_broadening_enabled_samples_and_calls_kernel(monkeypatch):
     assert "feii_shift" in tr
 
 
-def test_jaxqsofit_backend_owns_feii_and_balmer_components(monkeypatch):
+def test_spectral_engine_owns_feii_and_balmer_components(monkeypatch):
     _patch_ssp(monkeypatch)
 
     def _raise_native_feii(*args, **kwargs):
-        raise AssertionError("Native jaxsedfit FeII should be skipped when jaxqsofit owns spectral FeII")
+        raise AssertionError("Native SED FeII should be skipped when the shared spectral model owns FeII")
 
     def _raise_native_balmer(*args, **kwargs):
-        raise AssertionError("Native jaxsedfit Balmer continuum should be skipped when jaxqsofit owns spectral Balmer")
+        raise AssertionError("Native SED Balmer continuum should be skipped when the shared spectral model owns it")
 
-    def _stub_jaxqsofit_backend(wave_obs, redshift, continuum_mjy, cfg, *args, **kwargs):
-        assert cfg.spectroscopy_config.jaxqsofit.use_spectral_feii is True
-        assert cfg.spectroscopy_config.jaxqsofit.use_spectral_balmer_continuum is True
+    def _stub_spectral_engine(wave_obs, redshift, continuum_mjy, cfg, *args, **kwargs):
+        assert cfg.agn.fit_feii is True
+        assert cfg.agn.fit_balmer_continuum is True
         np.testing.assert_allclose(np.asarray(args[1]), context.templates.feii_wave)
         return {
             "total": continuum_mjy,
@@ -927,9 +952,9 @@ def test_jaxqsofit_backend_owns_feii_and_balmer_components(monkeypatch):
 
     monkeypatch.setattr("jaxsedfit.model._feii_component", _raise_native_feii)
     monkeypatch.setattr("jaxsedfit.model._balmer_continuum_jax", _raise_native_balmer)
-    monkeypatch.setattr("jaxsedfit.model._evaluate_jaxqsofit_backend", _stub_jaxqsofit_backend)
+    monkeypatch.setattr("jaxsedfit.model._evaluate_spectral_components", _stub_spectral_engine)
     monkeypatch.setattr(
-        "jaxsedfit.model._project_jaxqsofit_smooth_state_filters",
+        "jaxsedfit.model._project_spectral_smooth_state_filters",
         _stub_smooth_feature_photometry,
     )
 
@@ -938,18 +963,11 @@ def test_jaxqsofit_backend_owns_feii_and_balmer_components(monkeypatch):
         fit_feii_broadening=True,
         fit_balmer_continuum=True,
     )
-    cfg.spectroscopy_config = SpectroscopyConfig(
-        enabled=True,
-        backend="jaxqsofit",
-        fit_scale=False,
-        jaxqsofit=JaxQSOFitConfig(
-            use_spectral_lines=False,
-            use_spectral_feii=True,
-            use_spectral_balmer_continuum=True,
-            use_spectral_smart_priors=False,
-            use_line_strength_priors=False,
-        ),
-    )
+    cfg.likelihood.fit_spectrum_scale = False
+    cfg.agn.fit_lines = False
+    cfg.agn.fit_feii = True
+    cfg.agn.fit_balmer_continuum = True
+    cfg.agn.use_smart_line_priors = False
     context = build_model_context(cfg)
     tr = _deterministic_trace(context, _fixed_component_data())
 

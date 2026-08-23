@@ -25,6 +25,12 @@ from .spectral_reparameterization import (
     NORMAL_LOGNORMAL_STANDARDIZATION,
     standardized_prior_site,
 )
+from .spectral_custom_components import (
+    CustomComponentSpec,
+    CustomLineComponentSpec,
+    normalize_custom_components,
+    normalize_custom_line_components,
+)
 
 
 def _sample_standardizable_feature_prior(site_name: str, prior):
@@ -42,7 +48,7 @@ def _sample_standardizable_feature_prior(site_name: str, prior):
 
 @dataclass(frozen=True)
 class SpectralComponentConfig:
-    """Reusable jaxqsofit spectral-component settings for external joint models.
+    """Reusable shared spectral-component settings for external joint models.
 
     ``evaluate_joint_spectral_components`` operates in f_nu units because the
     external SED continuum is passed as ``continuum_mjy``. Internally generated
@@ -58,8 +64,8 @@ class SpectralComponentConfig:
     use_lines: bool = True
     use_feii: bool = False
     use_balmer_continuum: bool = False
-    use_multiplicative_tilt: bool = False
-    use_tied_lines: bool = True
+    multiplicative_tilt: bool = False
+    tied_lines: bool = True
     line_table: Sequence[Mapping[str, Any]] | None = None
     line_prior_config: Mapping[str, Any] | None = None
     line_flux_scale_mjy: float = 1.0
@@ -80,12 +86,39 @@ class SpectralComponentConfig:
     broadening_convolution: str = "fft"
     feii_fnu_pivot_rest: float | None = None
     balmer_fnu_pivot_rest: float | None = 3000.0
+    custom_components: Sequence[CustomComponentSpec] = ()
+    custom_line_components: Sequence[CustomLineComponentSpec] = ()
 
     def __post_init__(self) -> None:
         method = str(self.broadening_convolution).lower()
         if method not in {"fft", "direct"}:
             raise ValueError("SpectralComponentConfig.broadening_convolution must be 'fft' or 'direct'.")
         object.__setattr__(self, "broadening_convolution", method)
+        object.__setattr__(self, "custom_components", normalize_custom_components(self.custom_components))
+        object.__setattr__(self, "custom_line_components", normalize_custom_line_components(self.custom_line_components))
+        continuum_names = {component.name for component in self.custom_components}
+        duplicate_names = continuum_names.intersection(
+            component.name for component in self.custom_line_components
+        )
+        if duplicate_names:
+            raise ValueError(
+                f"Custom continuum and line component names must be unique: {sorted(duplicate_names)}"
+            )
+
+
+def _custom_wave(wave_obs, wave_rest, component):
+    return wave_rest if component.frame == "rest" else wave_obs
+
+
+def _render_custom_components(wave_obs, wave_rest, state, cfg):
+    models = {}
+    for component in (*cfg.custom_components, *cfg.custom_line_components):
+        params = state.get(f"custom:{component.prefix}", {})
+        models[component.output_name] = jnp.asarray(
+            component.evaluate(_custom_wave(wave_obs, wave_rest, component), params, component.metadata),
+            dtype=jnp.float64,
+        )
+    return models
 
 
 def _as_config(config: SpectralComponentConfig | None) -> SpectralComponentConfig:
@@ -101,7 +134,7 @@ def _as_config(config: SpectralComponentConfig | None) -> SpectralComponentConfi
 
 
 def _component_prior_config(cfg: SpectralComponentConfig) -> dict[str, Any]:
-    """Return a jaxqsofit-style prior config for external component fits.
+    """Return the prior configuration for external component fits.
 
     Parameters
     ----------
@@ -145,7 +178,7 @@ def _line_table_from_prior_config(prior_config: Mapping[str, Any]):
 def build_joint_tied_line_meta(config: SpectralComponentConfig | None = None):
     """Build joint metadata using the standard line-coverage activation."""
     cfg = _as_config(config)
-    if not cfg.use_lines or not cfg.use_tied_lines or cfg.line_centers_rest is not None:
+    if not cfg.use_lines or not cfg.tied_lines or cfg.line_centers_rest is not None:
         return None
     prior_config = _component_prior_config(cfg)
     line_table = _line_table_from_prior_config(prior_config)
@@ -172,7 +205,7 @@ def _evaluate_tied_line_components(
     site_prefix: str,
     feature_amplitude_scale=1.0,
 ):
-    """Evaluate jaxqsofit's grouped tied-line model on a rest-frame grid.
+    """Evaluate the grouped tied-line model on a rest-frame grid.
 
     Parameters
     ----------
@@ -408,12 +441,28 @@ def render_joint_feature_state(
         )
         balmer = _flambda_shape_to_fnu_mjy_shape(wave_rest, balmer_flambda, cfg.balmer_fnu_pivot_rest)
 
+    custom = _render_custom_components(wave_obs, wave_rest, state, cfg)
+    custom_continuum = sum(
+        (custom[component.output_name] for component in cfg.custom_components),
+        jnp.zeros_like(wave_obs),
+    )
+    custom_line_broad = sum(
+        (custom[component.output_name] for component in cfg.custom_line_components if component.line_kind == "broad"),
+        jnp.zeros_like(wave_obs),
+    )
+    custom_line_narrow = sum(
+        (custom[component.output_name] for component in cfg.custom_line_components if component.line_kind == "narrow"),
+        jnp.zeros_like(wave_obs),
+    )
+
     return {
-        "lines": line_broad + line_narrow,
-        "line_broad": line_broad,
-        "line_narrow": line_narrow,
+        "lines": line_broad + line_narrow + custom_line_broad + custom_line_narrow,
+        "line_broad": line_broad + custom_line_broad,
+        "line_narrow": line_narrow + custom_line_narrow,
         "feii": feii,
         "balmer": balmer,
+        "custom_continuum": custom_continuum,
+        "custom": custom,
     }
 
 
@@ -425,10 +474,10 @@ def evaluate_joint_spectral_components(
     config: SpectralComponentConfig | None = None,
     feii_template_wave_rest=None,
     feii_template_flux=None,
-    site_prefix: str = "jqf",
+    site_prefix: str = "spectral",
     feature_amplitude_scale=1.0,
 ):
-    """Evaluate jaxqsofit spectral components around an external continuum.
+    """Evaluate shared spectral components around an external continuum.
 
     Parameters
     ----------
@@ -470,7 +519,7 @@ def evaluate_joint_spectral_components(
     )
 
     calibration = jnp.ones_like(wave_obs)
-    if cfg.use_multiplicative_tilt:
+    if cfg.multiplicative_tilt:
         tilt = numpyro.sample(f"{site_prefix}_continuum_tilt", dist.Normal(0.0, 0.1))
         pivot = jnp.maximum(jnp.nanmedian(wave_obs), 1.0)
         calibration = _positive_multiplicative_calibration(tilt * jnp.log(wave_obs / pivot))
@@ -481,7 +530,7 @@ def evaluate_joint_spectral_components(
     line_narrow_model = jnp.zeros_like(wave_obs)
     line_diagnostics = {}
     if cfg.use_lines:
-        if cfg.use_tied_lines and cfg.line_centers_rest is None:
+        if cfg.tied_lines and cfg.line_centers_rest is None:
             line_model, line_broad_model, line_narrow_model, line_diagnostics = _evaluate_tied_line_components(
                 wave_rest,
                 cfg,
@@ -556,6 +605,38 @@ def evaluate_joint_spectral_components(
             cfg.balmer_fnu_pivot_rest,
         )
 
+    feature_state = dict(line_diagnostics)
+    custom_models = {}
+    for component in (*cfg.custom_components, *cfg.custom_line_components):
+        params = {
+            name: numpyro.sample(f"{site_prefix}_{component.site_name(name)}", prior)
+            for name, prior in component.parameter_priors.items()
+        }
+        feature_state[f"custom:{component.prefix}"] = params
+        model = jnp.asarray(
+            component.evaluate(_custom_wave(wave_obs, wave_rest, component), params, component.metadata),
+            dtype=jnp.float64,
+        )
+        custom_models[component.output_name] = model
+        numpyro.deterministic(f"{site_prefix}_{component.deterministic_site_name}", model)
+
+    custom_continuum_model = sum(
+        (custom_models[component.output_name] for component in cfg.custom_components),
+        jnp.zeros_like(wave_obs),
+    )
+    custom_line_broad_model = sum(
+        (custom_models[component.output_name] for component in cfg.custom_line_components if component.line_kind == "broad"),
+        jnp.zeros_like(wave_obs),
+    )
+    custom_line_narrow_model = sum(
+        (custom_models[component.output_name] for component in cfg.custom_line_components if component.line_kind == "narrow"),
+        jnp.zeros_like(wave_obs),
+    )
+    line_broad_model = line_broad_model + custom_line_broad_model
+    line_narrow_model = line_narrow_model + custom_line_narrow_model
+    line_model = line_model + custom_line_broad_model + custom_line_narrow_model
+
+    continuum_model = continuum_model + custom_continuum_model
     total = continuum_model + line_model + feii_model + balmer_model
     numpyro.deterministic(f"{site_prefix}_continuum_model", continuum_model)
     numpyro.deterministic(f"{site_prefix}_line_model", line_model)
@@ -566,7 +647,6 @@ def evaluate_joint_spectral_components(
     numpyro.deterministic(f"{site_prefix}_feii_model", feii_model)
     numpyro.deterministic(f"{site_prefix}_balmer_model", balmer_model)
     numpyro.deterministic(f"{site_prefix}_total_model", total)
-    feature_state = dict(line_diagnostics)
     if cfg.use_feii and feii_template_wave_rest is not None and feii_template_flux is not None:
         feature_state.update(feii_norm=feii_norm, feii_fwhm=feii_fwhm, feii_shift=feii_shift)
     if cfg.use_balmer_continuum:
@@ -579,5 +659,7 @@ def evaluate_joint_spectral_components(
         "line_narrow": line_narrow_model,
         "feii": feii_model,
         "balmer": balmer_model,
+        "custom_continuum": custom_continuum_model,
+        "custom": custom_models,
         "state": feature_state,
     }

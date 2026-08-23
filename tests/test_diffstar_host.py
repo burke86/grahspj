@@ -918,17 +918,17 @@ def test_joint_dense_mass_blocks_follow_active_sites():
         "log_stellar_mass": np.array(10.0),
         "log_sfh_age_gyr": np.array(0.5),
         "dust_alpha": np.array(2.0),
-        "jqf_line_amp_group": np.ones(3),
-        "jqf_line_sig_group": np.ones(3),
-        "jqf_feii_norm": np.array(1.0),
-        "jqf_feii_fwhm": np.array(3000.0),
+        "spectral_line_amp_group": np.ones(3),
+        "spectral_line_sig_group": np.ones(3),
+        "spectral_feii_norm": np.array(1.0),
+        "spectral_feii_fwhm": np.array(3000.0),
         "unrelated": np.array(0.0),
     }
 
     blocks = _joint_dense_mass_blocks(values)
 
-    assert ("jqf_line_amp_group", "jqf_line_sig_group") in blocks
-    assert ("jqf_feii_fwhm", "jqf_feii_norm") in blocks
+    assert ("spectral_line_amp_group", "spectral_line_sig_group") in blocks
+    assert ("spectral_feii_fwhm", "spectral_feii_norm") in blocks
     assert {
         "log_agn_amp",
         "log_sfh_age_gyr",

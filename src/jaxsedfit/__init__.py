@@ -9,7 +9,6 @@ from .config import (
     AGNPriorConfig,
     HostPriorConfig,
     InferenceConfig,
-    JaxQSOFitConfig,
     LikelihoodConfig,
     LikelihoodPriorConfig,
     NebularConfig,
@@ -20,7 +19,6 @@ from .config import (
     PriorConfig,
     RedshiftPriorConfig,
     MassMetallicityPriorConfig,
-    SpectroscopyConfig,
     SpectroscopyData,
 )
 
@@ -40,7 +38,6 @@ __all__ = [
     "HostBasisJax",
     "JAXSEDFit",
     "InferenceConfig",
-    "JaxQSOFitConfig",
     "LikelihoodConfig",
     "LikelihoodPriorConfig",
     "NebularConfig",
@@ -49,16 +46,25 @@ __all__ = [
     "OutputConfig",
     "PhotometryData",
     "PredictionResult",
+    "LineComponentResult",
+    "LineGroupResult",
+    "SpectralResult",
+    "SpectrumObservationResult",
     "PriorConfig",
     "RedshiftPriorConfig",
     "MassMetallicityPriorConfig",
-    "SpectroscopyConfig",
     "SpectroscopyData",
+    "CustomComponentSpec",
+    "CustomLineComponentSpec",
+    "make_custom_component",
+    "make_custom_line_component",
+    "make_template_component",
     "build_host_basis_jax",
     "build_host_state",
     "host_rest_on_basis",
     "load_from_samples",
     "load",
+    "load_result",
     "load_filter_curve",
     "load_filter_curves",
     "plot_corner",
@@ -83,14 +89,37 @@ def __getattr__(name):
         from .core import JAXSEDFit
 
         return JAXSEDFit
+    if name in {
+        "CustomComponentSpec",
+        "CustomLineComponentSpec",
+        "make_custom_component",
+        "make_custom_line_component",
+        "make_template_component",
+    }:
+        from . import spectroscopy as _spectroscopy
+
+        return getattr(_spectroscopy, name)
     if name in {"FitResult", "PredictionResult"}:
         from . import results as _results
 
         return getattr(_results, name)
+    if name in {
+        "LineComponentResult",
+        "LineGroupResult",
+        "SpectralResult",
+        "SpectrumObservationResult",
+    }:
+        from . import spectral_results as _spectral_results
+
+        return getattr(_spectral_results, name)
     if name in {"load_from_samples", "load"}:
         from .core import JAXSEDFit
 
         return JAXSEDFit.load
+    if name == "load_result":
+        from .core import JAXSEDFit
+
+        return JAXSEDFit.load_result
     if name == "plot_fit_sed":
         from .plotting import plot_fit_sed
 
