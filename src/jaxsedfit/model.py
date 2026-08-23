@@ -34,6 +34,7 @@ import numpyro
 import numpyro.distributions as dist
 
 from .preload import ModelContext, _build_fixed_igm_jax as _igm_transmission
+from .spectral_results import SpectralSites
 from .velocity import shift_and_broaden_lnlam as _fourier_shift_and_broaden_lnlam
 
 C_KMS = 299792.458
@@ -2950,10 +2951,22 @@ def photometric_loglike(
     # Censored measurements must use the same sampling family as detections.
     # In particular, the default Student-t likelihood has substantially
     # heavier upper-tail probability than a Gaussian at fixed scale.
-    # A one-scale offset avoids the undefined Student-t CDF derivative at its
-    # exact center while remaining a parameter-independent standardized value.
-    limit_obs = jnp.where(upper_limits, obs_fluxes, pred_fluxes + scale)
-    log_cdf = jnp.log(jnp.clip(data_dist.cdf(limit_obs), 1.0e-300, 1.0))
+    # Do not let detection-only entries enter the CDF computational graph.
+    # StudentT.cdf can have a non-finite derivative in its extreme tails, and
+    # masking the resulting log-CDF afterward is too late for reverse-mode AD.
+    # Use a completely parameter-independent standard distribution at inactive
+    # entries; active upper limits retain the configured distribution exactly.
+    cdf_loc = jnp.where(upper_limits, pred_fluxes, 0.0)
+    cdf_scale = jnp.where(upper_limits, scale, 1.0)
+    # Evaluate inactive entries at +1 standard scale rather than exactly at
+    # the location. This keeps the placeholder finite and away from the
+    # Student-t CDF's problematic zero-offset derivative.
+    cdf_fluxes = jnp.where(upper_limits, obs_fluxes, 1.0)
+    if family in {"gaussian", "normal"}:
+        limit_dist = dist.Normal(loc=cdf_loc, scale=cdf_scale)
+    else:
+        limit_dist = dist.StudentT(df=student_t_df, loc=cdf_loc, scale=cdf_scale)
+    log_cdf = jnp.log(jnp.clip(limit_dist.cdf(cdf_fluxes), 1.0e-300, 1.0))
     logl_lim = jnp.sum(jnp.where(upper_limits, log_cdf, 0.0))
     invalid = active & ~(input_valid & auxiliary_valid & variance_valid)
     penalty = -1.0e6 * jnp.sum(invalid.astype(jnp.float64))
@@ -3018,7 +3031,8 @@ def spectroscopic_likelihood_weight(wave_obs, mask, spectrum_index, likelihood_w
     """
     if str(likelihood_weight_mode).lower() not in {"resolution_elements", "resolution"}:
         return jnp.asarray(1.0, dtype=jnp.float64)
-    if resolving_power is None or not np.isfinite(float(resolving_power)) or float(resolving_power) <= 0.0:
+    resolving_power = np.asarray(resolving_power, dtype=float)
+    if resolving_power.size == 0 or not np.any(np.isfinite(resolving_power) & (resolving_power > 0.0)):
         return jnp.asarray(1.0, dtype=jnp.float64)
     wave_obs = jnp.asarray(wave_obs, dtype=jnp.float64)
     mask = jnp.asarray(mask, dtype=bool)
@@ -3034,7 +3048,14 @@ def spectroscopic_likelihood_weight(wave_obs, mask, spectrum_index, likelihood_w
     next_delta = next_delta.at[:-1].set(jnp.where(same_adjacent, delta, 0.0))
     pixel_width = 0.5 * (prev_delta + next_delta)
     valid = mask & jnp.isfinite(wave_obs) & (wave_obs > 0.0) & (pixel_width > 0.0)
-    resolution_width = wave_obs / float(resolving_power)
+    resolving_power = jnp.asarray(resolving_power, dtype=jnp.float64)
+    if resolving_power.ndim == 0:
+        resolving_power_at_pixel = jnp.full_like(wave_obs, resolving_power)
+    else:
+        safe_index = jnp.clip(spectrum_index, 0, max(int(resolving_power.shape[0]) - 1, 0))
+        resolving_power_at_pixel = resolving_power[safe_index]
+    valid = valid & jnp.isfinite(resolving_power_at_pixel) & (resolving_power_at_pixel > 0.0)
+    resolution_width = wave_obs / jnp.maximum(resolving_power_at_pixel, 1.0e-30)
     n_eff = jnp.sum(jnp.where(valid, pixel_width / jnp.maximum(resolution_width, 1.0e-30), 0.0))
     n_pix = jnp.sum(valid.astype(jnp.float64))
     return jnp.where(n_pix > 0.0, jnp.minimum(n_eff / n_pix, 1.0), jnp.asarray(1.0, dtype=jnp.float64))
@@ -3107,7 +3128,7 @@ def _flambda_to_mjy(wave_obs, flux_lambda):
 
 
 def _fixed_spectral_line_coverage_rest(context: ModelContext, cfg: FitConfig) -> tuple[float, float] | None:
-    """Return fixed-redshift rest coverage for the jaxqsofit tied-line table.
+    """Return fixed-redshift rest coverage for the shared tied-line table.
 
     Parameters
     ----------
@@ -3118,22 +3139,20 @@ def _fixed_spectral_line_coverage_rest(context: ModelContext, cfg: FitConfig) ->
     """
     if cfg.observation.fits_redshift:
         return None
-    if str(cfg.spectroscopy_config.backend).lower() != "jaxqsofit":
-        return None
     spec_wave = np.asarray(context.spec_wave_obs, dtype=float)
     spec_mask = np.asarray(context.spec_mask, dtype=bool)
     valid = spec_mask & np.isfinite(spec_wave) & (spec_wave > 0.0)
     if not np.any(valid):
         return None
     redshift = max(float(cfg.observation.redshift), 0.0)
-    margin = max(float(cfg.spectroscopy_config.jaxqsofit.line_coverage_margin_kms), 0.0) / C_KMS
+    margin = max(float(cfg.agn.line_coverage_margin_kms), 0.0) / C_KMS
     rest_min = float(np.min(spec_wave[valid]) / (1.0 + redshift))
     rest_max = float(np.max(spec_wave[valid]) / (1.0 + redshift))
     return (rest_min * (1.0 - margin), rest_max * (1.0 + margin))
 
 
 def _photometric_agn_line_mask(context: ModelContext, cfg: FitConfig, line_wave, redshift):
-    """Mask native AGN SED lines to those not covered by jaxqsofit spectroscopy.
+    """Mask native AGN SED lines to those not covered by spectroscopy.
 
     Parameters
     ----------
@@ -3146,14 +3165,10 @@ def _photometric_agn_line_mask(context: ModelContext, cfg: FitConfig, line_wave,
     redshift : object
         redshift value.
     """
-    if str(cfg.spectroscopy_config.backend).lower() != "jaxqsofit":
-        return jnp.ones_like(line_wave)
-    jqf_cfg = cfg.spectroscopy_config.jaxqsofit
-    if not bool(jqf_cfg.use_photometric_lines):
-        return jnp.zeros_like(line_wave)
+    spectral_cfg = cfg.agn
     if (
-        not cfg.spectroscopy_config.enabled
-        or not bool(jqf_cfg.use_spectral_lines)
+        not bool(cfg.spectroscopy_list)
+        or not bool(spectral_cfg.fit_lines)
         or len(context.spec_wave_obs) == 0
         or not np.any(context.spec_mask)
     ):
@@ -3164,7 +3179,7 @@ def _photometric_agn_line_mask(context: ModelContext, cfg: FitConfig, line_wave,
     valid = spec_mask & jnp.isfinite(spec_wave) & (spec_wave > 0.0)
     spec_min = jnp.min(jnp.where(valid, spec_wave, jnp.inf))
     spec_max = jnp.max(jnp.where(valid, spec_wave, -jnp.inf))
-    margin = jnp.asarray(max(float(jqf_cfg.line_coverage_margin_kms), 0.0) / C_KMS, dtype=jnp.float64)
+    margin = jnp.asarray(max(float(spectral_cfg.line_coverage_margin_kms), 0.0) / C_KMS, dtype=jnp.float64)
     line_obs = jnp.asarray(line_wave, dtype=jnp.float64) * jnp.maximum(1.0 + redshift, 1.0e-8)
     coverage_min = spec_min * (1.0 - margin)
     coverage_max = spec_max * (1.0 + margin)
@@ -3179,47 +3194,7 @@ def _photometric_agn_line_mask(context: ModelContext, cfg: FitConfig, line_wave,
     return 1.0 - covered_weight
 
 
-def _integrated_spectral_flux_proxy(wave_obs, flux_mjy, mask):
-    """Integrate positive line flux density on the observed spectral grid.
-
-    Parameters
-    ----------
-    wave_obs : object
-        wave_obs value.
-    flux_mjy : object
-        flux_mjy value.
-    mask : object
-        mask value.
-    """
-    wave_obs = jnp.asarray(wave_obs, dtype=jnp.float64)
-    flux_mjy = jnp.asarray(flux_mjy, dtype=jnp.float64)
-    mask = jnp.asarray(mask, dtype=bool)
-    positive_flux = jnp.where(mask, jnp.clip(flux_mjy, 0.0, None), 0.0)
-    return jnp.trapezoid(positive_flux, wave_obs)
-
-
-def _line_strength_bridge_logprob(pred_flux, ref_flux, sigma_dex):
-    """Broad log-normal bridge between same-grid integrated line-flux proxies.
-
-    Parameters
-    ----------
-    pred_flux : object
-        pred_flux value.
-    ref_flux : object
-        ref_flux value.
-    sigma_dex : object
-        sigma_dex value.
-    """
-    floor = jnp.asarray(1.0e-30, dtype=jnp.float64)
-    sigma_ln = jnp.maximum(jnp.asarray(float(sigma_dex), dtype=jnp.float64) * jnp.log(10.0), 1.0e-6)
-    pred = jnp.maximum(jnp.asarray(pred_flux, dtype=jnp.float64), floor)
-    ref = jnp.maximum(jnp.asarray(ref_flux, dtype=jnp.float64), floor)
-    resid = (jnp.log(pred) - jnp.log(ref)) / sigma_ln
-    active = ref_flux > floor * 10.0
-    return jnp.where(active, -0.5 * resid * resid, jnp.asarray(0.0, dtype=jnp.float64))
-
-
-def _evaluate_jaxqsofit_backend(
+def _evaluate_spectral_components(
     wave_obs,
     redshift,
     continuum_mjy,
@@ -3271,26 +3246,28 @@ def _evaluate_jaxqsofit_backend(
             "Unable to load the built-in detailed spectral backend."
         ) from exc
 
-    jqf_cfg = cfg.spectroscopy_config.jaxqsofit
+    spectral_cfg = cfg.agn
     component_cfg = SpectralComponentConfig(
-        use_lines=bool(jqf_cfg.use_spectral_lines and include_lines),
-        use_tied_lines=bool(jqf_cfg.use_tied_lines),
-        use_feii=bool(jqf_cfg.use_spectral_feii),
-        use_balmer_continuum=bool(jqf_cfg.use_spectral_balmer_continuum),
-        use_multiplicative_tilt=bool(jqf_cfg.use_multiplicative_tilt),
-        line_table=jqf_cfg.line_table,
+        use_lines=bool(spectral_cfg.fit_lines and include_lines),
+        tied_lines=bool(spectral_cfg.tied_lines),
+        use_feii=bool(spectral_cfg.fit_feii),
+        use_balmer_continuum=bool(spectral_cfg.fit_balmer_continuum),
+        multiplicative_tilt=bool(spectral_cfg.fit_spectrum_tilt),
+        line_table=spectral_cfg.line_table,
         line_prior_config=line_prior_config,
-        line_flux_scale_mjy=float(jqf_cfg.line_flux_scale_mjy),
+        line_flux_scale_mjy=float(spectral_cfg.line_flux_scale_mjy),
         line_coverage_rest=line_coverage_rest,
-        include_elg_narrow_lines=bool(jqf_cfg.include_elg_narrow_lines),
-        include_high_ionization_lines=bool(jqf_cfg.include_high_ionization_lines),
+        include_elg_narrow_lines=bool(spectral_cfg.include_elg_narrow_lines),
+        include_high_ionization_lines=bool(spectral_cfg.include_high_ionization_lines),
         broad_fwhm_kms_default=DEFAULT_BROAD_LINE_WIDTH_KMS,
         feii_fwhm_kms_default=DEFAULT_BROAD_LINE_WIDTH_KMS,
         feii_fnu_pivot_rest=4575.0,
         balmer_velocity_kms_default=DEFAULT_BROAD_LINE_WIDTH_KMS,
-        broadening_convolution=jqf_cfg.broadening_convolution,
+        broadening_convolution=spectral_cfg.broadening_convolution,
         fixed_narrow_fwhm_kms=fixed_narrow_fwhm_kms,
         fixed_narrow_amp_scale=fixed_narrow_amp_scale,
+        custom_components=spectral_cfg.custom_components or (),
+        custom_line_components=spectral_cfg.custom_line_components or (),
     )
     result = evaluate_joint_spectral_components(
         wave_obs,
@@ -3299,7 +3276,7 @@ def _evaluate_jaxqsofit_backend(
         config=component_cfg,
         feii_template_wave_rest=rest_wave,
         feii_template_flux=feii_template_flux,
-        site_prefix="jqf",
+        site_prefix="spectral",
         feature_amplitude_scale=feature_amplitude_scale,
     )
     result["component_config"] = component_cfg
@@ -3319,7 +3296,7 @@ def _simple_feii_fnu_shape(wave_obs, redshift, template_wave_rest, template_flux
     return flambda_shape * (wave_rest / float(pivot_rest)) ** 2
 
 
-def _project_jaxqsofit_smooth_state_filters(
+def _project_spectral_smooth_state_filters(
     context,
     state,
     redshift,
@@ -3329,7 +3306,7 @@ def _project_jaxqsofit_smooth_state_filters(
     coverage_rest,
     sed_feii_scale,
 ):
-    """Project smooth JQF features through filters from one shared log grid.
+    """Project smooth spectral features through filters from one shared log grid.
 
     Fe II broadening and Balmer-edge smoothing are the expensive operations.
     Rendering them independently on every packed filter curve creates a large
@@ -3345,9 +3322,12 @@ def _project_jaxqsofit_smooth_state_filters(
         for filt in context.filters
         if np.asarray(filt.wave).size > 0
     ]
+    if not valid_filter_waves:
+        empty = jnp.zeros_like(context.filter_effective_wavelength_jax)
+        return empty, empty, empty
     wave_min = min(float(np.min(wave)) for wave in valid_filter_waves)
     wave_max = max(float(np.max(wave)) for wave in valid_filter_waves)
-    n_grid = int(context.fit_config.spectroscopy_config.jaxqsofit.photometric_feature_grid_size)
+    n_grid = int(context.fit_config.agn.feature_grid_size)
     feature_wave = jnp.geomspace(wave_min, wave_max, n_grid)
     # Lines have their own analytic, flux-conserving filter projection. Avoid
     # constructing their many-component profiles in this smooth-feature pass.
@@ -3370,7 +3350,7 @@ def _project_jaxqsofit_smooth_state_filters(
         spec_min = jnp.min(jnp.where(valid, spec_wave, jnp.inf))
         spec_max = jnp.max(jnp.where(valid, spec_wave, -jnp.inf))
         margin = max(
-            float(context.fit_config.spectroscopy_config.jaxqsofit.line_coverage_margin_kms),
+            float(context.fit_config.agn.line_coverage_margin_kms),
             0.0,
         ) / C_KMS
         coverage_min = spec_min * (1.0 - margin)
@@ -3417,7 +3397,46 @@ def _project_fnu_mjy_filter_curves(context: ModelContext, wave_obs, fnu_mjy):
     return conversion * context.filter_effective_wavelength_jax**2 * mean_flambda
 
 
-def _project_jaxqsofit_line_state_filters(context: ModelContext, state, redshift, broad_only=None):
+def _project_spectral_custom_state_filters(context, state, redshift, component_cfg):
+    """Render sampled custom components on native filter grids and integrate them."""
+    from .spectroscopy import render_joint_feature_state
+
+    curves = context.packed_filter_curves_jax
+    rendered = render_joint_feature_state(
+        curves.wave,
+        redshift,
+        state,
+        config=replace(component_cfg, use_lines=False, use_feii=False, use_balmer_continuum=False),
+    )
+    custom = rendered["custom"]
+    zero = jnp.zeros_like(curves.wave)
+    continuum = sum(
+        (custom[component.output_name] for component in component_cfg.custom_components),
+        zero,
+    )
+    broad = sum(
+        (
+            custom[component.output_name]
+            for component in component_cfg.custom_line_components
+            if component.line_kind == "broad"
+        ),
+        zero,
+    )
+    narrow = sum(
+        (
+            custom[component.output_name]
+            for component in component_cfg.custom_line_components
+            if component.line_kind == "narrow"
+        ),
+        zero,
+    )
+    return tuple(
+        _project_fnu_mjy_filter_curves(context, curves.wave, value)
+        for value in (continuum, broad, narrow)
+    )
+
+
+def _project_spectral_line_state_filters(context: ModelContext, state, redshift, broad_only=None):
     """Project sampled log-wavelength Gaussians using flux-conserving local grids."""
     amps = jnp.asarray(state.get("line_amp_per_component", jnp.zeros(0)), dtype=jnp.float64)
     n_filters = context.packed_filter_curves_jax.wave.shape[0]
@@ -3451,7 +3470,7 @@ def _project_jaxqsofit_line_state_filters(context: ModelContext, state, redshift
     )
 
 
-def _jaxqsofit_family_extrapolation(
+def _spectral_family_extrapolation(
     context: ModelContext,
     cfg: FitConfig,
     state,
@@ -3463,7 +3482,7 @@ def _jaxqsofit_family_extrapolation(
     line_blagn,
     line_narrow_template,
 ):
-    """Anchor fixed-ratio out-of-coverage lines to fitted JQF family fluxes."""
+    """Anchor fixed-ratio out-of-coverage lines to fitted spectral family fluxes."""
     amps = jnp.asarray(state.get("line_amp_per_component", jnp.zeros(0)), dtype=jnp.float64)
     if not amps.size:
         zeros = jnp.zeros_like(line_wave)
@@ -3567,23 +3586,19 @@ def evaluate_photometric_state(
     photometry_total_capture = _bool_to_jnp(context.photometry_total_capture)
     spectroscopy_enabled = bool(
         cfg.spectroscopy is not None
-        and cfg.spectroscopy_config.enabled
+        and bool(cfg.spectroscopy_list)
         and len(context.spec_wave_obs) > 0
         and np.any(context.spec_mask)
     )
-    jqf_cfg = cfg.spectroscopy_config.jaxqsofit
-    jaxqsofit_backend_enabled = bool(
-        spectroscopy_enabled
-        and str(cfg.spectroscopy_config.backend).lower() == "jaxqsofit"
-    )
+    spectral_cfg = cfg.agn
+    spectral_engine_enabled = spectroscopy_enabled
     configured_spectral_lines = bool(
-        jaxqsofit_backend_enabled
-        and jqf_cfg.use_spectral_lines
+        spectral_engine_enabled
+        and spectral_cfg.fit_lines
     )
-    shared_jaxqsofit_lines = bool(
-        jaxqsofit_backend_enabled
-        and jqf_cfg.use_spectral_lines
-        and jqf_cfg.use_photometric_lines
+    shared_spectral_lines = bool(
+        spectral_engine_enabled
+        and spectral_cfg.fit_lines
     )
     active_spectral_lines = bool(
         configured_spectral_lines
@@ -3592,13 +3607,13 @@ def evaluate_photometric_state(
     )
     use_native_feii = bool(
         include_sed_agn_features
-        and not (jaxqsofit_backend_enabled and bool(jqf_cfg.use_spectral_feii))
+        and not (spectral_engine_enabled and bool(spectral_cfg.fit_feii))
     )
     use_native_balmer = bool(
         include_sed_agn_features
-        and not (jaxqsofit_backend_enabled and bool(jqf_cfg.use_spectral_balmer_continuum))
+        and not (spectral_engine_enabled and bool(spectral_cfg.fit_balmer_continuum))
     )
-    jaxqsofit_line_coverage_rest = _fixed_spectral_line_coverage_rest(context, cfg) if spectroscopy_enabled else None
+    spectral_line_coverage_rest = _fixed_spectral_line_coverage_rest(context, cfg) if spectroscopy_enabled else None
     has_phot_spatial_scale = bool(
         np.any(np.isfinite(context.effective_spatial_scale_arcsec) & (np.asarray(context.effective_spatial_scale_arcsec, dtype=float) > 0.0))
     )
@@ -3642,7 +3657,6 @@ def evaluate_photometric_state(
         igm = context.fixed_igm_jax
     needs_spec_host_basis = bool(
         spectroscopy_enabled
-        and str(cfg.spectroscopy_config.backend).lower() == "jaxqsofit"
         and context.spec_host_basis_jax is not None
         and context.spec_rest_wave_jax.size == context.spec_wave_obs.size
         and not cfg.observation.fits_redshift
@@ -3816,7 +3830,7 @@ def evaluate_photometric_state(
         )
 
         if include_sed_agn_features:
-            if shared_jaxqsofit_lines or (
+            if shared_spectral_lines or (
                 configured_spectral_lines and not active_spectral_lines
             ):
                 broad_lines_strength = jnp.asarray(1.0, dtype=jnp.float64)
@@ -4373,122 +4387,109 @@ def evaluate_photometric_state(
     log_spectrum_scale = jnp.asarray(0.0, dtype=jnp.float64)
     feature_amplitude_scale = jnp.asarray(1.0, dtype=jnp.float64)
     spec_likelihood_weight = jnp.asarray(1.0, dtype=jnp.float64)
-    jqf_line_photometry = jnp.zeros_like(pred_fluxes)
-    jqf_feii_photometry = jnp.zeros_like(pred_fluxes)
-    jqf_extrapolated_feii_photometry = jnp.zeros_like(pred_fluxes)
-    jqf_balmer_photometry = jnp.zeros_like(pred_fluxes)
-    jqf_extrapolated_broad_photometry = jnp.zeros_like(pred_fluxes)
-    jqf_extrapolated_narrow_photometry = jnp.zeros_like(pred_fluxes)
-    jqf_extrapolated_broad_lumin = jnp.zeros_like(line_wave)
-    jqf_extrapolated_narrow_lumin = jnp.zeros_like(line_wave)
-    jqf_extrapolated_broad_width = jnp.asarray(DEFAULT_BROAD_LINE_WIDTH_KMS, dtype=jnp.float64)
-    jqf_extrapolated_narrow_width = jnp.asarray(DEFAULT_NARROW_LINE_WIDTH_KMS, dtype=jnp.float64)
-    jqf_photometry_adjustment = jnp.zeros_like(pred_fluxes)
-    jqf_line_obs_sed = jnp.zeros_like(obs_wave)
-    jqf_feii_obs_sed = jnp.zeros_like(obs_wave)
-    jqf_balmer_obs_sed = jnp.zeros_like(obs_wave)
+    spectral_line_photometry = jnp.zeros_like(pred_fluxes)
+    spectral_feii_photometry = jnp.zeros_like(pred_fluxes)
+    spectral_extrapolated_feii_photometry = jnp.zeros_like(pred_fluxes)
+    spectral_balmer_photometry = jnp.zeros_like(pred_fluxes)
+    spectral_extrapolated_broad_photometry = jnp.zeros_like(pred_fluxes)
+    spectral_extrapolated_narrow_photometry = jnp.zeros_like(pred_fluxes)
+    spectral_extrapolated_broad_lumin = jnp.zeros_like(line_wave)
+    spectral_extrapolated_narrow_lumin = jnp.zeros_like(line_wave)
+    spectral_extrapolated_broad_width = jnp.asarray(DEFAULT_BROAD_LINE_WIDTH_KMS, dtype=jnp.float64)
+    spectral_extrapolated_narrow_width = jnp.asarray(DEFAULT_NARROW_LINE_WIDTH_KMS, dtype=jnp.float64)
+    spectral_photometry_adjustment = jnp.zeros_like(pred_fluxes)
+    spectral_line_obs_sed = jnp.zeros_like(obs_wave)
+    spectral_feii_obs_sed = jnp.zeros_like(obs_wave)
+    spectral_balmer_obs_sed = jnp.zeros_like(obs_wave)
+    spectral_custom_continuum_obs_sed = jnp.zeros_like(obs_wave)
     if spectroscopy_enabled:
-        backend = str(cfg.spectroscopy_config.backend).lower()
-        if backend == "jaxqsofit":
-            use_spec_resolution_continuum = bool(
-                context.spec_host_basis_jax is not None
-                and context.spec_rest_wave_jax.size == context.spec_wave_obs.size
-                and not cfg.observation.fits_redshift
+        use_spec_resolution_continuum = bool(
+            context.spec_host_basis_jax is not None
+            and context.spec_rest_wave_jax.size == context.spec_wave_obs.size
+            and not cfg.observation.fits_redshift
+        )
+        if use_spec_resolution_continuum:
+            spec_rest_wave = context.spec_rest_wave_jax
+            spec_igm = jnp.interp(spec_rest_wave, rest_wave, igm, left=0.0, right=0.0)
+            spec_att_curve = _attenuation_curve(
+                spec_rest_wave,
+                -1.2,
+                -3.0,
+                1.2,
+                GRAHSP_BIATTENUATION_BREAK_A,
             )
-            if use_spec_resolution_continuum:
-                spec_rest_wave = context.spec_rest_wave_jax
-                spec_igm = jnp.interp(spec_rest_wave, rest_wave, igm, left=0.0, right=0.0)
-                spec_att_curve = _attenuation_curve(
+            spec_gal_att_factor = 10 ** (ebv_gal * spec_att_curve / -2.5)
+            spec_agn_att_factor = 10 ** ((ebv_gal + ebv_agn) * spec_att_curve / -2.5)
+            spec_nebular_absorption_rest = jnp.interp(
+                spec_rest_wave,
+                rest_wave,
+                nebular["absorption_rest"],
+                left=0.0,
+                right=0.0,
+            )
+            spec_host_intrinsic = _host_rest_on_basis(host_state, context.spec_host_basis_jax)
+            if host_kinematics_enabled:
+                spec_host_intrinsic = _shift_and_broaden_single_spectrum_lnlam(
+                    jnp.log(spec_rest_wave),
+                    spec_host_intrinsic,
+                    gal_v_kms,
+                    gal_sigma_kms,
+                )
+            spec_host_rest = (spec_host_intrinsic + spec_nebular_absorption_rest) * spec_gal_att_factor
+            spec_disk_rest = (
+                _powerlaw_jax(
                     spec_rest_wave,
-                    -1.2,
-                    -3.0,
-                    1.2,
-                    GRAHSP_BIATTENUATION_BREAK_A,
+                    agn_amp / 5100.0,
+                    uv_slope,
+                    pl_slope,
+                    5100.0,
+                    pl_bend_loc,
+                    pl_bend_width,
+                    pl_cutoff,
                 )
-                spec_gal_att_factor = 10 ** (ebv_gal * spec_att_curve / -2.5)
-                spec_agn_att_factor = 10 ** ((ebv_gal + ebv_agn) * spec_att_curve / -2.5)
-                spec_nebular_absorption_rest = jnp.interp(
-                    spec_rest_wave,
-                    rest_wave,
-                    nebular["absorption_rest"],
-                    left=0.0,
-                    right=0.0,
-                )
-                spec_host_intrinsic = _host_rest_on_basis(host_state, context.spec_host_basis_jax)
-                if host_kinematics_enabled:
-                    spec_host_intrinsic = _shift_and_broaden_single_spectrum_lnlam(
-                        jnp.log(spec_rest_wave),
-                        spec_host_intrinsic,
-                        gal_v_kms,
-                        gal_sigma_kms,
-                    )
-                spec_host_rest = (spec_host_intrinsic + spec_nebular_absorption_rest) * spec_gal_att_factor
-                spec_disk_rest = (
-                    _powerlaw_jax(
-                        spec_rest_wave,
-                        agn_amp / 5100.0,
-                        uv_slope,
-                        pl_slope,
-                        5100.0,
-                        pl_bend_loc,
-                        pl_bend_width,
-                        pl_cutoff,
-                    )
-                    * spec_agn_att_factor
-                )
-                spec_torus_rest = _torus_component(
-                    spec_rest_wave,
-                    fcov,
-                    si,
-                    cool_lam,
-                    cool_width,
-                    hot_lam,
-                    hot_width,
-                    hot_fcov,
-                    0.29,
-                    GRAHSP_SI_EM_LAM_A,
-                    GRAHSP_SI_ABS_LAM_A,
-                    GRAHSP_SI_EM_WIDTH_A,
-                    GRAHSP_SI_ABS_WIDTH_A,
-                    agn_amp,
-                )
-                spec_denom = (
-                    4.0
-                    * jnp.pi
-                    * jnp.maximum(luminosity_distance_m, 1e-12) ** 2
-                    * jnp.maximum(1.0 + redshift, 1e-8)
-                )
-                spec_host_lambda = spec_host_rest * spec_igm / spec_denom
-                spec_disk_lambda = spec_disk_rest * spec_igm / spec_denom
-                spec_torus_lambda = spec_torus_rest * spec_igm / spec_denom
-                if host_capture_enabled:
-                    spec_capture_at_pixel = spec_host_capture_fraction_by_spectrum[spec_spectrum_index]
-                    spec_host_lambda = spec_capture_at_pixel * spec_host_lambda
-                spec_host_model_fluxes = _flambda_to_mjy(spec_wave_obs, spec_host_lambda)
-                spec_disk_model_fluxes = _flambda_to_mjy(spec_wave_obs, spec_disk_lambda)
-                spec_torus_model_fluxes = _flambda_to_mjy(spec_wave_obs, spec_torus_lambda)
-                spec_model_fluxes = spec_host_model_fluxes + spec_disk_model_fluxes + spec_torus_model_fluxes
-            else:
-                spec_source_obs = host_obs + _redshift_to_obs(
-                    rest_wave,
-                    (disk_rest + torus_rest) * igm,
-                    obs_wave,
-                    redshift,
-                    luminosity_distance_m,
-                )
-                spec_model_lambda = jnp.interp(spec_wave_obs, obs_wave, spec_source_obs, left=0.0, right=0.0)
-                spec_host_lambda = jnp.interp(spec_wave_obs, obs_wave, host_obs, left=0.0, right=0.0)
-                if host_capture_enabled:
-                    spec_capture_at_pixel = spec_host_capture_fraction_by_spectrum[spec_spectrum_index]
-                    spec_model_lambda = spec_model_lambda - spec_host_lambda + spec_capture_at_pixel * spec_host_lambda
-                    spec_host_lambda = spec_capture_at_pixel * spec_host_lambda
-                spec_host_model_fluxes = _flambda_to_mjy(spec_wave_obs, spec_host_lambda)
-                spec_model_fluxes = _flambda_to_mjy(spec_wave_obs, spec_model_lambda)
-            spec_continuum_model_fluxes = spec_model_fluxes
-        elif backend != "jaxsedfit":
-            raise ValueError(f"Unsupported spectroscopy backend: {cfg.spectroscopy_config.backend!r}")
+                * spec_agn_att_factor
+            )
+            spec_torus_rest = _torus_component(
+                spec_rest_wave,
+                fcov,
+                si,
+                cool_lam,
+                cool_width,
+                hot_lam,
+                hot_width,
+                hot_fcov,
+                0.29,
+                GRAHSP_SI_EM_LAM_A,
+                GRAHSP_SI_ABS_LAM_A,
+                GRAHSP_SI_EM_WIDTH_A,
+                GRAHSP_SI_ABS_WIDTH_A,
+                agn_amp,
+            )
+            spec_denom = (
+                4.0
+                * jnp.pi
+                * jnp.maximum(luminosity_distance_m, 1e-12) ** 2
+                * jnp.maximum(1.0 + redshift, 1e-8)
+            )
+            spec_host_lambda = spec_host_rest * spec_igm / spec_denom
+            spec_disk_lambda = spec_disk_rest * spec_igm / spec_denom
+            spec_torus_lambda = spec_torus_rest * spec_igm / spec_denom
+            if host_capture_enabled:
+                spec_capture_at_pixel = spec_host_capture_fraction_by_spectrum[spec_spectrum_index]
+                spec_host_lambda = spec_capture_at_pixel * spec_host_lambda
+            spec_host_model_fluxes = _flambda_to_mjy(spec_wave_obs, spec_host_lambda)
+            spec_disk_model_fluxes = _flambda_to_mjy(spec_wave_obs, spec_disk_lambda)
+            spec_torus_model_fluxes = _flambda_to_mjy(spec_wave_obs, spec_torus_lambda)
+            spec_model_fluxes = spec_host_model_fluxes + spec_disk_model_fluxes + spec_torus_model_fluxes
         else:
-            spec_model_lambda = jnp.interp(spec_wave_obs, obs_wave, total_obs, left=0.0, right=0.0)
+            spec_source_obs = host_obs + _redshift_to_obs(
+                rest_wave,
+                (disk_rest + torus_rest) * igm,
+                obs_wave,
+                redshift,
+                luminosity_distance_m,
+            )
+            spec_model_lambda = jnp.interp(spec_wave_obs, obs_wave, spec_source_obs, left=0.0, right=0.0)
             spec_host_lambda = jnp.interp(spec_wave_obs, obs_wave, host_obs, left=0.0, right=0.0)
             if host_capture_enabled:
                 spec_capture_at_pixel = spec_host_capture_fraction_by_spectrum[spec_spectrum_index]
@@ -4496,15 +4497,20 @@ def evaluate_photometric_state(
                 spec_host_lambda = spec_capture_at_pixel * spec_host_lambda
             spec_host_model_fluxes = _flambda_to_mjy(spec_wave_obs, spec_host_lambda)
             spec_model_fluxes = _flambda_to_mjy(spec_wave_obs, spec_model_lambda)
-            spec_continuum_model_fluxes = spec_model_fluxes
-        if cfg.spectroscopy_config.fit_scale:
+        spec_continuum_model_fluxes = spec_model_fluxes
+        fit_spectrum_scale = (
+            cfg.photometry is not None
+            if cfg.likelihood.fit_spectrum_scale is None
+            else bool(cfg.likelihood.fit_spectrum_scale)
+        )
+        if fit_spectrum_scale:
             scale_prior = _prior_distribution(
                 prior_config,
                 "log_spectrum_scale",
                 dist.Normal(
                     0.0,
                     np.log(10.0)
-                    * cfg.spectroscopy_config.scale_prior_sigma_dex,
+                    * cfg.likelihood.spectrum_scale_prior_sigma_dex,
                 ),
             )
             n_spectra = len(context.spec_instruments)
@@ -4536,125 +4542,148 @@ def evaluate_photometric_state(
             if jnp.ndim(spectrum_scale) > 0
             else spectrum_scale
         )
-        if backend == "jaxqsofit" and include_spectral_features:
-            jqf_components = _evaluate_jaxqsofit_backend(
+        if include_spectral_features:
+            spectral_components = _evaluate_spectral_components(
                 spec_wave_obs,
                 redshift,
                 spec_model_fluxes,
                 cfg,
-                context.jaxqsofit_prior_config,
+                context.spectral_prior_config,
                 feii_template_wave_native,
                 feii_template_flux_native,
-                line_coverage_rest=jaxqsofit_line_coverage_rest,
+                line_coverage_rest=spectral_line_coverage_rest,
                 feature_amplitude_scale=feature_amplitude_scale,
                 include_lines=include_spectral_lines,
             )
-            jqf_cfg = cfg.spectroscopy_config.jaxqsofit
+            spectral_cfg = cfg.agn
             if host_capture_enabled and bool(
-                jqf_cfg.use_spectral_lines and include_spectral_lines
+                spectral_cfg.fit_lines and include_spectral_lines
             ):
                 spec_capture_at_pixel = spec_host_capture_fraction_by_spectrum[spec_spectrum_index]
-                jqf_line_model_aperture = _apply_extended_capture(
-                    jqf_components["lines"],
-                    jqf_components["line_narrow"],
+                spectral_line_model_aperture = _apply_extended_capture(
+                    spectral_components["lines"],
+                    spectral_components["line_narrow"],
                     spec_capture_at_pixel,
                 )
-                jqf_total_aperture = (
-                    jqf_components["continuum"]
-                    + jqf_components["feii"]
-                    + jqf_components["balmer"]
-                    + jqf_line_model_aperture
+                spectral_total_aperture = (
+                    spectral_components["continuum"]
+                    + spectral_components["feii"]
+                    + spectral_components["balmer"]
+                    + spectral_line_model_aperture
                 )
-                jqf_components = {
-                    **jqf_components,
-                    "total": jqf_total_aperture,
-                    "lines": jqf_line_model_aperture,
-                    "line_narrow": spec_capture_at_pixel * jqf_components["line_narrow"],
+                spectral_components = {
+                    **spectral_components,
+                    "total": spectral_total_aperture,
+                    "lines": spectral_line_model_aperture,
+                    "line_narrow": spec_capture_at_pixel * spectral_components["line_narrow"],
                 }
-                numpyro.deterministic("jqf_line_model_aperture", jqf_line_model_aperture)
-                numpyro.deterministic("jqf_line_model_narrow_aperture", jqf_components["line_narrow"])
-            jqf_state = jqf_components["state"]
+                numpyro.deterministic("spectral_line_model_aperture", spectral_line_model_aperture)
+                numpyro.deterministic("spectral_line_model_narrow_aperture", spectral_components["line_narrow"])
+            spectral_state = spectral_components["state"]
             # Render the sampled spectral-feature state on the SED grid as
             # well. These are the same posterior line, Fe II, and Balmer
             # models used by the spectrum, not rescaled native templates.
             from .spectroscopy import render_joint_feature_state
 
-            jqf_sed_lines_mjy = render_joint_feature_state(
+            spectral_sed_rendered = render_joint_feature_state(
                 obs_wave,
                 redshift,
-                jqf_state,
-                config=jqf_components["component_config"],
-            )["lines"]
+                spectral_state,
+                config=spectral_components["component_config"],
+            )
+            spectral_sed_lines_mjy = spectral_sed_rendered["lines"]
             sed_mjy_per_flambda = jnp.maximum(
                 1.0e-10 / 299792458.0 * 1.0e29 * obs_wave**2,
                 1.0e-30,
             )
-            jqf_line_obs_sed = jqf_sed_lines_mjy / sed_mjy_per_flambda
+            spectral_line_obs_sed = spectral_sed_lines_mjy / sed_mjy_per_flambda
+            spectral_custom_continuum_obs_sed = (
+                spectral_sed_rendered["custom_continuum"] / sed_mjy_per_flambda
+            )
             # Fe II and Balmer broadening are comparatively expensive FFTs.
             # Render them only for component predictions used by plotting, not
             # during every likelihood evaluation in MAP or NUTS.
             if include_components and (
-                "feii_norm" in jqf_state or "balmer_norm" in jqf_state
+                "feii_norm" in spectral_state or "balmer_norm" in spectral_state
             ):
-                jqf_sed_smooth_mjy = render_joint_feature_state(
+                spectral_sed_smooth_mjy = render_joint_feature_state(
                     obs_wave,
                     redshift,
-                    jqf_state,
-                    config=jqf_components["component_config"],
+                    spectral_state,
+                    config=spectral_components["component_config"],
                     feii_template_wave_rest=feii_template_wave_native,
                     feii_template_flux=feii_template_flux_native,
                 )
-                jqf_feii_obs_sed = jqf_sed_smooth_mjy["feii"] / sed_mjy_per_flambda
-                jqf_balmer_obs_sed = jqf_sed_smooth_mjy["balmer"] / sed_mjy_per_flambda
-            jqf_broad_photometry = _project_jaxqsofit_line_state_filters(
-                context, jqf_state, redshift, broad_only=True
+                spectral_feii_obs_sed = spectral_sed_smooth_mjy["feii"] / sed_mjy_per_flambda
+                spectral_balmer_obs_sed = spectral_sed_smooth_mjy["balmer"] / sed_mjy_per_flambda
+            spectral_broad_photometry = _project_spectral_line_state_filters(
+                context, spectral_state, redshift, broad_only=True
             )
-            jqf_narrow_photometry_total = _project_jaxqsofit_line_state_filters(
-                context, jqf_state, redshift, broad_only=False
+            spectral_narrow_photometry_total = _project_spectral_line_state_filters(
+                context, spectral_state, redshift, broad_only=False
             )
-            jqf_narrow_photometry = jqf_narrow_photometry_total * host_capture_fraction
-            jqf_line_photometry = jqf_broad_photometry + jqf_narrow_photometry
+            spectral_narrow_photometry = spectral_narrow_photometry_total * host_capture_fraction
+            spectral_line_photometry = spectral_broad_photometry + spectral_narrow_photometry
+            spectral_custom_continuum_photometry = jnp.zeros_like(pred_fluxes)
+            spectral_custom_broad_photometry = jnp.zeros_like(pred_fluxes)
+            spectral_custom_narrow_photometry_total = jnp.zeros_like(pred_fluxes)
+            component_config = spectral_components["component_config"]
+            if (
+                getattr(component_config, "custom_components", ())
+                or getattr(component_config, "custom_line_components", ())
+            ):
+                (
+                    spectral_custom_continuum_photometry,
+                    spectral_custom_broad_photometry,
+                    spectral_custom_narrow_photometry_total,
+                ) = _project_spectral_custom_state_filters(
+                    context,
+                    spectral_state,
+                    redshift,
+                    component_config,
+                )
+            spectral_custom_narrow_photometry = (
+                spectral_custom_narrow_photometry_total * host_capture_fraction
+            )
             simple_spec_feii_shape = _simple_feii_fnu_shape(
                 spec_wave_obs,
                 redshift,
                 feii_template_wave_native,
                 feii_template_flux_native,
             )
-            if jaxqsofit_line_coverage_rest is None:
+            if spectral_line_coverage_rest is None:
                 spec_feii_anchor_mask = spec_mask
             else:
                 spec_rest_for_feii = spec_wave_obs / jnp.maximum(1.0 + redshift, 1.0e-8)
                 spec_feii_anchor_mask = (
                     spec_mask
-                    & (spec_rest_for_feii >= jaxqsofit_line_coverage_rest[0])
-                    & (spec_rest_for_feii <= jaxqsofit_line_coverage_rest[1])
+                    & (spec_rest_for_feii >= spectral_line_coverage_rest[0])
+                    & (spec_rest_for_feii <= spectral_line_coverage_rest[1])
                 )
             anchor_shape = jnp.where(spec_feii_anchor_mask, simple_spec_feii_shape, 0.0)
-            anchor_jqf = jnp.where(spec_feii_anchor_mask, jqf_components["feii"], 0.0)
-            sed_feii_scale = jnp.sum(anchor_shape * anchor_jqf) / jnp.maximum(
+            anchor_spectral = jnp.where(spec_feii_anchor_mask, spectral_components["feii"], 0.0)
+            sed_feii_scale = jnp.sum(anchor_shape * anchor_spectral) / jnp.maximum(
                 jnp.sum(anchor_shape * anchor_shape), 1.0e-30
             )
-            jqf_feii_photometry, jqf_extrapolated_feii_photometry, jqf_balmer_photometry = _project_jaxqsofit_smooth_state_filters(
+            spectral_feii_photometry, spectral_extrapolated_feii_photometry, spectral_balmer_photometry = _project_spectral_smooth_state_filters(
                 context,
-                jqf_state,
+                spectral_state,
                 redshift,
-                jqf_components["component_config"],
+                spectral_components["component_config"],
                 feii_template_wave_native,
                 feii_template_flux_native,
-                jaxqsofit_line_coverage_rest,
+                spectral_line_coverage_rest,
                 sed_feii_scale,
             )
             if bool(
-                jqf_cfg.use_spectral_lines
-                and jqf_cfg.use_photometric_lines
-                and include_spectral_lines
+                spectral_cfg.fit_lines and include_spectral_lines
             ):
                 line_narrow_template = jnp.where(agn_type == 3, line_liner, line_sy2)
-                jqf_extrapolated_broad_lumin, jqf_extrapolated_narrow_lumin, jqf_extrapolated_broad_width, jqf_extrapolated_narrow_width = (
-                    _jaxqsofit_family_extrapolation(
+                spectral_extrapolated_broad_lumin, spectral_extrapolated_narrow_lumin, spectral_extrapolated_broad_width, spectral_extrapolated_narrow_width = (
+                    _spectral_family_extrapolation(
                         context,
                         cfg,
-                        jqf_state,
+                        spectral_state,
                         redshift,
                         luminosity_distance_m,
                         ebv_gal + ebv_agn,
@@ -4664,123 +4693,51 @@ def evaluate_photometric_state(
                         line_narrow_template,
                     )
                 )
-                # ``_jaxqsofit_family_extrapolation`` returns integrated line
+                # ``_spectral_family_extrapolation`` returns integrated line
                 # luminosities.  The native AGN projector expects the legacy
                 # CIGALE amplitude convention (lambda L_lambda / 5100 A),
                 # which would multiply these fluxes by ~5100*sqrt(2).
                 # Use the flux-conserving integrated-luminosity projector.
-                jqf_extrapolated_broad_photometry = _project_integrated_local_line_filters(
+                spectral_extrapolated_broad_photometry = _project_integrated_local_line_filters(
                     context,
                     line_wave,
-                    jqf_extrapolated_broad_lumin,
-                    jqf_extrapolated_broad_width,
+                    spectral_extrapolated_broad_lumin,
+                    spectral_extrapolated_broad_width,
                     ebv_gal + ebv_agn,
                     redshift,
                     luminosity_distance_m,
                     igm,
                 )
-                jqf_extrapolated_narrow_total = _project_integrated_local_line_filters(
+                spectral_extrapolated_narrow_total = _project_integrated_local_line_filters(
                     context,
                     line_wave,
-                    jqf_extrapolated_narrow_lumin,
-                    jqf_extrapolated_narrow_width,
+                    spectral_extrapolated_narrow_lumin,
+                    spectral_extrapolated_narrow_width,
                     ebv_gal + ebv_agn,
                     redshift,
                     luminosity_distance_m,
                     igm,
                 )
-                jqf_extrapolated_narrow_photometry = jqf_extrapolated_narrow_total * host_capture_fraction
-            shared_jqf_photometry = (
-                jqf_line_photometry
-                + jqf_feii_photometry
-                + jqf_extrapolated_feii_photometry
-                + jqf_balmer_photometry
-                + jqf_extrapolated_broad_photometry
-                + jqf_extrapolated_narrow_photometry
+                spectral_extrapolated_narrow_photometry = spectral_extrapolated_narrow_total * host_capture_fraction
+            shared_spectral_photometry = (
+                spectral_line_photometry
+                + spectral_custom_continuum_photometry
+                + spectral_custom_broad_photometry
+                + spectral_custom_narrow_photometry
+                + spectral_feii_photometry
+                + spectral_extrapolated_feii_photometry
+                + spectral_balmer_photometry
+                + spectral_extrapolated_broad_photometry
+                + spectral_extrapolated_narrow_photometry
             )
             native_replaced_photometry = jnp.where(
-                bool(jqf_cfg.use_spectral_lines and include_spectral_lines),
+                bool(spectral_cfg.fit_lines and include_spectral_lines),
                 local_agn_line_fluxes,
                 jnp.zeros_like(local_agn_line_fluxes),
             )
-            jqf_photometry_adjustment = shared_jqf_photometry - native_replaced_photometry
-            pred_fluxes = pred_fluxes + jqf_photometry_adjustment
-            if (
-                bool(jqf_cfg.use_line_strength_priors)
-                and bool(jqf_cfg.use_spectral_lines)
-                and not bool(jqf_cfg.use_photometric_lines)
-            ):
-                sed_broad_line_obs = _redshift_to_obs(
-                    rest_wave,
-                    line_bl_att_rest * igm,
-                    obs_wave,
-                    redshift,
-                    luminosity_distance_m,
-                )
-                sed_narrow_line_obs = _redshift_to_obs(
-                    rest_wave,
-                    line_nl_att_rest * igm,
-                    obs_wave,
-                    redshift,
-                    luminosity_distance_m,
-                )
-                sed_broad_line_mjy = _flambda_to_mjy(
-                    spec_wave_obs,
-                    jnp.interp(spec_wave_obs, obs_wave, sed_broad_line_obs, left=0.0, right=0.0),
-                )
-                sed_narrow_line_mjy = _flambda_to_mjy(
-                    spec_wave_obs,
-                    jnp.interp(spec_wave_obs, obs_wave, sed_narrow_line_obs, left=0.0, right=0.0),
-                )
-                if host_capture_enabled:
-                    sed_narrow_line_mjy = sed_narrow_line_mjy * spec_host_capture_fraction_by_spectrum[spec_spectrum_index]
-                sed_narrow_bridge_mjy = sed_narrow_line_mjy
-                if bool(jqf_cfg.use_nebular_line_prior):
-                    sed_nebular_line_obs = _redshift_to_obs(
-                        rest_wave,
-                        nebular_lines_att_rest * igm,
-                        obs_wave,
-                        redshift,
-                        luminosity_distance_m,
-                    )
-                    sed_nebular_line_mjy = _flambda_to_mjy(
-                        spec_wave_obs,
-                        jnp.interp(spec_wave_obs, obs_wave, sed_nebular_line_obs, left=0.0, right=0.0),
-                    )
-                    if host_capture_enabled:
-                        sed_nebular_line_mjy = sed_nebular_line_mjy * spec_host_capture_fraction_by_spectrum[spec_spectrum_index]
-                    sed_narrow_bridge_mjy = sed_narrow_bridge_mjy + sed_nebular_line_mjy
-
-                jqf_broad_flux = _integrated_spectral_flux_proxy(spec_wave_obs, jqf_components["line_broad"], spec_mask)
-                sed_broad_flux = _integrated_spectral_flux_proxy(spec_wave_obs, sed_broad_line_mjy, spec_mask)
-                jqf_narrow_flux = _integrated_spectral_flux_proxy(spec_wave_obs, jqf_components["line_narrow"], spec_mask)
-                sed_narrow_flux = _integrated_spectral_flux_proxy(spec_wave_obs, sed_narrow_bridge_mjy, spec_mask)
-                numpyro.factor(
-                    "jqf_broad_to_sed_broad_line_prior",
-                    _line_strength_bridge_logprob(
-                        sed_broad_flux,
-                        jqf_broad_flux,
-                        jqf_cfg.line_strength_prior_sigma_dex,
-                    ),
-                )
-                narrow_sigma_dex = (
-                    jqf_cfg.nebular_line_prior_sigma_dex
-                    if bool(jqf_cfg.use_nebular_line_prior)
-                    else jqf_cfg.line_strength_prior_sigma_dex
-                )
-                numpyro.factor(
-                    "jqf_narrow_to_sed_narrow_line_prior",
-                    _line_strength_bridge_logprob(
-                        sed_narrow_flux,
-                        jqf_narrow_flux,
-                        narrow_sigma_dex,
-                    ),
-                )
-                numpyro.deterministic("jqf_broad_line_flux_proxy", jqf_broad_flux)
-                numpyro.deterministic("sed_broad_line_flux_proxy", sed_broad_flux)
-                numpyro.deterministic("jqf_narrow_line_flux_proxy", jqf_narrow_flux)
-                numpyro.deterministic("sed_narrow_line_flux_proxy", sed_narrow_flux)
-            spec_model_fluxes = jqf_components["total"]
+            spectral_photometry_adjustment = shared_spectral_photometry - native_replaced_photometry
+            pred_fluxes = pred_fluxes + spectral_photometry_adjustment
+            spec_model_fluxes = spectral_components["total"]
         if jnp.ndim(spectrum_scale) > 0:
             spec_model_fluxes = spectrum_scale[spec_spectrum_index] * spec_model_fluxes
         else:
@@ -4790,15 +4747,15 @@ def evaluate_photometric_state(
             spec_fluxes,
             spec_errors,
             spec_mask,
-            cfg.spectroscopy_config.systematics_width,
-            cfg.spectroscopy_config.student_t_df,
+            cfg.likelihood.spectrum_systematics_width,
+            cfg.likelihood.spectrum_student_t_df,
         )
         spec_likelihood_weight = spectroscopic_likelihood_weight(
             spec_wave_obs,
             spec_mask,
             spec_spectrum_index,
-            cfg.spectroscopy_config.likelihood_weight_mode,
-            cfg.spectroscopy_config.resolving_power,
+            cfg.likelihood.spectrum_weight_mode,
+            context.spec_resolving_power,
         )
         spec_logl = spec_likelihood_weight * spec_logl
         if add_likelihood:
@@ -4846,20 +4803,54 @@ def evaluate_photometric_state(
         balmer_obs = _redshift_to_obs(rest_wave, balmer_att_rest * igm, obs_wave, redshift, luminosity_distance_m)
         joint_line_rendering = bool(
             spectroscopy_enabled
-            and str(cfg.spectroscopy_config.backend).lower() == "jaxqsofit"
+            and True
             and include_spectral_features
             and include_spectral_lines
-            and cfg.spectroscopy_config.jaxqsofit.use_spectral_lines
+            and (
+                cfg.agn.fit_lines
+                or cfg.agn.custom_line_components
+            )
+        )
+        joint_feii_rendering = bool(
+            spectroscopy_enabled
+            and True
+            and include_spectral_features
+            and cfg.agn.fit_feii
+        )
+        joint_balmer_rendering = bool(
+            spectroscopy_enabled
+            and True
+            and include_spectral_features
+            and cfg.agn.fit_balmer_continuum
         )
         plotted_total_obs = total_obs
         plotted_agn_obs = agn_obs
+        if spectroscopy_enabled and True:
+            plotted_total_obs = plotted_total_obs + spectral_custom_continuum_obs_sed
+            plotted_agn_obs = plotted_agn_obs + spectral_custom_continuum_obs_sed
         if joint_line_rendering:
             # The photometric likelihood replaces the native GRAHSP AGN-line
-            # template with the fitted JQF state.  Apply the same replacement
+            # template with the fitted spectral state.  Apply the same replacement
             # to the plotted continuous SED instead of leaving invisible
             # native UV lines in the black and AGN-total curves.
-            plotted_total_obs = plotted_total_obs - line_obs + jqf_line_obs_sed
-            plotted_agn_obs = plotted_agn_obs - line_obs + jqf_line_obs_sed
+            replaced_line_obs = jnp.where(
+                bool(cfg.agn.fit_lines),
+                line_obs,
+                jnp.zeros_like(line_obs),
+            )
+            plotted_total_obs = plotted_total_obs - replaced_line_obs + spectral_line_obs_sed
+            plotted_agn_obs = plotted_agn_obs - replaced_line_obs + spectral_line_obs_sed
+        if joint_feii_rendering:
+            # Joint fitting disables the native SED Fe II component. Add the
+            # fitted JAXQSOFit state back to the continuous plotted totals,
+            # matching the component curve and photometric likelihood.
+            plotted_total_obs = plotted_total_obs - feii_obs + spectral_feii_obs_sed
+            plotted_agn_obs = plotted_agn_obs - feii_obs + spectral_feii_obs_sed
+        if joint_balmer_rendering:
+            # As above, use the fitted spectral Balmer continuum in the total
+            # curves. This remains active in continuum-only warm-up stages.
+            plotted_total_obs = plotted_total_obs - balmer_obs + spectral_balmer_obs_sed
+            plotted_agn_obs = plotted_agn_obs - balmer_obs + spectral_balmer_obs_sed
         if joint_line_rendering and correct_nebular_line_photometry:
             # Locally rendered nebular profiles are plotted below.  Remove the
             # undersampled coarse-grid version from the continuous total first.
@@ -4868,8 +4859,8 @@ def evaluate_photometric_state(
         agn_broad_local_wave, agn_broad_local_obs = _local_integrated_line_obs_sed(
             context,
             line_wave,
-            jqf_extrapolated_broad_lumin,
-            jqf_extrapolated_broad_width,
+            spectral_extrapolated_broad_lumin,
+            spectral_extrapolated_broad_width,
             ebv_gal + ebv_agn,
             redshift,
             luminosity_distance_m,
@@ -4878,8 +4869,8 @@ def evaluate_photometric_state(
         agn_narrow_local_wave, agn_narrow_local_obs = _local_integrated_line_obs_sed(
             context,
             line_wave,
-            jqf_extrapolated_narrow_lumin,
-            jqf_extrapolated_narrow_width,
+            spectral_extrapolated_narrow_lumin,
+            spectral_extrapolated_narrow_width,
             ebv_gal + ebv_agn,
             redshift,
             luminosity_distance_m,
@@ -5000,8 +4991,8 @@ def evaluate_photometric_state(
         else:
             trans_fluxes = jnp.ones_like(pred_fluxes)
 
-    if jaxqsofit_backend_enabled and include_spectral_features:
-        agn_fluxes = agn_fluxes + jqf_photometry_adjustment
+    if spectral_engine_enabled and include_spectral_features:
+        agn_fluxes = agn_fluxes + spectral_photometry_adjustment
     logl = photometric_loglike(
         pred_fluxes=pred_fluxes,
         obs_fluxes=obs_fluxes,
@@ -5027,23 +5018,24 @@ def evaluate_photometric_state(
     if add_likelihood:
         numpyro.factor("photometry_loglike", logl)
     numpyro.deterministic("pred_fluxes", pred_fluxes)
-    numpyro.deterministic("pred_spectrum_fluxes", spec_model_fluxes)
-    numpyro.deterministic("jqf_line_photometry", jqf_line_photometry)
-    numpyro.deterministic("jqf_feii_photometry", jqf_feii_photometry)
-    numpyro.deterministic("jqf_extrapolated_feii_photometry", jqf_extrapolated_feii_photometry)
-    numpyro.deterministic("jqf_balmer_photometry", jqf_balmer_photometry)
-    numpyro.deterministic("jqf_extrapolated_broad_photometry", jqf_extrapolated_broad_photometry)
-    numpyro.deterministic("jqf_extrapolated_narrow_photometry", jqf_extrapolated_narrow_photometry)
-    numpyro.deterministic("jqf_line_obs_sed", jqf_line_obs_sed)
-    numpyro.deterministic("jqf_feii_obs_sed", jqf_feii_obs_sed)
-    numpyro.deterministic("jqf_balmer_obs_sed", jqf_balmer_obs_sed)
-    numpyro.deterministic("spec_continuum_model_fluxes", spec_continuum_model_fluxes)
-    numpyro.deterministic("spec_host_model_fluxes", spec_host_model_fluxes)
-    numpyro.deterministic("spec_disk_model_fluxes", spec_disk_model_fluxes)
-    numpyro.deterministic("spec_torus_model_fluxes", spec_torus_model_fluxes)
-    numpyro.deterministic("spectrum_scale_fit", spectrum_scale)
+    numpyro.deterministic(SpectralSites.MODEL_FLUX, spec_model_fluxes)
+    numpyro.deterministic("spectral_line_photometry", spectral_line_photometry)
+    numpyro.deterministic("spectral_feii_photometry", spectral_feii_photometry)
+    numpyro.deterministic("spectral_extrapolated_feii_photometry", spectral_extrapolated_feii_photometry)
+    numpyro.deterministic("spectral_balmer_photometry", spectral_balmer_photometry)
+    numpyro.deterministic("spectral_extrapolated_broad_photometry", spectral_extrapolated_broad_photometry)
+    numpyro.deterministic("spectral_extrapolated_narrow_photometry", spectral_extrapolated_narrow_photometry)
+    numpyro.deterministic("spectral_line_obs_sed", spectral_line_obs_sed)
+    numpyro.deterministic("spectral_feii_obs_sed", spectral_feii_obs_sed)
+    numpyro.deterministic("spectral_balmer_obs_sed", spectral_balmer_obs_sed)
+    numpyro.deterministic("spectral_custom_continuum_obs_sed", spectral_custom_continuum_obs_sed)
+    numpyro.deterministic(SpectralSites.CONTINUUM_FLUX, spec_continuum_model_fluxes)
+    numpyro.deterministic(SpectralSites.HOST_FLUX, spec_host_model_fluxes)
+    numpyro.deterministic(SpectralSites.DISK_FLUX, spec_disk_model_fluxes)
+    numpyro.deterministic(SpectralSites.TORUS_FLUX, spec_torus_model_fluxes)
+    numpyro.deterministic(SpectralSites.SCALE, spectrum_scale)
     numpyro.deterministic("log_spectrum_scale_fit", log_spectrum_scale)
-    numpyro.deterministic("jqf_feature_amplitude_scale", feature_amplitude_scale)
+    numpyro.deterministic("spectral_feature_amplitude_scale", feature_amplitude_scale)
     numpyro.deterministic("spectrum_host_capture_fraction", spec_host_capture_fraction_by_spectrum)
     numpyro.deterministic("spectroscopy_likelihood_weight", spec_likelihood_weight)
     numpyro.deterministic("spectroscopy_loglike", spec_logl)
@@ -5090,9 +5082,9 @@ def evaluate_photometric_state(
     numpyro.deterministic("nebular_n_ly_old_fit", nebular["n_ly_old"])
     numpyro.deterministic("rest_wave", rest_wave)
     numpyro.deterministic("obs_wave", obs_wave)
-    numpyro.deterministic("spec_wave_obs", spec_wave_obs)
-    numpyro.deterministic("spec_spectrum_index", spec_spectrum_index)
-    numpyro.deterministic("redshift_fit", redshift)
+    numpyro.deterministic(SpectralSites.WAVELENGTH_OBS, spec_wave_obs)
+    numpyro.deterministic(SpectralSites.SPECTRUM_INDEX, spec_spectrum_index)
+    numpyro.deterministic(SpectralSites.REDSHIFT, redshift)
     if include_components:
         numpyro.deterministic("host_age_weights", host_state["host_age_weights"])
         numpyro.deterministic("host_lgmet_weights", host_state["host_lgmet_weights"])

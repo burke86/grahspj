@@ -6,6 +6,8 @@ from typing import Any, Mapping
 
 import numpy as np
 
+from .spectral_results import SpectralResult, build_spectral_result
+
 
 def median_mapping(values: Mapping[str, Any] | None) -> dict[str, Any]:
     """Return posterior medians for every value in a sample-like mapping.
@@ -52,6 +54,7 @@ class PredictionResult:
     data: Mapping[str, Any]
     fitter: Any
     _median: dict[str, Any] | None = field(default=None, init=False, repr=False)
+    _spectrum: SpectralResult | None = field(default=None, init=False, repr=False)
 
     @property
     def median(self) -> dict[str, Any]:
@@ -59,6 +62,18 @@ class PredictionResult:
         if self._median is None:
             self._median = median_mapping(self.data)
         return self._median
+
+    @property
+    def spectrum(self) -> SpectralResult:
+        """Typed, unit-explicit spectral predictions and line measurements."""
+        if self._spectrum is None:
+            self._spectrum = build_spectral_result(
+                self.data,
+                self.fitter.spectral_line_metadata(),
+                redshift=float(self.fitter.config.observation.redshift),
+                context=getattr(self.fitter, "context", None),
+            )
+        return self._spectrum
 
     def __getitem__(self, key: str) -> Any:
         """__getitem__ helper.
@@ -101,6 +116,7 @@ class FitResult:
     path: Path | None = None
     figure: Any = None
     _state: _FitState | None = field(default=None, repr=False, compare=False)
+    _spectrum: SpectralResult | None = field(default=None, init=False, repr=False, compare=False)
 
     def predict(self, **kwargs) -> PredictionResult:
         """Run or return posterior predictive products for this fit.
@@ -114,6 +130,13 @@ class FitResult:
         if self._state is not None:
             kwargs.setdefault("_state", self._state)
         return PredictionResult(self.fitter.predict(**kwargs), fitter=self.fitter)
+
+    @property
+    def spectrum(self) -> SpectralResult:
+        """Typed, unit-explicit posterior spectral result."""
+        if self._spectrum is None:
+            self._spectrum = self.predict(kind="photometry").spectrum
+        return self._spectrum
 
     def save(self, path: str | Path | None = None, **kwargs) -> Path:
         """Save the result with the fitter's native persistence format.

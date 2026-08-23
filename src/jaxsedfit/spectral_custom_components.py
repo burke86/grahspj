@@ -134,6 +134,9 @@ class CustomComponentSpec:
     parameter_priors: Mapping[str, Any]
     evaluate: Callable[[Any, Mapping[str, Any], Mapping[str, Any]], Any]
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    frame: str = "rest"
+    flux_unit: str = "fnu_mjy"
+    attenuation: str = "none"
 
     def __post_init__(self):
         """Normalize names and validate the continuum component definition."""
@@ -144,6 +147,18 @@ class CustomComponentSpec:
         priors = {str(k): _normalize_parameter_prior(v) for k, v in dict(self.parameter_priors).items()}
         object.__setattr__(self, "parameter_priors", priors)
         object.__setattr__(self, "metadata", dict(self.metadata))
+        frame = str(self.frame).strip().lower()
+        if frame not in {"rest", "observed"}:
+            raise ValueError("Custom component frame must be 'rest' or 'observed'.")
+        flux_unit = str(self.flux_unit).strip().lower()
+        if flux_unit != "fnu_mjy":
+            raise ValueError("Custom components currently require flux_unit='fnu_mjy'.")
+        attenuation = str(self.attenuation).strip().lower()
+        if attenuation != "none":
+            raise ValueError("Custom components currently require attenuation='none'.")
+        object.__setattr__(self, "frame", frame)
+        object.__setattr__(self, "flux_unit", flux_unit)
+        object.__setattr__(self, "attenuation", attenuation)
 
     @property
     def prefix(self) -> str:
@@ -178,6 +193,9 @@ class CustomComponentSpec:
             "parameter_priors": copy.deepcopy(dict(self.parameter_priors)),
             "evaluate_ref": _callable_to_ref(self.evaluate),
             "metadata": copy.deepcopy(dict(self.metadata)),
+            "frame": self.frame,
+            "flux_unit": self.flux_unit,
+            "attenuation": self.attenuation,
         }
 
     @classmethod
@@ -195,6 +213,9 @@ class CustomComponentSpec:
             parameter_priors=dict(state["parameter_priors"]),
             evaluate=_callable_from_ref(str(state["evaluate_ref"])),
             metadata=dict(state.get("metadata", {})),
+            frame=str(state.get("frame", "rest")),
+            flux_unit=str(state.get("flux_unit", "fnu_mjy")),
+            attenuation=str(state.get("attenuation", "none")),
         )
 
 
@@ -207,6 +228,8 @@ class CustomLineComponentSpec:
     evaluate: Callable[[Any, Mapping[str, Any], Mapping[str, Any]], Any]
     line_kind: str = "broad"
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    frame: str = "rest"
+    flux_unit: str = "fnu_mjy"
 
     def __post_init__(self):
         """Normalize names, validate priors, and canonicalize line kind."""
@@ -221,6 +244,14 @@ class CustomLineComponentSpec:
             raise ValueError("Custom line component line_kind must be 'broad' or 'narrow'.")
         object.__setattr__(self, "line_kind", kind)
         object.__setattr__(self, "metadata", dict(self.metadata))
+        frame = str(self.frame).strip().lower()
+        if frame not in {"rest", "observed"}:
+            raise ValueError("Custom line component frame must be 'rest' or 'observed'.")
+        flux_unit = str(self.flux_unit).strip().lower()
+        if flux_unit != "fnu_mjy":
+            raise ValueError("Custom line components currently require flux_unit='fnu_mjy'.")
+        object.__setattr__(self, "frame", frame)
+        object.__setattr__(self, "flux_unit", flux_unit)
 
     @property
     def prefix(self) -> str:
@@ -256,6 +287,8 @@ class CustomLineComponentSpec:
             "evaluate_ref": _callable_to_ref(self.evaluate),
             "line_kind": self.line_kind,
             "metadata": copy.deepcopy(dict(self.metadata)),
+            "frame": self.frame,
+            "flux_unit": self.flux_unit,
         }
 
     @classmethod
@@ -274,6 +307,8 @@ class CustomLineComponentSpec:
             evaluate=_callable_from_ref(str(state["evaluate_ref"])),
             line_kind=str(state.get("line_kind", "broad")),
             metadata=dict(state.get("metadata", {})),
+            frame=str(state.get("frame", "rest")),
+            flux_unit=str(state.get("flux_unit", "fnu_mjy")),
         )
 
 
@@ -283,6 +318,9 @@ def make_custom_component(
     evaluate: Callable[[Any, Mapping[str, Any], Mapping[str, Any]], Any],
     *,
     metadata: Mapping[str, Any] | None = None,
+    frame: str = "rest",
+    flux_unit: str = "fnu_mjy",
+    attenuation: str = "none",
 ) -> CustomComponentSpec:
     """Build a generic additive custom component.
 
@@ -302,6 +340,9 @@ def make_custom_component(
         parameter_priors=parameter_priors,
         evaluate=evaluate,
         metadata={} if metadata is None else dict(metadata),
+        frame=frame,
+        flux_unit=flux_unit,
+        attenuation=attenuation,
     )
 
 
@@ -312,6 +353,8 @@ def make_custom_line_component(
     *,
     line_kind: str = "broad",
     metadata: Mapping[str, Any] | None = None,
+    frame: str = "rest",
+    flux_unit: str = "fnu_mjy",
 ) -> CustomLineComponentSpec:
     """Build a generic additive custom line component.
 
@@ -334,6 +377,8 @@ def make_custom_line_component(
         evaluate=evaluate,
         line_kind=line_kind,
         metadata={} if metadata is None else dict(metadata),
+        frame=frame,
+        flux_unit=flux_unit,
     )
 
 

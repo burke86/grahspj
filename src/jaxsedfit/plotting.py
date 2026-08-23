@@ -428,8 +428,8 @@ def _site_sum(pred: dict[str, Any], keys: tuple[str, ...]) -> np.ndarray:
 
 def _bridged_jaxsedfit_agn_lines(pred: dict[str, Any]) -> np.ndarray | None:
     """Return the joint-fit line SED, falling back to the native line shape."""
-    if "jqf_line_obs_sed" in pred:
-        return np.asarray(pred["jqf_line_obs_sed"], dtype=float)
+    if "spectral_line_obs_sed" in pred:
+        return np.asarray(pred["spectral_line_obs_sed"], dtype=float)
 
     native_sed_keys = (
         "line_bl_obs_sed",
@@ -439,11 +439,11 @@ def _bridged_jaxsedfit_agn_lines(pred: dict[str, Any]) -> np.ndarray | None:
     )
     native_flux_keys = ("line_fluxes", "feii_fluxes")
     joint_flux_keys = (
-        "jqf_line_photometry",
-        "jqf_extrapolated_broad_photometry",
-        "jqf_extrapolated_narrow_photometry",
-        "jqf_feii_photometry",
-        "jqf_extrapolated_feii_photometry",
+        "spectral_line_photometry",
+        "spectral_extrapolated_broad_photometry",
+        "spectral_extrapolated_narrow_photometry",
+        "spectral_feii_photometry",
+        "spectral_extrapolated_feii_photometry",
     )
     if not any(key in pred for key in native_sed_keys):
         return None
@@ -591,10 +591,10 @@ def plot_fit_sed(
         for keys, label, color, lw in _COMPONENT_STYLE:
             if label == "AGN lines" and bridged_agn_lines is not None:
                 component_draws = bridged_agn_lines
-            elif label == "Fe II" and "jqf_feii_obs_sed" in pred:
-                component_draws = np.asarray(pred["jqf_feii_obs_sed"], dtype=float)
-            elif label == "Balmer cont." and "jqf_balmer_obs_sed" in pred:
-                component_draws = np.asarray(pred["jqf_balmer_obs_sed"], dtype=float)
+            elif label == "Fe II" and "spectral_feii_obs_sed" in pred:
+                component_draws = np.asarray(pred["spectral_feii_obs_sed"], dtype=float)
+            elif label == "Balmer cont." and "spectral_balmer_obs_sed" in pred:
+                component_draws = np.asarray(pred["spectral_balmer_obs_sed"], dtype=float)
             elif any(key in pred for key in keys):
                 component_draws = _site_sum(pred, keys)
             else:

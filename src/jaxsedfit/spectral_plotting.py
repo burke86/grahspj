@@ -1,4 +1,4 @@
-"""Plotting helpers for :class:`jaxqsofit.JAXQSOFit`.
+"""Plotting helpers for spectral fits.
 
 The public functions in this module take a fitted ``JAXQSOFit`` instance as
 first argument. ``JAXQSOFit`` keeps method wrappers around them so notebook code

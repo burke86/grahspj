@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Mapping
@@ -37,6 +38,7 @@ from .inference import (
 from .model import grahsp_photometric_model
 from .preload import ModelContext, build_model_context
 from .results import FitResult, _FitState, median_mapping
+from .spectral_results import SpectralSites
 
 
 def _scoped_auxiliary_names(site_name: str, auxiliary_name: str) -> tuple[str, str]:
@@ -85,7 +87,7 @@ def _nuts_geometry_reparam_config(
     site,
     *,
     reparameterize_additive_pivots: bool = True,
-    reparameterize_jaxqsofit_features: bool = True,
+    reparameterize_spectral_features: bool = True,
 ):
     """Resolve model-provided exact NUTS coordinate transformations."""
     metadata = (site.get("infer") or {}).get("jaxsedfit_additive_pivot")
@@ -99,9 +101,9 @@ def _nuts_geometry_reparam_config(
             auxiliary_name,
             sampling_name,
         )
-    if reparameterize_jaxqsofit_features:
+    if reparameterize_spectral_features:
         feature_metadata = (site.get("infer") or {}).get(
-            "jaxqsofit_normal_lognormal_standardization"
+            "spectral_normal_lognormal_standardization"
         )
         if feature_metadata is not None:
             from .spectroscopy import (
@@ -118,15 +120,15 @@ def _prepare_nuts_reparameterization(
     rng_seed: int,
     *,
     reparameterize_additive_pivots: bool = True,
-    reparameterize_jaxqsofit_features: bool = True,
+    reparameterize_spectral_features: bool = True,
 ):
     """Wrap the model and map physical initial values to NUTS coordinates."""
     def reparam_config(site):
         return _nuts_geometry_reparam_config(
             site,
             reparameterize_additive_pivots=reparameterize_additive_pivots,
-            reparameterize_jaxqsofit_features=(
-                reparameterize_jaxqsofit_features
+            reparameterize_spectral_features=(
+                reparameterize_spectral_features
             ),
         )
 
@@ -258,11 +260,11 @@ def _joint_dense_mass_blocks(
 
     # Reuse the native line-complex geometry exactly. Its block builder
     # understands which amplitudes and centroids must accompany ordered-width
-    # coordinates. Prefix its site names for the embedded joint backend.
-    if context is not None and context.jaxqsofit_prior_config is not None:
+    # coordinates. Prefix its site names for the embedded joint model.
+    if context is not None and context.spectral_prior_config is not None:
         cfg = context.fit_config
-        jqf_cfg = cfg.spectroscopy_config.jaxqsofit
-        if bool(jqf_cfg.use_spectral_lines) and bool(jqf_cfg.use_tied_lines):
+        spectral_cfg = cfg.agn
+        if bool(spectral_cfg.fit_lines) and bool(spectral_cfg.tied_lines):
             try:
                 from .spectroscopy import (
                     SpectralComponentConfig,
@@ -273,12 +275,12 @@ def _joint_dense_mass_blocks(
 
                 component_cfg = SpectralComponentConfig(
                     use_lines=True,
-                    use_tied_lines=True,
-                    line_table=jqf_cfg.line_table,
-                    line_prior_config=context.jaxqsofit_prior_config,
+                    tied_lines=True,
+                    line_table=spectral_cfg.line_table,
+                    line_prior_config=context.spectral_prior_config,
                     line_coverage_rest=_fixed_spectral_line_coverage_rest(context, cfg),
-                    include_elg_narrow_lines=bool(jqf_cfg.include_elg_narrow_lines),
-                    include_high_ionization_lines=bool(jqf_cfg.include_high_ionization_lines),
+                    include_elg_narrow_lines=bool(spectral_cfg.include_elg_narrow_lines),
+                    include_high_ionization_lines=bool(spectral_cfg.include_high_ionization_lines),
                 )
                 tied_line_meta = build_joint_tied_line_meta(component_cfg)
                 if tied_line_meta is not None:
@@ -288,9 +290,9 @@ def _joint_dense_mass_blocks(
                     )
                     for native_block in native_blocks:
                         block = tuple(
-                            f"jqf_{site}"
+                            f"spectral_{site}"
                             for site in native_block
-                            if f"jqf_{site}" in names and f"jqf_{site}" not in assigned
+                            if f"spectral_{site}" in names and f"spectral_{site}" not in assigned
                         )
                         if block:
                             value = np.asarray(latent_values[block[0]])
@@ -303,8 +305,8 @@ def _joint_dense_mass_blocks(
     # (for example, a newer custom coordinate) instead of silently leaving
     # them diagonal. When no native metadata was available this also supplies
     # the complete fallback block.
-    add_group(lambda name: name.startswith("jqf_line_"))
-    add_group(lambda name: name.startswith(("jqf_feii_", "jqf_balmer_")))
+    add_group(lambda name: name.startswith("spectral_line_"))
+    add_group(lambda name: name.startswith(("spectral_feii_", "spectral_balmer_")))
 
     # Joint-only astrophysical normalization geometry. Torus coordinates stay
     # with the optical AGN/host mixture so the metric can learn the important
@@ -318,7 +320,7 @@ def _joint_dense_mass_blocks(
         "log_stellar_mass", "ebv_gal", "log_ebv_gal",
         "dust_alpha", "dust_umin",
         "log_host_capture_scale_arcsec", "host_capture_scale_arcsec",
-        "jqf_continuum_tilt",
+        "spectral_continuum_tilt",
         "fcov", "log_fcov", "si", "cool_lam", "log_cool_lam",
         "cool_width", "log_cool_width", "hot_lam", "log_hot_lam",
         "hot_width", "log_hot_width", "hot_fcov", "log_hot_fcov",
@@ -334,7 +336,7 @@ def _joint_dense_mass_blocks(
         "feii_", "balmer_",
     )
     add_group(
-        lambda name: not name.startswith("jqf_")
+        lambda name: not name.startswith("spectral_")
         and any(token in name for token in native_feature_tokens)
     )
 
@@ -631,45 +633,46 @@ class JAXSEDFit:
         """
         photometry_sites = [
             "pred_fluxes",
-            "pred_spectrum_fluxes",
-            "spec_continuum_model_fluxes",
-            "spec_host_model_fluxes",
-            "spec_disk_model_fluxes",
-            "spec_torus_model_fluxes",
-            "spec_wave_obs",
-            "spec_spectrum_index",
-            "spectrum_scale_fit",
+            SpectralSites.MODEL_FLUX,
+            SpectralSites.CONTINUUM_FLUX,
+            SpectralSites.HOST_FLUX,
+            SpectralSites.DISK_FLUX,
+            SpectralSites.TORUS_FLUX,
+            SpectralSites.WAVELENGTH_OBS,
+            SpectralSites.SPECTRUM_INDEX,
+            SpectralSites.SCALE,
             "log_spectrum_scale_fit",
-            "jqf_feature_amplitude_scale",
+            "spectral_feature_amplitude_scale",
             "spectrum_host_capture_fraction",
             "spectroscopy_loglike",
             "spectroscopy_likelihood_weight",
-            "jqf_continuum_model",
-            "jqf_line_model",
-            "jqf_line_model_aperture",
-            "jqf_line_model_broad",
-            "jqf_line_model_narrow",
-            "jqf_line_model_narrow_aperture",
-            "jqf_line_amp_per_component",
-            "jqf_line_mu_per_component",
-            "jqf_line_sig_per_component",
-            "jqf_line_narrow_fwhm_kms",
-            "jqf_line_narrow_amp_scale",
-            "jqf_feii_model",
-            "jqf_balmer_model",
-            "jqf_total_model",
-            "jqf_line_photometry",
-            "jqf_feii_photometry",
-            "jqf_extrapolated_feii_photometry",
-            "jqf_balmer_photometry",
-            "jqf_extrapolated_broad_photometry",
-            "jqf_extrapolated_narrow_photometry",
-            "jqf_line_obs_sed",
-            "jqf_feii_obs_sed",
-            "jqf_balmer_obs_sed",
+            "spectral_continuum_model",
+            SpectralSites.LINE_FLUX,
+            SpectralSites.LINE_APERTURE_FLUX,
+            "spectral_line_model_broad",
+            "spectral_line_model_narrow",
+            "spectral_line_model_narrow_aperture",
+            SpectralSites.LINE_AMPLITUDE,
+            SpectralSites.LINE_CENTER_LN,
+            SpectralSites.LINE_SIGMA_LN,
+            SpectralSites.LINE_BROAD_MASK,
+            "spectral_line_narrow_fwhm_kms",
+            "spectral_line_narrow_amp_scale",
+            SpectralSites.FEII_FLUX,
+            SpectralSites.BALMER_FLUX,
+            "spectral_total_model",
+            "spectral_line_photometry",
+            "spectral_feii_photometry",
+            "spectral_extrapolated_feii_photometry",
+            "spectral_balmer_photometry",
+            "spectral_extrapolated_broad_photometry",
+            "spectral_extrapolated_narrow_photometry",
+            "spectral_line_obs_sed",
+            "spectral_feii_obs_sed",
+            "spectral_balmer_obs_sed",
             "rest_wave",
             "obs_wave",
-            "redshift_fit",
+            SpectralSites.REDSHIFT,
             "nebular_line_scale_fit",
             "log_dust_luminosity_fit",
             "dust_alpha_fit",
@@ -929,9 +932,10 @@ class JAXSEDFit:
             }
             if inference.staged_steps is not None:
                 map_kwargs["staged_steps"] = inference.staged_steps
-            map_result = self.fit_map(
+            self.fit_map(
                 **map_kwargs,
             )
+            self._compact_map_warm_start()
             nuts_kwargs = {
                 "progress_bar": progress_bar,
                 "num_warmup": inference.num_warmup,
@@ -942,10 +946,9 @@ class JAXSEDFit:
                 "max_tree_depth": inference.max_tree_depth,
                 "use_map_init": inference.use_map_init,
             }
-            nuts_result = self.fit_nuts(
+            fit_output = self.fit_nuts(
                 **nuts_kwargs,
             )
-            fit_output = {"map": map_result, "nuts": nuts_result}
         elif method == "ns":
             ns_kwargs: dict[str, Any] = {"progress_bar": progress_bar}
             if inference.ns_num_live_points is not None:
@@ -992,6 +995,35 @@ class JAXSEDFit:
             figure=fig,
             summary=self.summary() if getattr(self, "samples", None) is not None else None,
         )
+
+    def _compact_map_warm_start(self) -> None:
+        """Keep only the MAP data needed to initialize a following NUTS fit.
+
+        A combined ``optax+nuts`` run does not need the SVI optimizer state,
+        staged-fit payload, or compiled MAP executables after optimization.
+        Moving the median to host NumPy arrays before clearing JAX caches keeps
+        the NUTS initial point numerically identical while releasing those
+        transient allocations.
+        """
+        map_result = self.map_result
+        if map_result is None or "median" not in map_result:
+            return
+        compact_result = {
+            "median": {
+                key: np.asarray(value)
+                for key, value in map_result["median"].items()
+            },
+            "losses": np.asarray(map_result.get("losses", [])),
+            "staged": bool(map_result.get("staged", False)),
+        }
+        self.map_result = compact_result
+        self.samples = {
+            key: value[None, ...]
+            for key, value in compact_result["median"].items()
+        }
+        del map_result
+        gc.collect()
+        jax.clear_caches()
 
     def _run_map_svi(
         self,
@@ -1259,24 +1291,26 @@ class JAXSEDFit:
         use_normalization_reparam = bool(
             inference.reparameterize_normalizations
             and self.config.spectroscopy is not None
-            and self.config.spectroscopy_config.enabled
-            and self.config.spectroscopy_config.fit_scale
-        )
-        jqf_config = self.config.spectroscopy_config.jaxqsofit
-        use_jaxqsofit_feature_reparam = bool(
-            inference.reparameterize_jaxqsofit_features
-            and self.config.spectroscopy is not None
-            and self.config.spectroscopy_config.enabled
-            and str(self.config.spectroscopy_config.backend).lower()
-            == "jaxqsofit"
+            and bool(self.config.spectroscopy_list)
             and (
-                jqf_config.use_spectral_feii
-                or jqf_config.use_spectral_balmer_continuum
+                self.config.photometry is not None
+                if self.config.likelihood.fit_spectrum_scale is None
+                else bool(self.config.likelihood.fit_spectrum_scale)
+            )
+        )
+        spectral_config = self.config.agn
+        use_spectral_feature_reparam = bool(
+            inference.reparameterize_spectral_features
+            and self.config.spectroscopy is not None
+            and bool(self.config.spectroscopy_list)
+            and (
+                spectral_config.feii
+                or spectral_config.balmer_continuum
             )
         )
         if (
             use_normalization_reparam
-            or use_jaxqsofit_feature_reparam
+            or use_spectral_feature_reparam
         ):
             nuts_model, init_values, reparameterized_sites = (
                 _prepare_nuts_reparameterization(
@@ -1284,8 +1318,8 @@ class JAXSEDFit:
                     init_values,
                     inference.seed + 101,
                     reparameterize_additive_pivots=use_normalization_reparam,
-                    reparameterize_jaxqsofit_features=(
-                        use_jaxqsofit_feature_reparam
+                    reparameterize_spectral_features=(
+                        use_spectral_feature_reparam
                     ),
                 )
             )
@@ -1599,6 +1633,36 @@ class JAXSEDFit:
             posterior_samples=median_samples,
             cache=False,
         )
+
+    def spectral_line_metadata(self) -> dict[str, Any]:
+        """Return ordered metadata for the active built-in line components.
+
+        The ordering exactly matches the final axis of the
+        ``spectral_line_*_per_component`` predictive arrays. Component names
+        are stable labels such as ``Hb_br_1`` and ``Hb_br_2``.
+        """
+        if not self.config.spectroscopy_list or not self.config.agn.fit_lines:
+            return {}
+        from .model import _fixed_spectral_line_coverage_rest
+        from .spectroscopy import SpectralComponentConfig, build_joint_tied_line_meta
+
+        component_config = SpectralComponentConfig(
+            use_lines=True,
+            tied_lines=bool(self.config.agn.tied_lines),
+            line_table=self.config.agn.line_table,
+            line_prior_config=self.context.spectral_prior_config,
+            line_coverage_rest=_fixed_spectral_line_coverage_rest(
+                self.context, self.config
+            ),
+            include_elg_narrow_lines=bool(
+                self.config.agn.include_elg_narrow_lines
+            ),
+            include_high_ionization_lines=bool(
+                self.config.agn.include_high_ionization_lines
+            ),
+        )
+        metadata = build_joint_tied_line_meta(component_config)
+        return {} if metadata is None else dict(metadata)
 
     def recovered_log_stellar_mass(self, *, _state: _FitState | None = None) -> float:
         """Return the median recovered stellar mass from the fitted posterior.
@@ -2090,7 +2154,7 @@ class JAXSEDFit:
 
     @staticmethod
     def _mjy_to_rest_flambda_1e17(wave_obs: np.ndarray, flux_mjy: np.ndarray, redshift: float) -> np.ndarray:
-        """Convert observed-frame mJy to jaxqsofit rest-frame f_lambda units.
+        """Convert observed-frame mJy to rest-frame f_lambda units.
 
         Parameters
         ----------
@@ -2109,7 +2173,7 @@ class JAXSEDFit:
 
     @staticmethod
     def _obs_flambda_to_rest_flambda_1e17(flux_lambda_obs: np.ndarray, redshift: float) -> np.ndarray:
-        """Convert observed-frame W/m^2/Angstrom to jaxqsofit rest-frame units.
+        """Convert observed-frame W/m^2/Angstrom to rest-frame f_lambda units.
 
         Parameters
         ----------
@@ -2121,7 +2185,7 @@ class JAXSEDFit:
         flux_lambda_obs = np.asarray(flux_lambda_obs, dtype=float)
         return flux_lambda_obs * 1.0e3 * (1.0 + float(redshift)) / 1.0e-17
 
-    def plot_jaxqsofit_spectrum(
+    def plot_spectrum(
         self,
         spectrum_index: int = 0,
         posterior: str = "latest",
@@ -2132,7 +2196,7 @@ class JAXSEDFit:
         ylims: tuple[float, float] | None = None,
         **kwargs,
     ):
-        """Plot the joint spectral fit with jaxqsofit's spectrum plotter.
+        """Plot the joint spectral fit and its component decomposition.
 
         Parameters
         ----------
@@ -2142,7 +2206,7 @@ class JAXSEDFit:
             Posterior selection passed to :meth:`predict`.
         show_nebular_lines : bool, optional
             If True, overlay the native jaxsedfit nebular-line diagnostic in
-            addition to the jaxqsofit spectral line model.
+            addition to the shared spectral line model.
         show_plot : bool, optional
             If True, display the Matplotlib figure interactively.
         plot_residual : bool, optional
@@ -2152,11 +2216,9 @@ class JAXSEDFit:
         ylims : tuple of float, optional
             Optional y-axis limits for the spectrum panel.
         **kwargs : dict
-            Additional keyword arguments forwarded to jaxqsofit's spectrum
-            plotting function.
+            Additional keyword arguments forwarded to the spectrum plotting
+            function.
         """
-        if str(self.config.spectroscopy_config.backend).lower() != "jaxqsofit":
-            raise RuntimeError("plot_jaxqsofit_spectrum requires SpectroscopyConfig.backend='jaxqsofit'.")
         if self.context.spec_wave_obs.size == 0:
             raise RuntimeError("No spectroscopy data are available to plot.")
         from .spectral_plotting import plot_fig
@@ -2351,13 +2413,21 @@ class JAXSEDFit:
         )
         spec_disk_component = component("spec_disk_model_fluxes")
         disk_component = spec_disk_component if keep_component(spec_disk_component) else obs_sed_component("disk_obs_sed")
-        plotter.f_pl_model = disk_component if keep_component(disk_component) else component("jqf_continuum_model")
+        plotter.f_pl_model = disk_component if keep_component(disk_component) else component("spectral_continuum_model")
         plotter.f_pl_model_intrinsic = plotter.f_pl_model
-        plotter.f_fe_mgii_model = component("jqf_feii_model")
+        plotter.f_fe_mgii_model = component("spectral_feii_model")
         plotter.f_fe_balmer_model = np.zeros_like(wave_rest)
-        plotter.f_bc_model = component("jqf_balmer_model")
-        jqf_line_site = "jqf_line_model_aperture" if "jqf_line_model_aperture" in pred else "jqf_line_model"
-        plotter.f_line_model = component(jqf_line_site)
+        plotter.f_bc_model = component("spectral_balmer_model")
+        spectral_line_site = "spectral_line_model_aperture" if "spectral_line_model_aperture" in pred else "spectral_line_model"
+        plotter.f_line_model = component(spectral_line_site)
+        spectral_broad_line_site = "spectral_line_model_broad"
+        spectral_narrow_line_site = (
+            "spectral_line_model_narrow_aperture"
+            if "spectral_line_model_narrow_aperture" in pred
+            else "spectral_line_model_narrow"
+        )
+        broad_line_component = component(spectral_broad_line_site)
+        narrow_line_component = component(spectral_narrow_line_site)
         spec_torus_component = component("spec_torus_model_fluxes")
         custom_components = {
             "jaxsedfit_torus": spec_torus_component if keep_component(spec_torus_component) else obs_sed_component("torus_obs_sed"),
@@ -2391,15 +2461,15 @@ class JAXSEDFit:
         if keep_component(disk_component):
             disk_draw_values = spectrum_draws("spec_disk_model_fluxes") if keep_component(spec_disk_component) else obs_sed_draws("disk_obs_sed")
         else:
-            disk_draw_values = spectrum_draws("jqf_continuum_model")
+            disk_draw_values = spectrum_draws("spectral_continuum_model")
         disk_band = band_from_draws(disk_draw_values)
         if disk_band is not None:
             pred_bands["PL"] = disk_band
             pred_bands["PL_intrinsic"] = disk_band
         for key, site in (
-            ("FeII", "jqf_feii_model"),
-            ("Balmer_cont", "jqf_balmer_model"),
-            ("lines", jqf_line_site),
+            ("FeII", "spectral_feii_model"),
+            ("Balmer_cont", "spectral_balmer_model"),
+            ("lines", spectral_line_site),
         ):
             band = band_from_draws(spectrum_draws(site))
             if band is not None:
@@ -2418,7 +2488,22 @@ class JAXSEDFit:
                 if band is not None:
                     pred_bands[name] = band
         plotter.f_poly_model = np.ones_like(wave_rest)
-        plotter.custom_line_components = {}
+        plotter.custom_line_components = {
+            name: model
+            for name, model in (
+                ("broad_lines", broad_line_component),
+                ("narrow_lines", narrow_line_component),
+            )
+            if keep_component(model)
+        }
+        for name, site in (
+            ("broad_lines", spectral_broad_line_site),
+            ("narrow_lines", spectral_narrow_line_site),
+        ):
+            if name in plotter.custom_line_components:
+                band = band_from_draws(spectrum_draws(site))
+                if band is not None:
+                    pred_bands[name] = band
         plotter.pred_bands = pred_bands
         plotter.use_psf_phot = False
         plotter.psf_model = np.array([])
@@ -2429,9 +2514,9 @@ class JAXSEDFit:
         plotter.output_path = "."
         plotter.filename = str(self.config.observation.object_id)
         plotter.verbose = False
-        plotter.line_component_amp_median = self._posterior_median_array(pred.get("jqf_line_amp_per_component", []))
-        plotter.line_component_mu_median = self._posterior_median_array(pred.get("jqf_line_mu_per_component", []))
-        plotter.line_component_sig_median = self._posterior_median_array(pred.get("jqf_line_sig_per_component", []))
+        plotter.line_component_amp_median = self._posterior_median_array(pred.get("spectral_line_amp_per_component", []))
+        plotter.line_component_mu_median = self._posterior_median_array(pred.get("spectral_line_mu_per_component", []))
+        plotter.line_component_sig_median = self._posterior_median_array(pred.get("spectral_line_sig_per_component", []))
         plotter.tied_line_meta = {"names": [""] * len(np.atleast_1d(plotter.line_component_amp_median))}
 
         plot_fig(

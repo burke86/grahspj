@@ -9,7 +9,7 @@ from numpyro.infer.reparam import Reparam
 
 
 NORMAL_LOGNORMAL_STANDARDIZATION = (
-    "jaxqsofit_normal_lognormal_standardization"
+    "spectral_normal_lognormal_standardization"
 )
 
 

@@ -50,7 +50,6 @@ def test_grahsp_default_feii_and_line_templates_match_static_reference():
             feii_template=FeIITemplate(),
             emission_line_template=EmissionLineTemplate(),
         ),
-        spectroscopy_config=SimpleNamespace(enabled=False, backend="jaxsedfit"),
         galaxy=SimpleNamespace(fit_host=False, use_energy_balance=False, dust_alpha=2.0),
     )
     _TEMPLATE_CACHE.clear()

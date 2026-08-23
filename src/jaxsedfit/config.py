@@ -114,6 +114,7 @@ class SpectroscopyData:
     aperture_diameter_arcsec: float | None = None
     psf_fwhm_arcsec: float | None = None
     epoch_mjd: float | None = None
+    resolving_power: float | None = None
 
     def validate(self) -> None:
         """Validate array lengths for one spectrum payload."""
@@ -122,6 +123,10 @@ class SpectroscopyData:
             raise ValueError("Spectroscopy arrays must have the same length as wave_obs.")
         if self.mask is not None and len(self.mask) != n:
             raise ValueError("spectroscopy mask must match wave_obs length.")
+        if self.resolving_power is not None and (
+            not np.isfinite(float(self.resolving_power)) or float(self.resolving_power) <= 0.0
+        ):
+            raise ValueError("spectroscopy resolving_power must be positive and finite.")
 
 
 @dataclass
@@ -277,13 +282,34 @@ class AGNConfig:
     feii_template: FeIITemplate = field(default_factory=FeIITemplate)
     emission_line_template: EmissionLineTemplate = field(default_factory=EmissionLineTemplate)
     agn_type: int = 1
+    fit_feii: bool = False
     fit_feii_broadening: bool = False
     fit_balmer_continuum: bool = False
+    fit_lines: bool = True
+    tied_lines: bool = True
+    use_smart_line_priors: bool = True
+    fit_spectrum_tilt: bool = False
+    line_flux_scale_mjy: float = 1.0
+    line_coverage_margin_kms: float = 3000.0
+    include_elg_narrow_lines: bool = False
+    include_high_ionization_lines: bool = False
+    line_table: Sequence[Mapping[str, Any]] | None = None
+    broadening_convolution: str = "fft"
+    feature_grid_size: int = 2048
+    custom_components: Sequence[Any] | None = None
+    custom_line_components: Sequence[Any] | None = None
 
     def __post_init__(self) -> None:
         """Normalize nested template sections."""
         self.feii_template = _coerce_dataclass(FeIITemplate, self.feii_template)
         self.emission_line_template = _coerce_dataclass(EmissionLineTemplate, self.emission_line_template)
+        method = str(self.broadening_convolution).lower()
+        if method not in {"fft", "direct"}:
+            raise ValueError("AGNConfig.broadening_convolution must be 'fft' or 'direct'.")
+        self.broadening_convolution = method
+        if int(self.feature_grid_size) < 256:
+            raise ValueError("AGNConfig.feature_grid_size must be at least 256.")
+        self.feature_grid_size = int(self.feature_grid_size)
 
     def validate(self) -> None:
         """Validate inline template units and array shapes."""
@@ -338,69 +364,11 @@ class LikelihoodConfig:
     use_redshift_projection_cache: bool = True
     redshift_projection_n_grid: int = 128
     redshift_projection_sigma: float = 6.0
-
-
-@dataclass
-class JaxQSOFitConfig:
-    """Detailed joint spectral-feature configuration.
-
-    The spectral flags control Fe II, Balmer-continuum, and line components
-    sampled by jaxsedfit's native spectral engine. The same sampled state is
-    projected through every
-    overlapping photometric filter. Outside the spectroscopic coverage,
-    jaxsedfit's fixed-ratio broad and narrow templates are normalized
-    deterministically to the integrated covered spectral family fluxes and
-    use their flux-weighted family widths. No additional extrapolation-scatter
-    parameters are introduced. The historical class and configuration field
-    names are retained so existing configuration files remain valid.
-    """
-    use_spectral_lines: bool = True
-    use_spectral_feii: bool = False
-    use_spectral_balmer_continuum: bool = False
-    use_photometric_lines: bool = True
-    use_tied_lines: bool = True
-    use_spectral_smart_priors: bool = True
-    use_multiplicative_tilt: bool = False
-    line_flux_scale_mjy: float = 1.0
-    line_coverage_margin_kms: float = 3000.0
-    use_line_strength_priors: bool = True
-    line_strength_prior_sigma_dex: float = 0.7
-    use_nebular_line_prior: bool = True
-    nebular_line_prior_sigma_dex: float = 1.0
-    include_elg_narrow_lines: bool = False
-    include_high_ionization_lines: bool = False
-    line_table: Sequence[Mapping[str, Any]] | None = None
-    broadening_convolution: str = "fft"
-    photometric_feature_grid_size: int = 2048
-
-    def __post_init__(self) -> None:
-        method = str(self.broadening_convolution).lower()
-        if method not in {"fft", "direct"}:
-            raise ValueError("JaxQSOFitConfig.broadening_convolution must be 'fft' or 'direct'.")
-        self.broadening_convolution = method
-        if int(self.photometric_feature_grid_size) < 256:
-            raise ValueError("JaxQSOFitConfig.photometric_feature_grid_size must be at least 256.")
-        self.photometric_feature_grid_size = int(self.photometric_feature_grid_size)
-
-
-@dataclass
-class SpectroscopyConfig:
-    """Spectroscopic likelihood configuration.
-
-    The residual spectrum calibration is kept near unity by default so it
-    absorbs modest flux-calibration error without replacing the shared host
-    aperture-capture model.
-    """
-    enabled: bool = False
-    backend: str = "jaxsedfit"
-    student_t_df: float = 5.0
-    systematics_width: float = 0.05
-    likelihood_weight_mode: str = "pixels"
-    resolving_power: float | None = None
-    fit_scale: bool = True
-    scale_prior_sigma_dex: float = 0.1
-    jaxqsofit: JaxQSOFitConfig = field(default_factory=JaxQSOFitConfig)
-
+    spectrum_student_t_df: float = 5.0
+    spectrum_systematics_width: float = 0.05
+    spectrum_weight_mode: str = "pixels"
+    fit_spectrum_scale: bool | None = None
+    spectrum_scale_prior_sigma_dex: float = 0.1
 
 @dataclass
 class InferenceConfig:
@@ -436,7 +404,7 @@ class InferenceConfig:
     max_tree_depth: int = 8
     warmup_max_tree_depth: int | None = None
     reparameterize_normalizations: bool = True
-    reparameterize_jaxqsofit_features: bool = True
+    reparameterize_spectral_features: bool = True
     use_map_init: bool = True
     ns_num_live_points: int | None = None
     ns_max_samples: int | None = None
@@ -965,9 +933,9 @@ class FitConfig:
     observation : Observation or mapping
         Source metadata including redshift, object identifier, sky coordinates,
         and redshift-fitting mode.
-    photometry : PhotometryData or mapping
-        Broadband fluxes, uncertainties, upper-limit flags, and optional
-        aperture/PSF metadata.
+    photometry : PhotometryData or mapping or None, optional
+        Optional broadband measurements. At least one of photometry or
+        spectroscopy must be supplied.
     filters : FilterSet or mapping, optional
         Explicit filter curves used for synthetic photometry. If omitted,
         filters are loaded from known filter names.
@@ -983,9 +951,6 @@ class FitConfig:
         projection, and aperture-capture options.
     spectroscopy : SpectroscopyData, sequence of SpectroscopyData, mapping, or None, optional
         Optional observed spectra for joint SED+spectrum fitting.
-    spectroscopy_config : SpectroscopyConfig or mapping, optional
-        Spectroscopic likelihood, scale, resolution weighting, and jaxqsofit
-        backend options.
     inference : InferenceConfig or mapping, optional
         MAP, NUTS, and nested-sampling controls.
     output : OutputConfig or mapping, optional
@@ -994,31 +959,35 @@ class FitConfig:
         Priors consumed by the NumPyro model.
     """
     observation: Observation
-    photometry: PhotometryData
+    photometry: PhotometryData | None = None
     filters: FilterSet = field(default_factory=FilterSet)
     galaxy: GalaxyConfig = field(default_factory=GalaxyConfig)
     nebular: NebularConfig = field(default_factory=NebularConfig)
     agn: AGNConfig = field(default_factory=AGNConfig)
     likelihood: LikelihoodConfig = field(default_factory=LikelihoodConfig)
     spectroscopy: SpectroscopyData | Sequence[SpectroscopyData] | None = None
-    spectroscopy_config: SpectroscopyConfig = field(default_factory=SpectroscopyConfig)
     inference: InferenceConfig = field(default_factory=InferenceConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
     prior_config: PriorConfig = field(default_factory=PriorConfig)
 
     def __post_init__(self) -> None:
         """Coerce mapping-style prior configs into :class:`PriorConfig`."""
+        if self.photometry is not None:
+            self.photometry = _coerce_dataclass(PhotometryData, self.photometry)
         self.prior_config = _coerce_prior_config(self.prior_config)
 
     def validate(self) -> None:
         """Validate nested config components that require runtime checks."""
         self.observation.validate()
-        self.photometry.validate()
+        if self.photometry is not None:
+            self.photometry.validate()
         self.galaxy.validate()
         self.nebular.validate()
         self.agn.validate()
         for spectrum in self.spectroscopy_list:
             spectrum.validate()
+        if self.photometry is None and not self.spectroscopy_list:
+            raise ValueError("Provide photometry, spectroscopy, or both.")
         if not self.galaxy.fit_host and not self.agn.fit_agn:
             raise ValueError("At least one of galaxy.fit_host or agn.fit_agn must be True.")
         self.prior_config.validate()
@@ -1073,44 +1042,6 @@ def _coerce_dataclass(cls, value: Any):
             kwargs[field_name] = data[field_name]
         return cls(**kwargs)
     raise TypeError(f"Cannot coerce {type(value)!r} to {cls.__name__}")
-
-
-def _coerce_jaxqsofit_config(value: Any) -> JaxQSOFitConfig:
-    """Coerce jaxqsofit config into the structured config object.
-
-    Parameters
-    ----------
-    value : object
-        Existing :class:`JaxQSOFitConfig` instance or mapping.
-    """
-    return _coerce_dataclass(JaxQSOFitConfig, value)
-
-
-def _coerce_spectroscopy_config(value: Any) -> SpectroscopyConfig:
-    """Coerce spectroscopy config while preserving the nested jaxqsofit config.
-
-    Parameters
-    ----------
-    value : object
-        Existing :class:`SpectroscopyConfig` instance or mapping.
-    """
-    if isinstance(value, SpectroscopyConfig):
-        return value
-    if not isinstance(value, Mapping):
-        return _coerce_dataclass(SpectroscopyConfig, value)
-    unknown = set(value) - set(SpectroscopyConfig.__dataclass_fields__)
-    if unknown:
-        unknown_list = ", ".join(sorted(unknown))
-        raise TypeError(f"Unknown SpectroscopyConfig field(s): {unknown_list}")
-    kwargs = {}
-    for field_name in SpectroscopyConfig.__dataclass_fields__:
-        if field_name not in value:
-            continue
-        if field_name == "jaxqsofit":
-            kwargs[field_name] = _coerce_jaxqsofit_config(value[field_name])
-        else:
-            kwargs[field_name] = value[field_name]
-    return SpectroscopyConfig(**kwargs)
 
 
 def _coerce_prior_config(value: Any) -> PriorConfig:
@@ -1185,14 +1116,17 @@ def fit_config_from_mapping(data: Mapping[str, Any]) -> FitConfig:
 
     cfg = FitConfig(
         observation=_coerce_dataclass(Observation, data["observation"]),
-        photometry=_coerce_dataclass(PhotometryData, data["photometry"]),
+        photometry=(
+            None
+            if data.get("photometry") is None
+            else _coerce_dataclass(PhotometryData, data["photometry"])
+        ),
         filters=filters_obj,
         galaxy=_coerce_dataclass(GalaxyConfig, data.get("galaxy", {})),
         nebular=_coerce_dataclass(NebularConfig, data.get("nebular", {})),
         agn=agn_obj,
         likelihood=_coerce_dataclass(LikelihoodConfig, data.get("likelihood", {})),
         spectroscopy=spectroscopy_obj,
-        spectroscopy_config=_coerce_spectroscopy_config(data.get("spectroscopy_config", {})),
         inference=_coerce_dataclass(InferenceConfig, data.get("inference", {})),
         output=_coerce_dataclass(OutputConfig, data.get("output", {})),
         prior_config=_coerce_prior_config(data.get("prior_config", {})),

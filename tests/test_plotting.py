@@ -22,7 +22,7 @@ def test_joint_line_bridge_rescales_native_jaxsedfit_shape():
         "line_nl_obs_sed": np.array([[0.5, 0.5, 0.5]]),
         "line_fluxes": np.array([[1.0, 1.0]]),
         "feii_fluxes": np.zeros((1, 2)),
-        "jqf_line_photometry": np.array([[2.0, 4.0]]),
+        "spectral_line_photometry": np.array([[2.0, 4.0]]),
     }
 
     bridged = _bridged_jaxsedfit_agn_lines(pred)
@@ -30,13 +30,13 @@ def test_joint_line_bridge_rescales_native_jaxsedfit_shape():
     np.testing.assert_allclose(bridged, 3.0 * np.array([[1.5, 2.5, 1.5]]))
 
 
-def test_joint_line_bridge_prefers_rendered_jaxqsofit_sed():
+def test_joint_line_bridge_prefers_rendered_spectral_sed():
     rendered = np.array([[0.1, 0.4, 0.2]])
     pred = {
-        "jqf_line_obs_sed": rendered,
+        "spectral_line_obs_sed": rendered,
         "line_bl_obs_sed": np.array([[10.0, 20.0, 10.0]]),
         "line_fluxes": np.array([[1.0, 1.0]]),
-        "jqf_line_photometry": np.array([[100.0, 100.0]]),
+        "spectral_line_photometry": np.array([[100.0, 100.0]]),
     }
 
     bridged = _bridged_jaxsedfit_agn_lines(pred)
@@ -104,10 +104,10 @@ def test_plot_fit_sed_writes_output(tmp_path):
                 "total_obs_sed": flux[None, :],
                 "spectrum_scale_fit": np.array([0.5]),
                 "spec_wave_obs": np.array([[1800.0, 2200.0, 2600.0]]),
-                "jqf_line_model_aperture": np.array([[0.2, 0.3, 0.4]]),
-                "jqf_feii_model": np.array([[0.1, 0.1, 0.1]]),
-                "jqf_feii_obs_sed": (0.06 * flux)[None, :],
-                "jqf_balmer_obs_sed": (0.04 * flux)[None, :],
+                "spectral_line_model_aperture": np.array([[0.2, 0.3, 0.4]]),
+                "spectral_feii_model": np.array([[0.1, 0.1, 0.1]]),
+                "spectral_feii_obs_sed": (0.06 * flux)[None, :],
+                "spectral_balmer_obs_sed": (0.04 * flux)[None, :],
             }
 
     output = tmp_path / "sed_plot.png"

@@ -57,22 +57,22 @@ def _dependent_pivot_model():
     numpyro.factor("toy_likelihood", -0.5 * ((continuum + scale) / 0.4) ** 2)
 
 
-def _embedded_jaxqsofit_feature_model():
+def _embedded_spectral_feature_model():
     feii_norm = numpyro.sample(
-        "jqf_feii_norm",
+        "spectral_feii_norm",
         dist.LogNormal(jnp.log(1.0e-3), 2.0),
         infer={
-            "jaxqsofit_normal_lognormal_standardization": {
-                "auxiliary_name": "jqf_feii_norm_std",
+            "spectral_normal_lognormal_standardization": {
+                "auxiliary_name": "spectral_feii_norm_std",
             }
         },
     )
     feii_shift = numpyro.sample(
-        "jqf_feii_shift",
+        "spectral_feii_shift",
         dist.Normal(0.0, 0.01),
         infer={
-            "jaxqsofit_normal_lognormal_standardization": {
-                "auxiliary_name": "jqf_feii_shift_std",
+            "spectral_normal_lognormal_standardization": {
+                "auxiliary_name": "spectral_feii_shift_std",
             }
         },
     )
@@ -231,31 +231,31 @@ def test_additive_pivot_mcmc_returns_physical_and_auxiliary_samples():
     assert "scale_pivot" not in physical
 
 
-def test_embedded_jaxqsofit_feature_priors_are_prepared_and_can_be_disabled():
-    assert InferenceConfig().reparameterize_jaxqsofit_features is True
+def test_embedded_spectral_feature_priors_are_prepared_and_can_be_disabled():
+    assert InferenceConfig().reparameterize_spectral_features is True
     physical_init = {
-        "jqf_feii_norm": np.asarray(2.0e-3),
-        "jqf_feii_shift": np.asarray(0.02),
+        "spectral_feii_norm": np.asarray(2.0e-3),
+        "spectral_feii_shift": np.asarray(0.02),
     }
     prepared_model, prepared_init, replacements = _prepare_nuts_reparameterization(
-        _embedded_jaxqsofit_feature_model,
+        _embedded_spectral_feature_model,
         physical_init,
         rng_seed=18,
         reparameterize_additive_pivots=False,
-        reparameterize_jaxqsofit_features=True,
+        reparameterize_spectral_features=True,
     )
 
     assert replacements == {
-        "jqf_feii_norm": "jqf_feii_norm_std",
-        "jqf_feii_shift": "jqf_feii_shift_std",
+        "spectral_feii_norm": "spectral_feii_norm_std",
+        "spectral_feii_shift": "spectral_feii_shift_std",
     }
     np.testing.assert_allclose(
-        prepared_init["jqf_feii_norm_std"],
+        prepared_init["spectral_feii_norm_std"],
         0.5 * np.log(2.0),
         rtol=1.0e-12,
     )
     np.testing.assert_allclose(
-        prepared_init["jqf_feii_shift_std"],
+        prepared_init["spectral_feii_shift_std"],
         2.0,
         rtol=1.0e-12,
     )
@@ -275,11 +275,11 @@ def test_embedded_jaxqsofit_feature_priors_are_prepared_and_can_be_disabled():
         )
 
     _, disabled_init, disabled_replacements = _prepare_nuts_reparameterization(
-        _embedded_jaxqsofit_feature_model,
+        _embedded_spectral_feature_model,
         physical_init,
         rng_seed=20,
         reparameterize_additive_pivots=False,
-        reparameterize_jaxqsofit_features=False,
+        reparameterize_spectral_features=False,
     )
     assert disabled_replacements == {}
     assert set(physical_init) <= set(disabled_init)
@@ -307,8 +307,8 @@ def test_joint_dense_blocks_include_line_leftovers_redshift_and_nebular_sites():
         "log_agn_amp": np.asarray(30.0),
         "fcov": np.asarray(0.4),
         "hot_fcov": np.asarray(1.0),
-        "jqf_line_new_center": np.asarray(0.0),
-        "jqf_line_new_width": np.asarray(1.0),
+        "spectral_line_new_center": np.asarray(0.0),
+        "spectral_line_new_width": np.asarray(1.0),
         "nebular_logu": np.asarray(-2.5),
         "log_nebular_amp": np.asarray(0.0),
         "unrelated": np.asarray(2.0),
@@ -316,21 +316,21 @@ def test_joint_dense_blocks_include_line_leftovers_redshift_and_nebular_sites():
 
     blocks = _joint_dense_mass_blocks(values)
     assert ("fcov", "hot_fcov", "log_agn_amp", "redshift") in blocks
-    assert ("jqf_line_new_center", "jqf_line_new_width") in blocks
+    assert ("spectral_line_new_center", "spectral_line_new_width") in blocks
     assert ("log_nebular_amp", "nebular_logu") in blocks
     assert all("unrelated" not in block for block in blocks)
     flattened = [name for block in blocks for name in block]
     assert len(flattened) == len(set(flattened))
 
 
-def test_jaxqsofit_feature_block_remaps_to_standardized_nuts_sites():
+def test_spectral_feature_block_remaps_to_standardized_nuts_sites():
     values = {
-        "jqf_feii_norm": np.asarray(1.0e-3),
-        "jqf_feii_fwhm": np.asarray(3000.0),
-        "jqf_feii_shift": np.asarray(0.0),
-        "jqf_balmer_norm": np.asarray(1.0e-3),
-        "jqf_balmer_tau": np.asarray(1.0),
-        "jqf_balmer_vel": np.asarray(3000.0),
+        "spectral_feii_norm": np.asarray(1.0e-3),
+        "spectral_feii_fwhm": np.asarray(3000.0),
+        "spectral_feii_shift": np.asarray(0.0),
+        "spectral_balmer_norm": np.asarray(1.0e-3),
+        "spectral_balmer_tau": np.asarray(1.0),
+        "spectral_balmer_vel": np.asarray(3000.0),
     }
     physical_blocks = _joint_dense_mass_blocks(values)
     replacements = {
@@ -347,7 +347,7 @@ def test_jaxqsofit_feature_block_remaps_to_standardized_nuts_sites():
 
 def test_joint_dense_blocks_group_fallback_line_and_sed_sites():
     values = {
-        **{f"jqf_line_extra_{index}": np.asarray(0.0) for index in range(5)},
+        **{f"spectral_line_extra_{index}": np.asarray(0.0) for index in range(5)},
         "log_agn_amp": np.asarray(30.0),
         "fcov": np.asarray(0.4),
         "hot_fcov": np.asarray(1.0),
@@ -358,7 +358,7 @@ def test_joint_dense_blocks_group_fallback_line_and_sed_sites():
 
     blocks = _joint_dense_mass_blocks(values)
     line_names = {
-        name for block in blocks for name in block if name.startswith("jqf_line_")
+        name for block in blocks for name in block if name.startswith("spectral_line_")
     }
     assert len(line_names) == 5
     assert any(
