@@ -27,6 +27,7 @@ from .spectral_custom_components import (
     normalize_custom_components,
     normalize_custom_line_components,
 )
+from .spectral_contract import SpectralSites, normalize_line_definitions
 from .spectral_config import ErrorScaledHalfNormalPrior
 from .velocity import shift_and_broaden_lnlam as _fourier_shift_and_broaden_lnlam
 
@@ -2427,12 +2428,14 @@ def reconstruct_posterior_components(
     fe_op_wave: np.ndarray,
     fe_op_flux: np.ndarray,
     custom_components: Sequence[CustomComponentSpec] | None = None,
+    custom_line_components: Sequence[CustomLineComponentSpec] | None = None,
+    tied_line_meta: Mapping[str, Any] | None = None,
     template_norms: Sequence[float] | None = None,
     n_draws: int | None = None,
     return_components: bool = True,
     decompose_host: bool = True,
 ) -> Dict[str, Any]:
-    """Rebuild posterior continuum components on an arbitrary rest-frame grid.
+    """Rebuild posterior spectral components on an arbitrary rest-frame grid.
 
     Parameters
     ----------
@@ -2502,6 +2505,7 @@ def reconstruct_posterior_components(
         templates = np.zeros((wave_out.size, n_templates), dtype=float)
     lnwave = np.log(wave_out)
     custom_components = normalize_custom_components(custom_components)
+    custom_line_components = normalize_custom_line_components(custom_line_components)
     convolution_method = str(prior_config.get("convolution_method", "fft")).lower()
     apply_instrumental_resolution = bool(prior_config.get("apply_instrumental_resolution", False))
     resolving_power = prior_config.get("resolving_power", None)
@@ -2794,7 +2798,67 @@ def reconstruct_posterior_components(
     if custom_components:
         component_draws['continuum'] = component_draws['continuum'] + custom_total_draws
 
-    output_draws = component_draws if return_components else {'continuum': component_draws['continuum']}
+    line_component_draws = np.zeros((n_use, 0, wave_out.size), dtype=float)
+    line_draws = np.zeros((n_use, wave_out.size), dtype=float)
+    if pred_out is not None:
+        line_keys = (
+            SpectralSites.STANDALONE_LINE_AMPLITUDE,
+            SpectralSites.STANDALONE_LINE_CENTER_LN,
+            SpectralSites.STANDALONE_LINE_SIGMA_LN,
+        )
+        if tied_line_meta and all(key in pred_out for key in line_keys):
+            amps = np.asarray(
+                pred_out.get("line_amp_effective_per_component", pred_out[line_keys[0]]),
+                dtype=float,
+            )[sl]
+            centers = np.asarray(pred_out[line_keys[1]], dtype=float)[sl]
+            sigmas = np.asarray(
+                pred_out.get("line_sig_effective_per_component", pred_out[line_keys[2]]),
+                dtype=float,
+            )[sl]
+            if amps.shape == centers.shape == sigmas.shape:
+                line_component_draws = amps[..., None] * np.exp(
+                    -0.5
+                    * (
+                        (lnwave[None, None, :] - centers[..., None])
+                        / np.maximum(sigmas[..., None], 1.0e-30)
+                    )
+                    ** 2
+                )
+                line_component_draws *= poly_draws_np[:, None, :]
+                line_draws = np.sum(line_component_draws, axis=1)
+
+    for comp in custom_line_components:
+        comp_draws = np.zeros((n_use, wave_out.size), dtype=float)
+        for i in range(n_use):
+            def _sample_value(samples_dict, key, default=0.0):
+                values = np.asarray(
+                    samples_dict.get(key, np.full(n_total, default)), dtype=float
+                )[sl]
+                return float(values[i])
+
+            comp_draws[i] = np.asarray(
+                _evaluate_custom_line_component_jax(
+                    wave_out, samples, comp, _sample_value
+                ),
+                dtype=float,
+            ) * poly_draws_np[i]
+        component_draws[comp.output_name] = comp_draws
+        line_draws += comp_draws
+
+    component_draws["lines"] = line_draws
+    component_draws["line_components"] = line_component_draws
+    component_draws["model"] = component_draws["continuum"] + line_draws
+
+    output_draws = (
+        component_draws
+        if return_components
+        else {
+            "continuum": component_draws["continuum"],
+            "lines": line_draws,
+            "model": component_draws["model"],
+        }
+    )
     return {
         'wave': wave_out,
         'draws': output_draws,
@@ -2907,26 +2971,7 @@ def build_tied_line_meta_from_linelist(
         If False, retain independent cross-complex centroid parameters while
         preserving explicit line-table ties.
     """
-    def _to_records(obj):
-        """Normalize line table inputs to `list[dict]` records.
-
-        Parameters
-        ----------
-        obj : object
-            obj value.
-        """
-        # pandas.DataFrame
-        if hasattr(obj, 'to_dict'):
-            return obj.to_dict('records')
-        # Astropy table / FITS recarray / numpy structured array
-        if hasattr(obj, 'dtype') and getattr(obj.dtype, 'names', None):
-            return [{name: row[name] for name in obj.dtype.names} for row in obj]
-        if hasattr(obj, 'colnames'):
-            return [{name: row[name] for name in obj.colnames} for row in obj]
-        # list[dict]-like
-        return list(obj)
-
-    records = _to_records(linelist)
+    records = normalize_line_definitions(linelist)
     rows = []
     wmin = float(np.min(wave))
     wmax = float(np.max(wave))
@@ -3605,9 +3650,9 @@ def _build_line_component(
             else jnp.zeros((0, wave.shape[0]), dtype=wave.dtype)
         )
     if emit_deterministics:
-        numpyro.deterministic("line_amp_per_component", amps)
-        numpyro.deterministic("line_mu_per_component", mus)
-        numpyro.deterministic("line_sig_per_component", sigs)
+        numpyro.deterministic(SpectralSites.STANDALONE_LINE_AMPLITUDE, amps)
+        numpyro.deterministic(SpectralSites.STANDALONE_LINE_CENTER_LN, mus)
+        numpyro.deterministic(SpectralSites.STANDALONE_LINE_SIGMA_LN, sigs)
         numpyro.deterministic("line_sig_effective_per_component", effective_sigs)
         numpyro.deterministic("line_amp_effective_per_component", effective_amps)
     return _LineComponentState(

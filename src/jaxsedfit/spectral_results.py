@@ -7,31 +7,19 @@ from typing import Any, Mapping
 
 import numpy as np
 
-
-class SpectralSites:
-    """Canonical internal site names consumed by the public result adapter."""
-
-    MODEL_FLUX = "pred_spectrum_fluxes"
-    CONTINUUM_FLUX = "spec_continuum_model_fluxes"
-    HOST_FLUX = "spec_host_model_fluxes"
-    DISK_FLUX = "spec_disk_model_fluxes"
-    TORUS_FLUX = "spec_torus_model_fluxes"
-    WAVELENGTH_OBS = "spec_wave_obs"
-    SPECTRUM_INDEX = "spec_spectrum_index"
-    SCALE = "spectrum_scale_fit"
-    LINE_FLUX = "spectral_line_model"
-    LINE_APERTURE_FLUX = "spectral_line_model_aperture"
-    FEII_FLUX = "spectral_feii_model"
-    BALMER_FLUX = "spectral_balmer_model"
-    LINE_AMPLITUDE = "spectral_line_amp_per_component"
-    LINE_CENTER_LN = "spectral_line_mu_per_component"
-    LINE_SIGMA_LN = "spectral_line_sig_per_component"
-    LINE_BROAD_MASK = "spectral_line_broad_mask_per_component"
-    REDSHIFT = "redshift_fit"
+from .spectral_contract import (
+    LineComponentResultBase,
+    LineGroupResultBase,
+    SpectralSites,
+    fwhm_kms_from_sigma_ln,
+    gaussian_fnu_flux_w_m2,
+    line_component_metadata,
+    velocity_offset_kms,
+)
 
 
 @dataclass(frozen=True)
-class LineComponentResult:
+class LineComponentResult(LineComponentResultBase):
     """Posterior draws and metadata for one Gaussian line component."""
 
     amplitude_mjy: np.ndarray
@@ -40,20 +28,13 @@ class LineComponentResult:
     fwhm_kms: np.ndarray
     velocity_offset_kms: np.ndarray
     flux_w_m2: np.ndarray
-    parent_line: str
-    component_index: int
-    kind: str
-    rest_wavelength_angstrom: float
 
 
 @dataclass(frozen=True)
-class LineGroupResult:
+class LineGroupResult(LineGroupResultBase):
     """Aggregate posterior quantities for one physical emission line."""
 
-    component_names: tuple[str, ...]
     total_flux_w_m2: np.ndarray
-    kind: str
-    rest_wavelength_angstrom: float
 
 
 @dataclass(frozen=True)
@@ -92,11 +73,6 @@ class SpectralResult:
     balmer_flux_density_mjy: np.ndarray
 
 
-_C_KMS = 299792.458
-_C_ANGSTROM_PER_S = 2.99792458e18
-_GAUSSIAN_FWHM = 2.354820045
-
-
 def _line_results(
     predictive: Mapping[str, Any],
     metadata: Mapping[str, Any] | None,
@@ -119,10 +95,7 @@ def _line_results(
         raise ValueError(
             "Spectral line metadata does not match the predictive component axis."
         )
-    rest_wavelengths = np.asarray(metadata["line_lambda"], dtype=float)
-    broad_mask = np.asarray(metadata["broad_mask"], dtype=bool)
-    parents = [name.rsplit("_", 1)[0] for name in names]
-    parent_counts = {parent: parents.count(parent) for parent in set(parents)}
+    component_metadata, group_metadata = line_component_metadata(metadata)
     redshift_draws = np.asarray(
         predictive.get(SpectralSites.REDSHIFT, redshift), dtype=float
     )
@@ -131,46 +104,41 @@ def _line_results(
 
     lines: dict[str, LineComponentResult] = {}
     group_members: dict[str, list[str]] = {}
-    for index, (internal_name, parent) in enumerate(zip(names, parents)):
-        public_name = internal_name if parent_counts[parent] > 1 else parent
+    for index, identity in enumerate(component_metadata):
         center = np.exp(centers_ln[..., index])
         sigma_ln = sigmas_ln[..., index]
         amplitude = amplitudes[..., index]
-        flux = (
-            amplitude
-            * 1.0e-29
-            * _C_ANGSTROM_PER_S
-            * np.sqrt(2.0 * np.pi)
-            * sigma_ln
-            * np.exp(-centers_ln[..., index] + 0.5 * sigma_ln**2)
-            / (1.0 + redshift_draws)
+        flux = gaussian_fnu_flux_w_m2(
+            amplitude, centers_ln[..., index], sigma_ln, redshift_draws
         )
-        lines[public_name] = LineComponentResult(
+        lines[identity.public_name] = LineComponentResult(
             amplitude_mjy=amplitude,
             center_rest_angstrom=center,
             sigma_ln_lambda=sigma_ln,
-            fwhm_kms=_GAUSSIAN_FWHM * _C_KMS * sigma_ln,
-            velocity_offset_kms=_C_KMS
-            * (centers_ln[..., index] - np.log(rest_wavelengths[index])),
+            fwhm_kms=fwhm_kms_from_sigma_ln(sigma_ln),
+            velocity_offset_kms=velocity_offset_kms(
+                centers_ln[..., index], identity.rest_wavelength_angstrom
+            ),
             flux_w_m2=flux,
-            parent_line=parent,
-            component_index=int(internal_name.rsplit("_", 1)[1]),
-            kind="broad" if broad_mask[index] else "narrow",
-            rest_wavelength_angstrom=float(rest_wavelengths[index]),
+            parent_line=identity.parent_line,
+            component_index=identity.component_index,
+            kind=identity.kind,
+            rest_wavelength_angstrom=identity.rest_wavelength_angstrom,
         )
-        group_members.setdefault(parent, []).append(public_name)
+        group_members.setdefault(identity.parent_line, []).append(identity.public_name)
 
     groups: dict[str, LineGroupResult] = {}
+    group_by_name = {item.name: item for item in group_metadata}
     for parent, members in group_members.items():
-        first = lines[members[0]]
+        identity = group_by_name[parent]
         groups[parent] = LineGroupResult(
             component_names=tuple(members),
             total_flux_w_m2=np.sum(
                 np.stack([lines[name].flux_w_m2 for name in members], axis=0),
                 axis=0,
             ),
-            kind=first.kind,
-            rest_wavelength_angstrom=first.rest_wavelength_angstrom,
+            kind=identity.kind,
+            rest_wavelength_angstrom=identity.rest_wavelength_angstrom,
         )
     return lines, groups
 
