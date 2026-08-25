@@ -134,6 +134,10 @@ class FitResult:
             Keyword arguments forwarded to :meth:`jaxsedfit.JAXSEDFit.predict`,
             such as ``kind`` or ``max_draws``.
         """
+        if "n_draws" in kwargs:
+            if "max_draws" in kwargs:
+                raise TypeError("Pass only n_draws; max_draws is an internal alias.")
+            kwargs["max_draws"] = kwargs.pop("n_draws")
         if self._state is not None:
             kwargs.setdefault("_state", self._state)
         return PredictionResult(self.fitter.predict(**kwargs), fitter=self.fitter)

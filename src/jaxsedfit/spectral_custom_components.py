@@ -312,6 +312,112 @@ class CustomLineComponentSpec:
         )
 
 
+@dataclass(frozen=True)
+class SpectralComponentSpec:
+    """Unified public definition for a custom continuum or line component.
+
+    ``kind`` is ``"continuum"``, ``"broad_line"``, or ``"narrow_line"``.
+    The fitting engines convert this definition to their specialized internal
+    representation at the model boundary.
+    """
+
+    name: str
+    parameter_priors: Mapping[str, Any]
+    evaluate: Callable[[Any, Mapping[str, Any], Mapping[str, Any]], Any]
+    kind: str = "continuum"
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+    frame: str = "rest"
+    flux_unit: str = "fnu_mjy"
+    attenuation: str = "none"
+
+    def __post_init__(self) -> None:
+        kind = str(self.kind).strip().lower().replace("-", "_")
+        aliases = {"broad": "broad_line", "narrow": "narrow_line", "line": "broad_line"}
+        kind = aliases.get(kind, kind)
+        if kind not in {"continuum", "broad_line", "narrow_line"}:
+            raise ValueError(
+                "SpectralComponentSpec.kind must be 'continuum', "
+                "'broad_line', or 'narrow_line'."
+            )
+        object.__setattr__(self, "kind", kind)
+        object.__setattr__(self, "name", _sanitize_component_name(self.name))
+        object.__setattr__(
+            self,
+            "parameter_priors",
+            {str(key): _normalize_parameter_prior(value) for key, value in self.parameter_priors.items()},
+        )
+        object.__setattr__(self, "metadata", dict(self.metadata))
+        if not callable(self.evaluate):
+            raise TypeError("SpectralComponentSpec.evaluate must be callable.")
+
+    def to_internal(self) -> CustomComponentSpec | CustomLineComponentSpec:
+        """Return the specialized representation consumed by model code."""
+        if self.kind == "continuum":
+            return CustomComponentSpec(
+                name=self.name,
+                parameter_priors=self.parameter_priors,
+                evaluate=self.evaluate,
+                metadata=self.metadata,
+                frame=self.frame,
+                flux_unit=self.flux_unit,
+                attenuation=self.attenuation,
+            )
+        return CustomLineComponentSpec(
+            name=self.name,
+            parameter_priors=self.parameter_priors,
+            evaluate=self.evaluate,
+            line_kind=self.kind.removesuffix("_line"),
+            metadata=self.metadata,
+            frame=self.frame,
+            flux_unit=self.flux_unit,
+        )
+
+    def to_state(self) -> dict[str, Any]:
+        """Return a persistence-safe representation."""
+        return {
+            "__spectral_component__": True,
+            "name": self.name,
+            "parameter_priors": copy.deepcopy(dict(self.parameter_priors)),
+            "evaluate_ref": _callable_to_ref(self.evaluate),
+            "kind": self.kind,
+            "metadata": copy.deepcopy(dict(self.metadata)),
+            "frame": self.frame,
+            "flux_unit": self.flux_unit,
+            "attenuation": self.attenuation,
+        }
+
+    @classmethod
+    def from_state(cls, state: Mapping[str, Any]) -> "SpectralComponentSpec":
+        """Restore a definition produced by :meth:`to_state`."""
+        return cls(
+            name=str(state["name"]),
+            parameter_priors=dict(state["parameter_priors"]),
+            evaluate=_callable_from_ref(str(state["evaluate_ref"])),
+            kind=str(state.get("kind", "continuum")),
+            metadata=dict(state.get("metadata", {})),
+            frame=str(state.get("frame", "rest")),
+            flux_unit=str(state.get("flux_unit", "fnu_mjy")),
+            attenuation=str(state.get("attenuation", "none")),
+        )
+
+
+def split_spectral_components(
+    components: Iterable[SpectralComponentSpec] | None,
+) -> tuple[tuple[CustomComponentSpec, ...], tuple[CustomLineComponentSpec, ...]]:
+    """Partition unified component definitions at the internal model boundary."""
+    continuum = []
+    lines = []
+    for component in components or ():
+        if not isinstance(component, SpectralComponentSpec):
+            raise TypeError("components entries must be SpectralComponentSpec objects.")
+        internal = component.to_internal()
+        (continuum if isinstance(internal, CustomComponentSpec) else lines).append(internal)
+    all_names = [component.name for component in (*continuum, *lines)]
+    if len(all_names) != len(set(all_names)):
+        raise ValueError("Spectral component names must be unique.")
+    return tuple(continuum), tuple(lines)
+
+
 def make_custom_component(
     name: str,
     parameter_priors: Mapping[str, Any],

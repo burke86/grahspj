@@ -7,6 +7,8 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 import numpyro.distributions as dist
 
+from .spectral_contract import SpectrumConfig
+
 
 @dataclass
 class Observation:
@@ -295,14 +297,40 @@ class AGNConfig:
     line_coverage_margin_kms: float = 3000.0
     include_elg_narrow_lines: bool = False
     include_high_ionization_lines: bool = False
-    line_table: Sequence[Mapping[str, Any]] | None = None
+    line_table: Sequence[Any] | None = None
     broadening_convolution: str = "fft"
     feature_grid_size: int = 2048
     custom_components: Sequence[Any] | None = None
     custom_line_components: Sequence[Any] | None = None
+    components: Sequence[Any] | None = None
 
     def __post_init__(self) -> None:
         """Normalize nested template sections."""
+        from .spectral_custom_components import (
+            CustomComponentSpec,
+            CustomLineComponentSpec,
+            SpectralComponentSpec,
+        )
+
+        def restore(items, cls, marker):
+            return tuple(
+                cls.from_state(item)
+                if isinstance(item, Mapping) and item.get(marker)
+                else item
+                for item in (items or ())
+            )
+
+        self.custom_components = restore(
+            self.custom_components, CustomComponentSpec, "__custom_component__"
+        )
+        self.custom_line_components = restore(
+            self.custom_line_components,
+            CustomLineComponentSpec,
+            "__custom_line_component__",
+        )
+        self.components = restore(
+            self.components, SpectralComponentSpec, "__spectral_component__"
+        )
         self.feii_template = _coerce_dataclass(FeIITemplate, self.feii_template)
         self.emission_line_template = _coerce_dataclass(EmissionLineTemplate, self.emission_line_template)
         method = str(self.broadening_convolution).lower()
@@ -968,6 +996,7 @@ class FitConfig:
     agn: AGNConfig = field(default_factory=AGNConfig)
     likelihood: LikelihoodConfig = field(default_factory=LikelihoodConfig)
     spectroscopy: SpectroscopyData | Sequence[SpectroscopyData] | None = None
+    spectrum: SpectrumConfig | None = None
     inference: InferenceConfig = field(default_factory=InferenceConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
     prior_config: PriorConfig = field(default_factory=PriorConfig)
@@ -977,9 +1006,38 @@ class FitConfig:
         if self.photometry is not None:
             self.photometry = _coerce_dataclass(PhotometryData, self.photometry)
         self.prior_config = _coerce_prior_config(self.prior_config)
+        if self.spectrum is not None:
+            self.spectrum = _coerce_dataclass(SpectrumConfig, self.spectrum)
+            shared = self.spectrum
+            if shared.power_law_enabled is not None:
+                self.agn.use_powerlaw_disk = bool(shared.power_law_enabled)
+            if shared.host_enabled is not None:
+                self.galaxy.fit_host = bool(shared.host_enabled)
+            if shared.lines_enabled is not None:
+                self.agn.fit_lines = bool(shared.lines_enabled)
+            if shared.tied_lines is not None:
+                self.agn.tied_lines = bool(shared.tied_lines)
+            if shared.feii_enabled is not None:
+                self.agn.fit_feii = bool(shared.feii_enabled)
+            if shared.balmer_continuum_enabled is not None:
+                self.agn.fit_balmer_continuum = bool(
+                    shared.balmer_continuum_enabled
+                )
+            if shared.polynomial_tilt_enabled is not None:
+                self.agn.fit_spectrum_tilt = bool(shared.polynomial_tilt_enabled)
+            if shared.broadening_convolution is not None:
+                self.agn.broadening_convolution = shared.broadening_convolution
+            if shared.line_definitions is not None:
+                self.agn.line_table = shared.line_definitions
+            if shared.components:
+                self.agn.components = shared.components
 
     def validate(self) -> None:
         """Validate nested config components that require runtime checks."""
+        # Re-apply a shared spectrum config in case it was assigned or edited
+        # after FitConfig construction.
+        if self.spectrum is not None:
+            self.__post_init__()
         self.observation.validate()
         if self.photometry is not None:
             self.photometry.validate()
@@ -1129,6 +1187,11 @@ def fit_config_from_mapping(data: Mapping[str, Any]) -> FitConfig:
         agn=agn_obj,
         likelihood=_coerce_dataclass(LikelihoodConfig, data.get("likelihood", {})),
         spectroscopy=spectroscopy_obj,
+        spectrum=(
+            None
+            if data.get("spectrum") is None
+            else _coerce_dataclass(SpectrumConfig, data["spectrum"])
+        ),
         inference=_coerce_dataclass(InferenceConfig, data.get("inference", {})),
         output=_coerce_dataclass(OutputConfig, data.get("output", {})),
         prior_config=_coerce_prior_config(data.get("prior_config", {})),
@@ -1150,6 +1213,10 @@ def serialize_config(value: Any) -> Any:
     prior = _numpyro_distribution_to_mapping(value)
     if prior is not None:
         return serialize_config(prior)
+    if hasattr(value, "to_state") and value.__class__.__module__.endswith(
+        "spectral_custom_components"
+    ):
+        return serialize_config(value.to_state())
     if is_dataclass(value):
         return {k: serialize_config(v) for k, v in asdict(value).items()}
     if isinstance(value, dict):

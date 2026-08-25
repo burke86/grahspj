@@ -3329,6 +3329,7 @@ def _evaluate_spectral_components(
         fixed_narrow_amp_scale=fixed_narrow_amp_scale,
         custom_components=spectral_cfg.custom_components or (),
         custom_line_components=spectral_cfg.custom_line_components or (),
+        components=getattr(spectral_cfg, "components", ()) or (),
     )
     result = evaluate_joint_spectral_components(
         wave_obs,

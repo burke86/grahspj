@@ -764,28 +764,67 @@ filters outside the spectral coverage.
 Changing broad-line components
 -------------------------------
 
-The number of broad Gaussian components is set by the line-table ``ngauss``
-field. The default spectral line table uses names such as ``Ha_br``,
+The number of broad Gaussian components is set by
+``LineDefinition.components``. The default spectral line table uses names such as ``Ha_br``,
 ``Hb_br``, ``MgII_br``,
 ``CIV_br``, and ``Lya_br`` for broad components. Copy the table, adjust
-``ngauss`` for the rows you want, and assign it before constructing
+``components`` for the rows you want, and assign it before constructing
 :class:`jaxsedfit.JAXSEDFit`.
 
 .. code-block:: python
 
-   from copy import deepcopy
+   from dataclasses import replace
 
+   from jaxsedfit import LineDefinition
    from jaxsedfit.spectral_defaults import DEFAULT_LINE_PRIOR_ROWS
 
-   line_table = deepcopy(DEFAULT_LINE_PRIOR_ROWS)
-
-   for row in line_table:
-       if row["linename"] in {"Ha_br", "Hb_br", "MgII_br"}:
-           row["ngauss"] = 3
-       if row["linename"] in {"CIV_br", "Lya_br"}:
-           row["ngauss"] = 2
+   line_table = [LineDefinition.from_mapping(row) for row in DEFAULT_LINE_PRIOR_ROWS]
+   line_table = [
+       replace(line, components=3)
+       if line.name in {"Ha_br", "Hb_br", "MgII_br"}
+       else replace(line, components=2)
+       if line.name in {"CIV_br", "Lya_br"}
+       else line
+       for line in line_table
+   ]
 
    cfg.agn.line_table = line_table
+
+Custom spectral components use the same definition in standalone jaxqsofit
+and joint jaxsedfit fits:
+
+.. code-block:: python
+
+   import numpyro.distributions as dist
+   from jaxsedfit import SpectralComponentSpec
+
+   component = SpectralComponentSpec(
+       name="extra_continuum",
+       kind="continuum",  # or "broad_line" / "narrow_line"
+       parameter_priors={"amplitude": dist.HalfNormal(1.0)},
+       evaluate=my_component,
+   )
+   cfg.agn.components = [component]
+
+The portable spectral switches use the same config object as standalone
+jaxqsofit:
+
+.. code-block:: python
+
+   from jaxsedfit import SpectrumConfig
+
+   cfg.spectrum = SpectrumConfig(
+       power_law_enabled=True,
+       host_enabled=True,
+       lines_enabled=True,
+       feii_enabled=True,
+       balmer_continuum_enabled=True,
+       line_definitions=line_table,
+       components=[component],
+   )
+
+Fit-mode-specific photometry, preprocessing, and inference controls stay in
+their existing sections; the spectral feature definition itself is portable.
 
 Reading spectral results
 ------------------------
@@ -855,7 +894,7 @@ limiting the number of evaluated draws:
 
 .. code-block:: python
 
-   prediction = result.predict(max_draws=200)
+   prediction = result.predict(n_draws=200)
    hb1 = prediction.spectrum.lines["Hb_br_1"]
    hb_total = prediction.spectrum.line_groups["Hb_br"]
 

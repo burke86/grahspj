@@ -30,7 +30,9 @@ from .spectral_custom_components import (
     CustomLineComponentSpec,
     normalize_custom_components,
     normalize_custom_line_components,
+    split_spectral_components,
 )
+from .spectral_contract import normalize_line_definitions
 
 
 def _sample_standardizable_feature_prior(site_name: str, prior):
@@ -66,7 +68,7 @@ class SpectralComponentConfig:
     use_balmer_continuum: bool = False
     multiplicative_tilt: bool = False
     tied_lines: bool = True
-    line_table: Sequence[Mapping[str, Any]] | None = None
+    line_table: Sequence[Any] | None = None
     line_prior_config: Mapping[str, Any] | None = None
     line_flux_scale_mjy: float = 1.0
     include_elg_narrow_lines: bool = False
@@ -88,14 +90,24 @@ class SpectralComponentConfig:
     balmer_fnu_pivot_rest: float | None = 3000.0
     custom_components: Sequence[CustomComponentSpec] = ()
     custom_line_components: Sequence[CustomLineComponentSpec] = ()
+    components: Sequence[Any] = ()
 
     def __post_init__(self) -> None:
         method = str(self.broadening_convolution).lower()
         if method not in {"fft", "direct"}:
             raise ValueError("SpectralComponentConfig.broadening_convolution must be 'fft' or 'direct'.")
         object.__setattr__(self, "broadening_convolution", method)
-        object.__setattr__(self, "custom_components", normalize_custom_components(self.custom_components))
-        object.__setattr__(self, "custom_line_components", normalize_custom_line_components(self.custom_line_components))
+        unified_continuum, unified_lines = split_spectral_components(self.components)
+        object.__setattr__(
+            self,
+            "custom_components",
+            normalize_custom_components((*self.custom_components, *unified_continuum)),
+        )
+        object.__setattr__(
+            self,
+            "custom_line_components",
+            normalize_custom_line_components((*self.custom_line_components, *unified_lines)),
+        )
         continuum_names = {component.name for component in self.custom_components}
         duplicate_names = continuum_names.intersection(
             component.name for component in self.custom_line_components
@@ -156,7 +168,7 @@ def _component_prior_config(cfg: SpectralComponentConfig) -> dict[str, Any]:
         prior = copy.deepcopy(dict(prior))
     if cfg.line_table is not None:
         prior.setdefault("line", {})
-        prior["line"]["table"] = [dict(row) for row in cfg.line_table]
+        prior["line"]["table"] = normalize_line_definitions(cfg.line_table)
     return prior
 
 

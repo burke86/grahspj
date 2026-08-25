@@ -8,6 +8,8 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 import numpyro.distributions as dist
 
+from .spectral_contract import SpectrumConfig
+
 
 @dataclass(frozen=True)
 class ErrorScaledHalfNormalPrior:
@@ -204,6 +206,7 @@ class LineConfig:
     include_high_ionization_lines: bool = False
     custom_components: Sequence[Any] | None = None
     custom_line_components: Sequence[Any] | None = None
+    components: Sequence[Any] | None = None
 
 
 @dataclass
@@ -484,7 +487,7 @@ class LinePriorConfig:
     multiplier times the first component's initial amplitude.
     """
 
-    table: Sequence[Mapping[str, Any]] | None = None
+    table: Sequence[Any] | None = None
     dmu_scale_mult: float | None = None
     sig_scale_mult: float | None = None
     amp_scale_mult: float | None = None
@@ -494,7 +497,9 @@ class LinePriorConfig:
         """Convert semantic emission-line prior settings into model-site keys."""
         out: dict[str, Any] = {}
         if self.table is not None:
-            out["line"] = {"table": list(self.table)}
+            from .spectral_contract import normalize_line_definitions
+
+            out["line"] = {"table": normalize_line_definitions(self.table)}
         if self.dmu_scale_mult is not None:
             out["line_dmu_scale_mult"] = float(self.dmu_scale_mult)
         if self.sig_scale_mult is not None:
@@ -743,6 +748,7 @@ class FitConfig:
     inference: InferenceConfig = field(default_factory=InferenceConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
     prior_config: PriorConfig | None = None
+    spectrum: SpectrumConfig | None = None
 
     def __post_init__(self) -> None:
         """Coerce mapping-style nested configs into dataclass objects."""
@@ -770,6 +776,37 @@ class FitConfig:
             self.output = _coerce_dataclass(OutputConfig, self.output)
         if self.prior_config is not None:
             self.prior_config = _coerce_prior_config(self.prior_config)
+        if self.spectrum is not None:
+            self.spectrum = _coerce_dataclass(SpectrumConfig, self.spectrum)
+            shared = self.spectrum
+            if shared.power_law_enabled is not None:
+                self.continuum.fit_power_law = bool(shared.power_law_enabled)
+            if shared.host_enabled is not None:
+                self.host.enabled = bool(shared.host_enabled)
+            if shared.lines_enabled is not None:
+                self.lines.enabled = bool(shared.lines_enabled)
+            if shared.broad_lines_enabled is not None:
+                self.lines.use_broad_lines = bool(shared.broad_lines_enabled)
+            if shared.narrow_lines_enabled is not None:
+                self.lines.use_narrow_lines = bool(shared.narrow_lines_enabled)
+            if shared.feii_enabled is not None:
+                self.continuum.fit_feii = bool(shared.feii_enabled)
+            if shared.balmer_continuum_enabled is not None:
+                self.continuum.fit_balmer_continuum = bool(
+                    shared.balmer_continuum_enabled
+                )
+            if shared.polynomial_tilt_enabled is not None:
+                self.continuum.fit_polynomial_tilt = bool(
+                    shared.polynomial_tilt_enabled
+                )
+            if shared.broadening_convolution is not None:
+                self.continuum.broadening_convolution = shared.broadening_convolution
+            if shared.components:
+                self.lines.components = shared.components
+            if shared.line_definitions is not None:
+                if self.prior_config is None:
+                    self.prior_config = PriorConfig()
+                self.prior_config.lines.table = shared.line_definitions
 
     def apply_agn_type_defaults(self) -> None:
         """Apply coherent component defaults for ``agn.agn_type``.

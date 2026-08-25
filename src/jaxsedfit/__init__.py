@@ -47,8 +47,10 @@ __all__ = [
     "PhotometryData",
     "PredictionResult",
     "LineComponentResult",
+    "LineDefinition",
     "LineGroupResult",
     "SpectralResult",
+    "SpectrumConfig",
     "SpectrumObservationResult",
     "PriorConfig",
     "RedshiftPriorConfig",
@@ -56,6 +58,7 @@ __all__ = [
     "SpectroscopyData",
     "CustomComponentSpec",
     "CustomLineComponentSpec",
+    "SpectralComponentSpec",
     "make_custom_component",
     "make_custom_line_component",
     "make_template_component",
@@ -92,6 +95,8 @@ def __getattr__(name):
     if name in {
         "CustomComponentSpec",
         "CustomLineComponentSpec",
+        "SpectralComponentSpec",
+        "LineDefinition",
         "make_custom_component",
         "make_custom_line_component",
         "make_template_component",
@@ -112,6 +117,10 @@ def __getattr__(name):
         from . import spectral_results as _spectral_results
 
         return getattr(_spectral_results, name)
+    if name == "SpectrumConfig":
+        from .spectral_contract import SpectrumConfig
+
+        return SpectrumConfig
     if name in {"load_from_samples", "load"}:
         from .core import JAXSEDFit
 
