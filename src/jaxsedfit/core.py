@@ -41,6 +41,19 @@ from .results import FitResult, _FitState, median_mapping
 from .spectral_results import SpectralSites
 
 
+def _uses_spectral_feature_reparameterization(config: FitConfig) -> bool:
+    """Return whether active detailed spectral features need NUTS pivots."""
+    return bool(
+        config.inference.reparameterize_spectral_features
+        and config.spectroscopy is not None
+        and bool(config.spectroscopy_list)
+        and (
+            config.agn.fit_feii
+            or config.agn.fit_balmer_continuum
+        )
+    )
+
+
 def _scoped_auxiliary_names(site_name: str, auxiliary_name: str) -> tuple[str, str]:
     """Return public and local auxiliary names for NumPyro scope handlers."""
     site_name = str(site_name)
@@ -1402,15 +1415,8 @@ class JAXSEDFit:
                 else bool(self.config.likelihood.fit_spectrum_scale)
             )
         )
-        spectral_config = self.config.agn
-        use_spectral_feature_reparam = bool(
-            inference.reparameterize_spectral_features
-            and self.config.spectroscopy is not None
-            and bool(self.config.spectroscopy_list)
-            and (
-                spectral_config.feii
-                or spectral_config.balmer_continuum
-            )
+        use_spectral_feature_reparam = (
+            _uses_spectral_feature_reparameterization(self.config)
         )
         if (
             use_normalization_reparam
