@@ -21,8 +21,14 @@ from jaxsedfit.config import (
     OutputConfig,
     PhotometryData,
     RedshiftPriorConfig,
+    SpectroscopyData,
 )
-from jaxsedfit.core import JAXSEDFit, _joint_dense_mass_blocks, _resolve_dense_mass_structure
+from jaxsedfit.core import (
+    JAXSEDFit,
+    _joint_dense_mass_blocks,
+    _resolve_dense_mass_structure,
+    _uses_spectral_feature_reparameterization,
+)
 from jaxsedfit.model import (
     _analytic_delayed_burst_age_weights,
     _analytic_delayed_ssp_weights,
@@ -867,6 +873,24 @@ def test_fit_nuts_reads_sampler_settings_from_config(monkeypatch):
 
 def test_inference_defaults_to_block_dense_mass_adaptation():
     assert InferenceConfig().dense_mass == "blocks"
+
+
+def test_spectral_feature_reparameterization_uses_sed_agn_flags():
+    cfg = _mock_config()
+    cfg.spectroscopy = SpectroscopyData(
+        wave_obs=[4000.0],
+        fluxes=[1.0],
+        errors=[0.1],
+    )
+
+    assert not _uses_spectral_feature_reparameterization(cfg)
+
+    cfg.agn.fit_feii = True
+    assert _uses_spectral_feature_reparameterization(cfg)
+
+    cfg.agn.fit_feii = False
+    cfg.agn.fit_balmer_continuum = True
+    assert _uses_spectral_feature_reparameterization(cfg)
 
 
 def test_fit_map_plot_init_plots_both_staged_map_solutions(monkeypatch):
