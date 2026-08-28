@@ -8,6 +8,7 @@ import pytest
 
 from jaxsedfit.plotting import (
     _COMPONENT_STYLE,
+    _STANDARDIZED_RESIDUAL_LABEL,
     _bridged_jaxsedfit_agn_lines,
     _grouped_trace_samples,
     _median_effective_variance,
@@ -212,6 +213,9 @@ def test_plot_fit_sed_uses_likelihood_photometry_and_saved_chi2():
         if container.get_label() == "Observed photometry"
     )
     np.testing.assert_allclose(observed.lines[0].get_ydata(), context.fluxes)
+    residual_points = fig.axes[1].containers[0].lines[0]
+    np.testing.assert_allclose(residual_points.get_ydata(), [2.0, 1.0])
+    assert fig.axes[1].get_ylabel() == _STANDARDIZED_RESIDUAL_LABEL
     chi2_labels = [
         text for text in fig.axes[1].texts if r"\chi^2_\nu" in text.get_text()
     ]

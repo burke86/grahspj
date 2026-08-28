@@ -2450,7 +2450,7 @@ class JAXSEDFit:
         show_plot : bool, optional
             If True, display the Matplotlib figure interactively.
         plot_residual : bool, optional
-            If True, draw a residual panel below the spectrum.
+            If True, draw ``(data - model) / uncertainty`` below the spectrum.
         plot_legend : bool, optional
             If True, draw the component legend.
         ylims : tuple of float, optional
