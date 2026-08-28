@@ -41,7 +41,7 @@ class _FitState:
     ns_result: dict[str, Any] | None = None
     samples: Mapping[str, Any] | None = None
     predictive: Mapping[str, Any] | None = None
-    predictive_cache: dict[str, Mapping[str, Any]] | None = None
+    predictive_cache: dict[tuple[Any, ...], Mapping[str, Any]] | None = None
     summary: Mapping[str, Any] | None = None
     path: Path | None = None
     figure: Any = None
@@ -132,7 +132,7 @@ class FitResult:
         ----------
         **kwargs : dict
             Keyword arguments forwarded to :meth:`jaxsedfit.JAXSEDFit.predict`,
-            such as ``kind`` or ``max_draws``.
+            such as ``kind``, ``max_draws``, or ``extra_return_sites``.
         """
         if "n_draws" in kwargs:
             if "max_draws" in kwargs:

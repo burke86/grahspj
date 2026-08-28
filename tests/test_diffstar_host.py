@@ -1142,7 +1142,11 @@ def test_ns_samples_work_with_summary_and_predict(monkeypatch):
     )()
 
     expected_predictive = {"pred_fluxes": np.array([[1.0, 2.0]])}
-    monkeypatch.setattr(JAXSEDFit, "_compute_predictive", lambda self: expected_predictive)
+    monkeypatch.setattr(
+        JAXSEDFit,
+        "_compute_predictive",
+        lambda self, **kwargs: expected_predictive,
+    )
 
     summary = JAXSEDFit.summary(fitter)
     pred = JAXSEDFit.predict(fitter)
