@@ -16,30 +16,10 @@ import numpy as np
 from astropy import units as u
 
 from .filters import load_filter_curves
+from .plotting import _STANDARDIZED_RESIDUAL_LABEL, _standardized_residuals
 
 _SDSS_PSF_BANDS = ("u", "g", "r", "i", "z")
 _SDSS_FILTER_CACHE = None
-_STANDARDIZED_RESIDUAL_LABEL = "Std. Resid."
-
-
-def _standardized_residuals(data, model, uncertainty):
-    """Return ``(data - model) / uncertainty`` for valid spectral pixels."""
-    data = np.asarray(data, dtype=float)
-    model = np.asarray(model, dtype=float)
-    uncertainty = np.asarray(uncertainty, dtype=float)
-    if data.shape != model.shape or data.shape != uncertainty.shape:
-        raise ValueError(
-            "Spectral data, model, and uncertainty arrays must have matching shapes."
-        )
-    valid = (
-        np.isfinite(data)
-        & np.isfinite(model)
-        & np.isfinite(uncertainty)
-        & (uncertainty > 0.0)
-    )
-    residual = np.full(data.shape, np.nan, dtype=float)
-    residual[valid] = (data[valid] - model[valid]) / uncertainty[valid]
-    return residual
 
 
 def _get_sdss_filters():
