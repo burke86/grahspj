@@ -2588,6 +2588,23 @@ def test_spectral_plot_photometry_helpers_return_observed_and_synthetic_points()
     assert np.all(synthetic[2] > 0.0)
 
 
+def test_spectral_plot_uses_standardized_residuals_and_public_label():
+    from jaxsedfit.spectral_plotting import (
+        _STANDARDIZED_RESIDUAL_LABEL,
+        _standardized_residuals,
+    )
+
+    residual = _standardized_residuals(
+        data=[2.0, 5.0, np.nan, 4.0],
+        model=[1.0, 4.0, 2.0, 5.0],
+        uncertainty=[0.5, 0.25, 1.0, 0.0],
+    )
+
+    np.testing.assert_allclose(residual[:2], [2.0, 4.0])
+    assert np.isnan(residual[2:]).all()
+    assert _STANDARDIZED_RESIDUAL_LABEL == "Std. Resid."
+
+
 def test_config_rejects_invalid_redshift_pdf():
     cfg = FitConfig(
         observation=Observation(object_id="obj", redshift=0.1, redshift_mode="fit"),
