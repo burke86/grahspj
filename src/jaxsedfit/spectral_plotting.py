@@ -19,6 +19,27 @@ from .filters import load_filter_curves
 
 _SDSS_PSF_BANDS = ("u", "g", "r", "i", "z")
 _SDSS_FILTER_CACHE = None
+_STANDARDIZED_RESIDUAL_LABEL = "Std. Resid."
+
+
+def _standardized_residuals(data, model, uncertainty):
+    """Return ``(data - model) / uncertainty`` for valid spectral pixels."""
+    data = np.asarray(data, dtype=float)
+    model = np.asarray(model, dtype=float)
+    uncertainty = np.asarray(uncertainty, dtype=float)
+    if data.shape != model.shape or data.shape != uncertainty.shape:
+        raise ValueError(
+            "Spectral data, model, and uncertainty arrays must have matching shapes."
+        )
+    valid = (
+        np.isfinite(data)
+        & np.isfinite(model)
+        & np.isfinite(uncertainty)
+        & (uncertainty > 0.0)
+    )
+    residual = np.full(data.shape, np.nan, dtype=float)
+    residual[valid] = (data[valid] - model[valid]) / uncertainty[valid]
+    return residual
 
 
 def _get_sdss_filters():
@@ -693,7 +714,8 @@ def plot_fig(fitter, save_fig_path=None, broad_fwhm=1200, plot_legend=True, ylim
     ylims : tuple[float, float] or None, optional
         Optional y-axis limits for the spectrum panel.
     plot_residual : bool, optional
-        If True, draw residual panel below the spectrum.
+        If True, draw standardized residuals, ``(data - model) / uncertainty``,
+        below the spectrum.
     show_title : bool, optional
         Reserved title toggle kept for compatibility.
     plot_1sigma : bool, optional
@@ -1148,7 +1170,7 @@ def plot_fig(fitter, save_fig_path=None, broad_fwhm=1200, plot_legend=True, ylim
             )
 
     if residual_enabled and len(total_model_plot) == len(fitter.wave) and ax_resid is not None:
-        resid = fitter.flux - total_model_plot
+        resid = _standardized_residuals(fitter.flux, total_model_plot, fitter.err)
         ax_resid.plot(
             fitter.wave,
             resid,
@@ -1164,7 +1186,7 @@ def plot_fig(fitter, save_fig_path=None, broad_fwhm=1200, plot_legend=True, ylim
             rlim = np.nanpercentile(np.abs(r), 99)
             if np.isfinite(rlim) and rlim > 0:
                 ax_resid.set_ylim(-1.15 * rlim, 1.15 * rlim)
-        ax_resid.set_ylabel('resid', fontsize=20)
+        ax_resid.set_ylabel(_STANDARDIZED_RESIDUAL_LABEL, fontsize=20)
         style_axis(ax_resid)
 
     if residual_enabled and ax_resid is not None:
