@@ -6,8 +6,11 @@ from datetime import datetime
 
 ROOT = os.path.abspath("..")
 SRC = os.path.join(ROOT, "src")
+DOC_EXT = os.path.abspath("_ext")
 if SRC not in sys.path:
     sys.path.insert(0, SRC)
+if DOC_EXT not in sys.path:
+    sys.path.insert(0, DOC_EXT)
 
 project = "JAXSEDFit"
 author = "JAXSEDFit contributors"
@@ -18,6 +21,7 @@ extensions = [
     "sphinx.ext.napoleon",
     "sphinx.ext.autosummary",
     "sphinx.ext.viewcode",
+    "filter_registry",
     "nbsphinx",
     "nbsphinx_link",
 ]
@@ -56,6 +60,7 @@ exclude_patterns = ["_build", "Thumbs.db", ".DS_Store"]
 
 html_theme = "sphinx_book_theme"
 html_static_path = ["_static"]
+html_css_files = ["filter-reference.css"]
 html_title = "JAXSEDFit Documentation"
 html_show_sourcelink = False
 html_theme_options = {

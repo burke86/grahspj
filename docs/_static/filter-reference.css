@@ -1,0 +1,65 @@
+.filter-family-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  margin: 1rem 0 2rem;
+}
+
+.filter-family-nav a {
+  background: var(--pst-color-surface, #f3f4f6);
+  border: 1px solid var(--pst-color-border, #d1d5db);
+  border-radius: 0.35rem;
+  padding: 0.3rem 0.55rem;
+  text-decoration: none;
+}
+
+.filter-family {
+  margin-top: 2.2rem;
+  scroll-margin-top: 1rem;
+}
+
+.filter-family h2 span {
+  color: #6b7280;
+  font-size: 0.75em;
+  font-weight: normal;
+}
+
+.filter-table-scroll {
+  overflow-x: auto;
+}
+
+.filter-reference-table {
+  border-collapse: collapse;
+  font-size: 0.88rem;
+  width: 100%;
+}
+
+.filter-reference-table th,
+.filter-reference-table td {
+  border-bottom: 1px solid var(--pst-color-border, #d9dee7);
+  padding: 0.38rem 0.55rem;
+  text-align: left;
+  vertical-align: top;
+}
+
+.filter-reference-table th {
+  background: var(--pst-color-surface, #eef2f7);
+  position: sticky;
+  top: 0;
+  white-space: nowrap;
+  z-index: 1;
+}
+
+.filter-reference-table tbody tr:nth-child(even) {
+  background: rgba(127, 127, 127, 0.06);
+}
+
+.filter-reference-table .numeric {
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.filter-reference-table code {
+  white-space: nowrap;
+}

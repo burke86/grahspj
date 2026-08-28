@@ -10,5 +10,6 @@ JAX and NumPyro.
 
    installation
    quickstart
+   filters
    tutorials
    api/index
