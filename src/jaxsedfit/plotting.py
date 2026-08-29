@@ -24,6 +24,27 @@ _COMPONENT_STYLE = [
 
 _CORNER_SIGMA_LEVELS = tuple(1.0 - np.exp(-0.5 * np.asarray([1.0, 2.0, 3.0]) ** 2))
 _CORNER_ONE_SIGMA_QUANTILES = (0.16, 0.5, 0.84)
+_STANDARDIZED_RESIDUAL_LABEL = "Std. Resid."
+
+
+def _standardized_residuals(data, model, uncertainty):
+    """Return ``(data - model) / uncertainty`` for valid measurements."""
+    data = np.asarray(data, dtype=float)
+    model = np.asarray(model, dtype=float)
+    uncertainty = np.asarray(uncertainty, dtype=float)
+    if data.shape != model.shape or data.shape != uncertainty.shape:
+        raise ValueError(
+            "Data, model, and uncertainty arrays must have matching shapes."
+        )
+    valid = (
+        np.isfinite(data)
+        & np.isfinite(model)
+        & np.isfinite(uncertainty)
+        & (uncertainty > 0.0)
+    )
+    residual = np.full(data.shape, np.nan, dtype=float)
+    residual[valid] = (data[valid] - model[valid]) / uncertainty[valid]
+    return residual
 
 
 def _posterior_samples(fitter_or_samples: Any) -> Mapping[str, Any]:
@@ -860,19 +881,28 @@ def plot_fit_sed(
             for x, y, label in zip(phot_wave, obs_flux, labels):
                 ax_sed.annotate(label, (x, y), xytext=(4, 5), textcoords="offset points", fontsize=8)
 
-        resid = obs_flux - model_flux
         eff_variance = _median_effective_variance(fitter, pred)
         eff_sigma = np.sqrt(np.clip(eff_variance, 1e-30, 1.0e60))
-        ax_resid.errorbar(phot_wave, resid, yerr=eff_sigma, fmt="o", color="black", ms=4, capsize=2)
-        ax_resid.axhline(0.0, color="black", lw=1.0, ls="--")
         upper_limits = np.asarray(getattr(fitter.context, "upper_limits", np.zeros_like(obs_flux, dtype=bool)), dtype=bool)
         finite_chi2 = np.isfinite(obs_flux) & np.isfinite(model_flux) & np.isfinite(eff_sigma) & (eff_sigma > 0.0) & (~upper_limits)
+        resid = _standardized_residuals(obs_flux, model_flux, eff_sigma)
+        resid = np.where(finite_chi2, resid, np.nan)
+        ax_resid.errorbar(
+            phot_wave,
+            resid,
+            yerr=np.where(finite_chi2, 1.0, np.nan),
+            fmt="o",
+            color="black",
+            ms=4,
+            capsize=2,
+        )
+        ax_resid.axhline(0.0, color="black", lw=1.0, ls="--")
         if "sed_reduced_chi2" in pred:
             reduced_chi2 = float(
                 np.median(np.asarray(pred["sed_reduced_chi2"], dtype=float))
             )
         elif np.any(finite_chi2):
-            chi2 = float(np.sum(((obs_flux[finite_chi2] - model_flux[finite_chi2]) / eff_sigma[finite_chi2]) ** 2))
+            chi2 = float(np.sum(resid[finite_chi2] ** 2))
             reduced_chi2 = chi2 / max(1, int(np.sum(finite_chi2)))
         else:
             reduced_chi2 = np.nan
@@ -893,7 +923,7 @@ def plot_fit_sed(
         ax_sed.set_ylabel("Flux density (mJy)")
         if title is not None:
             ax_sed.set_title(str(title))
-        ax_resid.set_ylabel("Obs - Model (mJy)")
+        ax_resid.set_ylabel(_STANDARDIZED_RESIDUAL_LABEL)
         ax_resid.set_xlabel("Observed-frame wavelength (Å)")
         ax_sed.legend(loc="lower right", fontsize=9, ncol=2)
 

@@ -2589,7 +2589,7 @@ def test_spectral_plot_photometry_helpers_return_observed_and_synthetic_points()
 
 
 def test_spectral_plot_uses_standardized_residuals_and_public_label():
-    from jaxsedfit.spectral_plotting import (
+    from jaxsedfit.plotting import (
         _STANDARDIZED_RESIDUAL_LABEL,
         _standardized_residuals,
     )
