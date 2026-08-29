@@ -526,6 +526,23 @@ methods:
    result.plot_corner()
    fitter.plot_sed(output_path="sed_fit.png")
 
+Advanced consumers can request additional NumPyro sample or deterministic
+sites without changing the standard prediction product sets:
+
+.. code-block:: python
+
+   prediction = result.predict(
+       kind="plot",
+       required_return_sites=("ebv_gal", "ebv_agn"),
+   )
+
+Prediction caches are specific to the product kind, draw limit, and complete
+requested-site set, so a standard cached plot cannot satisfy a later request
+for additional physical sites. Pass ``cache=False`` to force an uncached
+evaluation. Assigning new posterior samples to the fitter invalidates all
+cached predictions automatically. Use ``extra_return_sites`` instead when a
+site is configuration-dependent and may legitimately be absent.
+
 Photometric apertures, PSFs, and spectra
 ----------------------------------------
 

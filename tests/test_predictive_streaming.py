@@ -132,6 +132,89 @@ def test_single_draw_prediction_preserves_unsplit_rng_key(monkeypatch):
     )
 
 
+def test_extra_return_sites_have_distinct_cache_and_validate_output(monkeypatch):
+    fitter = _bare_fitter({"theta": np.asarray([1.0, 2.0])})
+    monkeypatch.setattr(fitter, "_predictive_return_sites", lambda kind: ["pred_fluxes"])
+    calls = []
+
+    def fake_stream(samples, *, kind, rng_key, return_sites):
+        del kind, rng_key
+        calls.append(tuple(return_sites))
+        count = len(samples["theta"])
+        return {site: np.ones(count) for site in return_sites}
+
+    monkeypatch.setattr(fitter, "_stream_predictive_draws", fake_stream)
+
+    base = fitter.predict(kind="photometry")
+    expanded = fitter.predict(
+        kind="photometry",
+        extra_return_sites=("ebv_gal", "ebv_agn"),
+    )
+    expanded_cached = fitter.predict(
+        kind="photometry",
+        extra_return_sites=("ebv_gal", "ebv_agn"),
+    )
+
+    assert set(base) == {"pred_fluxes"}
+    assert set(expanded) == {"pred_fluxes", "ebv_gal", "ebv_agn"}
+    assert set(expanded_cached) == set(expanded)
+    assert calls == [
+        ("pred_fluxes",),
+        ("pred_fluxes", "ebv_gal", "ebv_agn"),
+    ]
+
+    fitter.predict(
+        kind="photometry",
+        extra_return_sites=("ebv_gal", "ebv_agn"),
+        cache=False,
+    )
+    assert len(calls) == 3
+
+
+def test_extra_return_sites_reject_invalid_or_missing_sites(monkeypatch):
+    fitter = _bare_fitter({"theta": np.asarray([1.0])})
+    monkeypatch.setattr(fitter, "_predictive_return_sites", lambda kind: ["pred_fluxes"])
+
+    with pytest.raises(TypeError, match="not one string"):
+        fitter.predict(kind="photometry", extra_return_sites="ebv_gal")
+    with pytest.raises(ValueError, match="nonempty"):
+        fitter.predict(kind="photometry", extra_return_sites=[""])
+
+    def incomplete_stream(samples, *, kind, rng_key, return_sites):
+        del samples, kind, rng_key, return_sites
+        return {"pred_fluxes": np.ones(1)}
+
+    monkeypatch.setattr(fitter, "_stream_predictive_draws", incomplete_stream)
+    optional = fitter.predict(
+        kind="photometry",
+        extra_return_sites=["ebv_gal"],
+    )
+    assert set(optional) == {"pred_fluxes"}
+    with pytest.raises(ValueError, match="ebv_gal"):
+        fitter.predict(kind="photometry", required_return_sites=["ebv_gal"])
+
+
+def test_replacing_samples_invalidates_predictive_cache(monkeypatch):
+    fitter = _bare_fitter({"theta": np.asarray([1.0])})
+    monkeypatch.setattr(fitter, "_predictive_return_sites", lambda kind: ["pred_fluxes"])
+    calls = []
+
+    def fake_stream(samples, *, kind, rng_key, return_sites):
+        del kind, rng_key, return_sites
+        calls.append(np.asarray(samples["theta"]).copy())
+        return {"pred_fluxes": np.asarray(samples["theta"])[:, None]}
+
+    monkeypatch.setattr(fitter, "_stream_predictive_draws", fake_stream)
+
+    first = fitter.predict(kind="photometry")
+    fitter.samples = {"theta": np.asarray([2.0])}
+    second = fitter.predict(kind="photometry")
+
+    assert len(calls) == 2
+    np.testing.assert_array_equal(first["pred_fluxes"], [[1.0]])
+    np.testing.assert_array_equal(second["pred_fluxes"], [[2.0]])
+
+
 def test_streamed_predictive_rejects_inconsistent_draw_dimensions():
     fitter = _bare_fitter(
         {

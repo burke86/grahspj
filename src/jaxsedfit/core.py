@@ -3,7 +3,7 @@ from __future__ import annotations
 import gc
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 
 import h5py
 import jax
@@ -504,7 +504,10 @@ class JAXSEDFit:
         value : mapping or None
             Posterior sample mapping keyed by sample-site name.
         """
-        self._ensure_fit_state().samples = value
+        state = self._ensure_fit_state()
+        state.samples = value
+        state.predictive = None
+        state.predictive_cache = None
 
     @property
     def predictive(self) -> dict[str, Any] | None:
@@ -522,7 +525,12 @@ class JAXSEDFit:
         """
         state = self._ensure_fit_state()
         state.predictive = value
-        state.predictive_cache = None if value is None else {"plot:all": value}
+        if value is None:
+            state.predictive_cache = None
+        else:
+            return_sites = self._prediction_return_sites("plot")
+            cache_key = self._prediction_cache_key("plot", None, return_sites)
+            state.predictive_cache = {cache_key: value}
 
     @property
     def _plot_cache(self) -> dict[str, Any] | None:
@@ -606,6 +614,44 @@ class JAXSEDFit:
             raise ValueError("predict(kind=...) must be either 'plot' or 'photometry'.")
         return normalized
 
+    def _prediction_return_sites(
+        self,
+        kind: str,
+        extra_return_sites: Iterable[str] = (),
+        required_return_sites: Iterable[str] = (),
+    ) -> tuple[str, ...]:
+        """Return the ordered, deduplicated sites for one prediction request."""
+        sites = list(self._predictive_return_sites(kind))
+        for argument_name, requested_sites in (
+            ("extra_return_sites", extra_return_sites),
+            ("required_return_sites", required_return_sites),
+        ):
+            if isinstance(requested_sites, (str, bytes)):
+                raise TypeError(
+                    f"{argument_name} must be an iterable of site-name strings, "
+                    "not one string."
+                )
+            for site in requested_sites:
+                if not isinstance(site, str) or not site.strip():
+                    raise ValueError(
+                        f"{argument_name} must contain nonempty site-name strings."
+                    )
+                sites.append(site)
+        return tuple(dict.fromkeys(sites))
+
+    @staticmethod
+    def _prediction_cache_key(
+        kind: str,
+        max_draws: int | None,
+        return_sites: Iterable[str],
+    ) -> tuple[Any, ...]:
+        """Return a cache identity including the complete prediction contract."""
+        return (
+            str(kind),
+            None if max_draws is None else int(max_draws),
+            tuple(sorted(set(return_sites))),
+        )
+
     @staticmethod
     def _subset_prediction_samples(samples: Mapping[str, Any], max_draws: int | None) -> dict[str, Any]:
         """Return posterior samples optionally limited along the leading draw axis.
@@ -661,6 +707,7 @@ class JAXSEDFit:
         *,
         kind: str,
         rng_key: Any,
+        return_sites: Iterable[str] | None = None,
     ) -> dict[str, np.ndarray]:
         """Evaluate posterior predictions one draw at a time.
 
@@ -683,7 +730,9 @@ class JAXSEDFit:
             include_components=include_components,
             force_component_fluxes=(kind == "photometry"),
         )
-        return_sites = self._predictive_return_sites(kind)
+        if return_sites is None:
+            return_sites = self._prediction_return_sites(kind)
+        return_sites = tuple(return_sites)
         streamed: dict[str, np.ndarray] | None = None
 
         for draw_index, draw_rng_key in enumerate(rng_keys):
@@ -949,6 +998,8 @@ class JAXSEDFit:
         _state: _FitState | None = None,
         kind: str = "plot",
         max_draws: int | None = None,
+        extra_return_sites: Iterable[str] = (),
+        required_return_sites: Iterable[str] = (),
         posterior_samples: Mapping[str, Any] | None = None,
         cache: bool = True,
     ) -> dict[str, Any]:
@@ -962,6 +1013,11 @@ class JAXSEDFit:
             kind value.
         max_draws : object
             max_draws value.
+        extra_return_sites : iterable of str, optional
+            Best-effort additional NumPyro sites to include alongside the
+            selected product set.
+        required_return_sites : iterable of str, optional
+            Additional NumPyro sites that must be present in the prediction.
         posterior_samples : object
             posterior_samples value.
         cache : object
@@ -969,20 +1025,52 @@ class JAXSEDFit:
         """
         state = self._ensure_fit_state() if _state is None else _state
         kind = self._prediction_kind(kind)
+        for argument_name, requested_sites in (
+            ("extra_return_sites", extra_return_sites),
+            ("required_return_sites", required_return_sites),
+        ):
+            if isinstance(requested_sites, (str, bytes)):
+                raise TypeError(
+                    f"{argument_name} must be an iterable of site-name strings, "
+                    "not one string."
+                )
+        extra_return_sites = tuple(extra_return_sites)
+        required_return_sites = tuple(required_return_sites)
+        return_sites = self._prediction_return_sites(
+            kind,
+            extra_return_sites,
+            required_return_sites,
+        )
         samples = state.samples if posterior_samples is None else posterior_samples
         if samples is None:
             raise RuntimeError("No fitted posterior available. Run fit_map(), fit_nuts(), or fit_ns() first.")
-        cache_key = f"{kind}:{'all' if max_draws is None else int(max_draws)}"
-        if cache and posterior_samples is None and state.predictive_cache is not None and cache_key in state.predictive_cache:
-            return dict(state.predictive_cache[cache_key])
-        draw_samples = self._subset_prediction_samples(samples, max_draws)
-        rng_key = jax.random.PRNGKey(self.config.inference.seed + 17)
-        predictive = self._stream_predictive_draws(
-            draw_samples,
-            kind=kind,
-            rng_key=rng_key,
+        cache_key = self._prediction_cache_key(kind, max_draws, return_sites)
+        cached = (
+            cache
+            and posterior_samples is None
+            and state.predictive_cache is not None
+            and cache_key in state.predictive_cache
         )
-        if cache and posterior_samples is None:
+        if cached:
+            predictive = dict(state.predictive_cache[cache_key])
+        else:
+            draw_samples = self._subset_prediction_samples(samples, max_draws)
+            rng_key = jax.random.PRNGKey(self.config.inference.seed + 17)
+            predictive = self._stream_predictive_draws(
+                draw_samples,
+                kind=kind,
+                rng_key=rng_key,
+                return_sites=return_sites,
+            )
+        missing_required_sites = [
+            site for site in required_return_sites if site not in predictive
+        ]
+        if missing_required_sites:
+            raise ValueError(
+                "Model did not produce required prediction sites: "
+                f"{list(dict.fromkeys(missing_required_sites))}."
+            )
+        if not cached and cache and posterior_samples is None:
             if state.predictive_cache is None:
                 state.predictive_cache = {}
             state.predictive_cache[cache_key] = predictive
@@ -1301,10 +1389,11 @@ class JAXSEDFit:
             include_spectral_features=include_spectral_features,
             include_spectral_lines=include_spectral_lines,
         )
+        return_sites = self._prediction_return_sites("plot")
         pred = Predictive(
             model,
             posterior_samples=samples,
-            return_sites=self._predictive_return_sites("plot"),
+            return_sites=return_sites,
         )(jax.random.PRNGKey(self.config.inference.seed + 16))
         predictive = {key: np.asarray(value) for key, value in pred.items()}
 
@@ -1314,7 +1403,9 @@ class JAXSEDFit:
                 method="map_init",
                 samples=samples,
                 predictive=predictive,
-                predictive_cache={"plot:all": predictive},
+                predictive_cache={
+                    self._prediction_cache_key("plot", None, return_sites): predictive
+                },
             )
             fig = self.plot_sed(show=True, title=stage_name)
         finally:
@@ -1674,6 +1765,9 @@ class JAXSEDFit:
         *,
         kind: str = "plot",
         max_draws: int | None = None,
+        extra_return_sites: Iterable[str] = (),
+        required_return_sites: Iterable[str] = (),
+        cache: bool = True,
         _state: _FitState | None = None,
     ) -> dict[str, Any]:
         """Return cached predictive outputs or generate them on demand.
@@ -1693,6 +1787,15 @@ class JAXSEDFit:
         max_draws : int, optional
             Maximum number of posterior draws to evaluate. If omitted, all
             available draws are used.
+        extra_return_sites : iterable of str, optional
+            Best-effort additional NumPyro sample or deterministic sites to
+            return with the standard products selected by ``kind``.
+        required_return_sites : iterable of str, optional
+            Additional sites to return, raising an error if the active model
+            does not produce any of them.
+        cache : bool, optional
+            Reuse and populate a cache specific to the prediction kind, draw
+            limit, and complete requested-site set.
         _state : _FitState, optional
             Internal fit-state override used by :class:`FitResult`.
 
@@ -1703,17 +1806,22 @@ class JAXSEDFit:
         """
         state = self._ensure_fit_state() if _state is None else _state
         kind = self._prediction_kind(kind)
-        if kind == "plot" and max_draws is None and state.predictive is not None:
-            return dict(state.predictive)
-        if kind == "plot" and max_draws is None and state is self._ensure_fit_state():
-            return self._compute_predictive()
-        return self._compute_predictive(_state=state, kind=kind, max_draws=max_draws)
+        return self._compute_predictive(
+            _state=state,
+            kind=kind,
+            max_draws=max_draws,
+            extra_return_sites=extra_return_sites,
+            required_return_sites=required_return_sites,
+            cache=cache,
+        )
 
     def predict_median(
         self,
         posterior: str = "latest",
         *,
         kind: str = "plot",
+        extra_return_sites: Iterable[str] = (),
+        required_return_sites: Iterable[str] = (),
         _state: _FitState | None = None,
     ) -> dict[str, Any]:
         """Evaluate predictive products once at the posterior median parameters.
@@ -1725,6 +1833,10 @@ class JAXSEDFit:
             fit state attached to the fitter or result.
         kind : {"plot", "photometry"}, optional
             Prediction payload to compute at the posterior median.
+        extra_return_sites : iterable of str, optional
+            Additional NumPyro sample or deterministic sites to return.
+        required_return_sites : iterable of str, optional
+            Additional sites that must be present in the prediction.
         _state : _FitState, optional
             Internal fit-state override used by :class:`FitResult`.
 
@@ -1740,6 +1852,8 @@ class JAXSEDFit:
         return self._compute_predictive(
             _state=state,
             kind=kind,
+            extra_return_sites=extra_return_sites,
+            required_return_sites=required_return_sites,
             posterior_samples=median_samples,
             cache=False,
         )
