@@ -710,6 +710,7 @@ class AGNPriorConfig:
     """AGN prior options."""
     log_amp: Any | None = None
     pl_slope: Any | None = None
+    uv_slope: Any | None = None
     uv_slope_delta: Any | None = None
     log_uv_slope_delta: Any | None = None
     pl_bend_loc: Any | None = None
@@ -760,6 +761,7 @@ class AGNPriorConfig:
             {
                 "log_amp": "log_agn_amp",
                 "pl_slope": "pl_slope",
+                "uv_slope": "uv_slope",
                 "uv_slope_delta": "uv_slope_delta",
                 "log_uv_slope_delta": "log_uv_slope_delta",
                 "pl_bend_loc": "pl_bend_loc",

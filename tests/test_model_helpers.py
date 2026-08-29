@@ -1529,6 +1529,25 @@ def test_ukidss_dr11plus_vendored_filters_load_in_angstroms():
         assert np.nanmax(trans) > 0.0
 
 
+def test_bandwagon_vhs_and_ukidss_aliases_load_survey_specific_filters():
+    aliases = {
+        "Y_vhs": "paranal.vircam.Y",
+        "J_vhs": "paranal.vircam.J",
+        "H_vhs": "paranal.vircam.H",
+        "Ks_vhs": "paranal.vircam.Ks",
+        "Y_ukidss": "ukirt.wfcam.Y",
+        "J_ukidss": "ukirt.wfcam.J",
+        "H_ukidss": "ukirt.wfcam.H",
+        "K_ukidss": "ukirt.wfcam.K",
+    }
+    for alias, canonical in aliases.items():
+        alias_curve = load_filter_curve(alias)
+        canonical_curve = load_filter_curve(canonical)
+        assert alias_curve.name == alias
+        assert np.array_equal(alias_curve.wave, canonical_curve.wave)
+        assert np.array_equal(alias_curve.transmission, canonical_curve.transmission)
+
+
 def test_legacy_filter_aliases_resolve_to_vendored_curves():
     cfg = FitConfig(
         observation=Observation(object_id="obj", redshift=0.1),

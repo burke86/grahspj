@@ -3797,11 +3797,13 @@ def evaluate_photometric_state(
             "pl_slope",
             dist.TruncatedNormal(-1.85, 0.6, low=GRAHSP_PL_SLOPE_LOW, high=GRAHSP_PL_SLOPE_HIGH),
         )
-        # GRAHSP fixes the short-wavelength slope to zero. Keeping this
-        # deterministic also removes an otherwise weakly identified UV-shape
-        # degree of freedom from broadband-only fits.
-        uv_slope = jnp.asarray(0.0, dtype=jnp.float64)
-        numpyro.deterministic("uv_slope", uv_slope)
+        # The EUV composite slope alpha_nu ~= -1.4 corresponds to
+        # beta_lambda ~= -0.6 for F_lambda proportional to lambda**beta.
+        uv_slope = _sample_prior(
+            prior_config,
+            "uv_slope",
+            dist.TruncatedNormal(-0.6, 0.4, low=-1.5, high=0.3),
+        )
         pl_bend_loc = _sample_positive_distribution(
             prior_config,
             value_key="pl_bend_loc",
