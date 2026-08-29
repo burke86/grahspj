@@ -732,14 +732,18 @@ def test_agn_disk_defaults_match_grahsp_support(monkeypatch):
 
     assert "uv_slope_gt_pl_slope" not in tr
     assert "uv_slope_delta" not in tr
-    assert _site(tr, "uv_slope") == 0.0
     assert _site(tr, "pl_cutoff") == GRAHSP_PL_CUTOFF_A
 
     slope_prior = tr["pl_slope"]["fn"]
+    uv_slope_prior = tr["uv_slope"]["fn"]
     bend_loc_prior = tr["pl_bend_loc"]["fn"]
     bend_width_prior = tr["pl_bend_width"]["fn"]
     assert np.isclose(slope_prior.low, -2.7)
     assert np.isclose(slope_prior.high, -1.0)
+    assert np.isclose(uv_slope_prior.base_dist.loc, -0.6)
+    assert np.isclose(uv_slope_prior.base_dist.scale, 0.4)
+    assert np.isclose(uv_slope_prior.low, -1.5)
+    assert np.isclose(uv_slope_prior.high, 0.3)
     assert np.isclose(bend_loc_prior.low, 500.0)
     assert np.isclose(bend_loc_prior.high, 1500.0)
     assert np.isclose(bend_width_prior.low, 0.1)
