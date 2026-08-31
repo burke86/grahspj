@@ -573,6 +573,56 @@ def _median_effective_variance(fitter, pred: dict[str, Any]) -> np.ndarray:
     return np.nan_to_num(obs_variance + sys_variance + var_variance, nan=1.0e30, posinf=1.0e30, neginf=1.0e30)
 
 
+def _place_overlapping_band_annotations(
+    fig,
+    annotations,
+    *,
+    base_offset_points: float = 8.0,
+    horizontal_padding_pixels: float = 2.0,
+):
+    """Place colliding labels above upper points and below lower points."""
+    if not annotations:
+        return
+
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+    footprints = sorted(
+        (
+            (annotation.get_window_extent(renderer), annotation)
+            for annotation in annotations
+        ),
+        key=lambda item: item[0].x0,
+    )
+    groups = []
+    current_group = []
+    current_right_edge = -np.inf
+    for bbox, annotation in footprints:
+        if current_group and bbox.x0 >= current_right_edge + horizontal_padding_pixels:
+            groups.append(current_group)
+            current_group = []
+            current_right_edge = -np.inf
+        current_group.append(annotation)
+        current_right_edge = max(current_right_edge, float(bbox.x1))
+    if current_group:
+        groups.append(current_group)
+
+    for group in groups:
+        ordered_by_height = sorted(
+            group,
+            key=lambda annotation: annotation.axes.transData.transform(
+                annotation.xy
+            )[1],
+        )
+        lower_count = len(ordered_by_height) // 2
+        for index, annotation in enumerate(ordered_by_height):
+            if len(group) > 1 and index < lower_count:
+                annotation.set_position((0, -base_offset_points))
+                annotation.set_verticalalignment("top")
+            else:
+                annotation.set_position((0, base_offset_points))
+                annotation.set_verticalalignment("bottom")
+
+
 def plot_fit_sed(
     fitter,
     output_path: str | Path | None = None,
@@ -877,9 +927,31 @@ def plot_fit_sed(
             zorder=7,
         )
         ax_sed.scatter(phot_wave, model_flux, color="#111111", marker="s", s=28, label="Model photometry", zorder=6)
+        band_annotations = []
         if annotate_band_names:
-            for x, y, label in zip(phot_wave, obs_flux, labels):
-                ax_sed.annotate(label, (x, y), xytext=(4, 5), textcoords="offset points", fontsize=8)
+            for index, (x, label) in enumerate(zip(phot_wave, labels)):
+                band_annotations.append(
+                    ax_sed.annotate(
+                        label,
+                        (x, obs_flux[index]),
+                        xytext=(0, 8),
+                        textcoords="offset points",
+                        fontsize=7.5,
+                        ha="center",
+                        va="bottom",
+                        rotation=90,
+                        rotation_mode="default",
+                        annotation_clip=False,
+                        zorder=20,
+                        bbox={
+                            "boxstyle": "round,pad=0.16",
+                            "facecolor": "#fffdf8",
+                            "edgecolor": "#d8d4ca",
+                            "linewidth": 0.45,
+                            "alpha": 0.62,
+                        },
+                    )
+                )
 
         eff_variance = _median_effective_variance(fitter, pred)
         eff_sigma = np.sqrt(np.clip(eff_variance, 1e-30, 1.0e60))
@@ -944,6 +1016,7 @@ def plot_fit_sed(
         ax_resid.set_xlim(x_min, x_max)
 
         fig.tight_layout()
+        _place_overlapping_band_annotations(fig, band_annotations)
         if output_path is not None:
             output_path = Path(output_path)
             output_path.parent.mkdir(parents=True, exist_ok=True)
