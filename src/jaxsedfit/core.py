@@ -2577,7 +2577,22 @@ class JAXSEDFit:
             raise RuntimeError("No spectroscopy data are available to plot.")
         from .spectral_plotting import plot_fig
 
-        pred = self.predict(posterior=posterior)
+        configured_custom_components = tuple(
+            getattr(getattr(self.config, "agn", None), "custom_components", ())
+            or ()
+        )
+        custom_component_return_sites = tuple(
+            site_name
+            for custom_component in configured_custom_components
+            for site_name in (
+                f"spectral_{custom_component.deterministic_site_name}",
+                str(custom_component.deterministic_site_name),
+            )
+        )
+        pred = self.predict(
+            posterior=posterior,
+            extra_return_sites=custom_component_return_sites,
+        )
         index = np.asarray(self.context.spec_spectrum_index, dtype=int)
         selected = (index == int(spectrum_index)) & np.asarray(self.context.spec_mask, dtype=bool)
         if not np.any(selected):
@@ -2788,6 +2803,25 @@ class JAXSEDFit:
             "jaxsedfit_host_dust": obs_sed_component("dust_obs_sed", multiplier=host_capture),
             "jaxsedfit_sed_balmer": obs_sed_component("balmer_obs_sed"),
         }
+        custom_component_sites = {}
+        for custom_component in configured_custom_components:
+            component_name = str(custom_component.output_name)
+            deterministic_name = str(custom_component.deterministic_site_name)
+            site_name = next(
+                (
+                    candidate
+                    for candidate in (
+                        f"spectral_{deterministic_name}",
+                        deterministic_name,
+                    )
+                    if candidate in pred
+                ),
+                None,
+            )
+            if site_name is None:
+                continue
+            custom_components[component_name] = component(site_name)
+            custom_component_sites[component_name] = site_name
         if show_nebular_lines:
             custom_components["jaxsedfit_nebular_lines"] = obs_sed_component("nebular_lines_obs_sed")
         plotter.custom_components = {
@@ -2836,6 +2870,12 @@ class JAXSEDFit:
         }
         if show_nebular_lines:
             custom_draws["jaxsedfit_nebular_lines"] = obs_sed_draws("nebular_lines_obs_sed")
+        custom_draws.update(
+            {
+                component_name: spectrum_draws(site_name)
+                for component_name, site_name in custom_component_sites.items()
+            }
+        )
         for name, draws in custom_draws.items():
             if name in plotter.custom_components:
                 band = band_from_draws(draws)
