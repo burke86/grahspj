@@ -2,10 +2,8 @@ from pathlib import Path
 import sys
 import types
 
-import matplotlib
-
-matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.backends.backend_agg import FigureCanvasAgg
 import numpy as np
 import pytest
 
@@ -144,6 +142,7 @@ def test_plot_fit_sed_writes_output(tmp_path):
         (0, 8),
         (0, 8),
     ]
+    FigureCanvasAgg(fig)
     fig.canvas.draw()
     renderer = fig.canvas.get_renderer()
     for annotation in fig.axes[0].texts[:3]:
