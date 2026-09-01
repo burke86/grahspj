@@ -18,7 +18,11 @@ from jaxsedfit.plotting import (
     plot_fit_sed,
     plot_trace,
 )
-from jaxsedfit.spectral_plotting import _spectral_component_color
+from jaxsedfit.spectral_plotting import (
+    _TOTAL_LINES_COLOR,
+    _spectral_component_color,
+    _spectral_component_linewidth,
+)
 
 
 def test_joint_line_bridge_rescales_native_jaxsedfit_shape():
@@ -58,9 +62,12 @@ def test_component_style_separates_feii_from_agn_lines():
 
 def test_spectral_line_colors_are_stable_and_semantic():
     for index in range(12):
-        assert _spectral_component_color("broad_lines", index) == "red"
-        assert _spectral_component_color("narrow_lines", index) == "green"
-    assert _spectral_component_color("bal_civ", 2) == "red"
+        assert _spectral_component_color("broad_lines", index) == "#CC79A7"
+        assert _spectral_component_color("narrow_lines", index) == "#009E73"
+    assert _spectral_component_color("bal_civ", 2) == "#D55E00"
+    assert _TOTAL_LINES_COLOR == "#56B4E9"
+    assert _spectral_component_linewidth("bal_civ") == pytest.approx(1.8)
+    assert _spectral_component_linewidth("broad_lines") == pytest.approx(1.4)
 
 
 def test_plot_fit_sed_writes_output(tmp_path):

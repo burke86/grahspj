@@ -20,6 +20,10 @@ from .plotting import _STANDARDIZED_RESIDUAL_LABEL, _standardized_residuals
 
 _SDSS_PSF_BANDS = ("u", "g", "r", "i", "z")
 _SDSS_FILTER_CACHE = None
+_BAL_COMPONENT_COLOR = "#D55E00"
+_TOTAL_LINES_COLOR = "#56B4E9"
+_BAL_COMPONENT_LINEWIDTH = 1.8
+_CUSTOM_COMPONENT_LINEWIDTH = 1.4
 _CUSTOM_COMPONENT_COLORS = (
     "darkorange",
     "crimson",
@@ -29,8 +33,8 @@ _CUSTOM_COMPONENT_COLORS = (
     "deeppink",
 )
 _NAMED_COMPONENT_COLORS = {
-    "broad_lines": "red",
-    "narrow_lines": "green",
+    "broad_lines": "#CC79A7",
+    "narrow_lines": "#009E73",
 }
 
 
@@ -89,10 +93,17 @@ def _spectral_component_color(name, idx):
     """Return a stable color for a spectral component curve and its band."""
     component_name = str(name)
     if component_name.startswith("bal_"):
-        return "red"
+        return _BAL_COMPONENT_COLOR
     if component_name in _NAMED_COMPONENT_COLORS:
         return _NAMED_COMPONENT_COLORS[component_name]
     return _CUSTOM_COMPONENT_COLORS[idx % len(_CUSTOM_COMPONENT_COLORS)]
+
+
+def _spectral_component_linewidth(name):
+    """Return a slightly heavier line width for BAL absorption curves."""
+    if str(name).startswith("bal_"):
+        return _BAL_COMPONENT_LINEWIDTH
+    return _CUSTOM_COMPONENT_LINEWIDTH
 
 
 def posterior_series(fitter, param_names=None, max_vector_elems=2):
@@ -288,7 +299,7 @@ def plot_initialization(
         else:
             ax.plot(wave, powerlaw, color="orange", lw=1.5, zorder=5, rasterized=True)
         if _show_component(line):
-            ax.plot(wave, line, color="lightskyblue", lw=1.5, label="lines", zorder=5, rasterized=True)
+            ax.plot(wave, line, color=_TOTAL_LINES_COLOR, lw=1.5, label="lines", zorder=5, rasterized=True)
 
         ax.set_xlim(float(np.nanmin(wave)), float(np.nanmax(wave)))
         y_arrays = [arr[np.isfinite(arr)] for arr in (flux, model, host, powerlaw, line)]
@@ -828,7 +839,7 @@ def plot_fig(fitter, save_fig_path=None, broad_fwhm=1200, plot_legend=True, ylim
             'PL': 'orange',
             'FeII': 'teal',
             'Balmer_cont': 'y',
-            'lines': 'lightskyblue',
+            'lines': _TOTAL_LINES_COLOR,
         }
         for key, color in band_colors.items():
             if key not in pred_bands:
@@ -921,6 +932,7 @@ def plot_fig(fitter, save_fig_path=None, broad_fwhm=1200, plot_legend=True, ylim
     bal_legend_drawn = False
     for idx, (name, model) in enumerate(custom_components + custom_line_components):
         color = _spectral_component_color(name, idx)
+        linewidth = _spectral_component_linewidth(name)
         is_bal_component = _is_bal_component_name(name)
         if is_bal_component:
             label = 'BAL'
@@ -934,7 +946,7 @@ def plot_fig(fitter, save_fig_path=None, broad_fwhm=1200, plot_legend=True, ylim
                 fitter.wave,
                 model,
                 color=color,
-                lw=1.4,
+                lw=linewidth,
                 label=draw_label,
                 zorder=custom_component_zorder,
                 rasterized=True,
@@ -942,13 +954,20 @@ def plot_fig(fitter, save_fig_path=None, broad_fwhm=1200, plot_legend=True, ylim
             if is_bal_component and draw_label is not None:
                 bal_legend_drawn = True
         else:
-            ax.plot(fitter.wave, model, color=color, lw=1.4, zorder=custom_component_zorder, rasterized=True)
+            ax.plot(
+                fitter.wave,
+                model,
+                color=color,
+                lw=linewidth,
+                zorder=custom_component_zorder,
+                rasterized=True,
+            )
     if len(line_plot) == len(fitter.wave):
         if _show_component(line_plot):
             ax.plot(
                 fitter.wave,
                 line_plot,
-                color='lightskyblue',
+                color=_TOTAL_LINES_COLOR,
                 lw=1.5,
                 label=line_label,
                 zorder=5,
@@ -958,7 +977,7 @@ def plot_fig(fitter, save_fig_path=None, broad_fwhm=1200, plot_legend=True, ylim
             ax.plot(
                 fitter.wave,
                 line_plot,
-                color='lightskyblue',
+                color=_TOTAL_LINES_COLOR,
                 lw=1.5,
                 label=line_label,
                 zorder=5,
@@ -1038,7 +1057,7 @@ def plot_fig(fitter, save_fig_path=None, broad_fwhm=1200, plot_legend=True, ylim
                     ax.plot(
                         fitter.wave,
                         prof,
-                        color='red',
+                        color=_NAMED_COMPONENT_COLORS["broad_lines"],
                         lw=0.7,
                         alpha=0.35,
                         zorder=3,
@@ -1051,7 +1070,7 @@ def plot_fig(fitter, save_fig_path=None, broad_fwhm=1200, plot_legend=True, ylim
                     ax.plot(
                         fitter.wave,
                         prof,
-                        color='green',
+                        color=_NAMED_COMPONENT_COLORS["narrow_lines"],
                         lw=0.7,
                         alpha=0.25,
                         zorder=3,

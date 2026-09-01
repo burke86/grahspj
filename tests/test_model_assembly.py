@@ -831,6 +831,46 @@ def test_joint_continuum_stage_keeps_feii_and_balmer_but_omits_lines(monkeypatch
     assert not any(name.startswith("spectral_line_fwhm") for name in tr)
 
 
+def test_stage_one_keeps_smooth_features_but_omits_lines_and_bal(monkeypatch):
+    from jaxsedfit.spectral_defaults import build_default_bal_components
+    from jaxsedfit.spectroscopy import make_custom_component
+
+    _patch_ssp(monkeypatch)
+    cfg = _cfg(fit_host=False, spectroscopy_enabled=True)
+    cfg.agn.fit_lines = True
+    cfg.agn.fit_feii = True
+    cfg.agn.fit_balmer_continuum = True
+    additive = make_custom_component(
+        "additive",
+        {"amplitude": dist.Delta(1.0e-3)},
+        lambda wave, params, metadata: jnp.ones_like(wave) * params["amplitude"],
+    )
+    cfg.agn.custom_components = (
+        *build_default_bal_components(np.ones(3)),
+        additive,
+    )
+    context = build_model_context(cfg)
+
+    tr = trace(
+        seed(
+            lambda: grahsp_photometric_model(
+                context,
+                include_sed_agn_features=True,
+                include_spectral_features=True,
+                include_spectral_lines=False,
+                include_spectral_bal=False,
+            ),
+            jax.random.PRNGKey(42),
+        )
+    ).get_trace()
+
+    assert "spectral_feii_norm" in tr
+    assert "spectral_balmer_norm" in tr
+    assert "spectral_custom_additive_model" in tr
+    assert not any(name.startswith("spectral_custom_bal") for name in tr)
+    assert not any(name.startswith("spectral_line_amp") for name in tr)
+
+
 def test_agn_only_context_skips_host_ssp_loading(monkeypatch):
     monkeypatch.setattr("jaxsedfit.preload._SSP_DATA_CACHE", {})
     monkeypatch.setattr("jaxsedfit.preload._HOST_BASIS_CACHE", {})
