@@ -107,6 +107,24 @@ def custom_component_param_site(comp: Any, param_name: str) -> str:
     return comp.site_name(param_name)
 
 
+def is_bal_absorption_component(comp: Any) -> bool:
+    """Return whether a custom continuum component encodes BAL optical depth."""
+    return str(getattr(comp, "metadata", {}).get("component_type", "")) == "bal_absorption"
+
+
+def bal_covering_fraction(params: Mapping[str, Any]):
+    """Return a numerically safe partial-covering fraction."""
+    return jnp.clip(jnp.asarray(params.get("covering", 1.0)), 0.0, 0.999)
+
+
+def bal_component_transmission(tau_profile, params: Mapping[str, Any]):
+    """Convert a non-negative BAL optical-depth profile into transmission."""
+    tau_profile = jnp.maximum(jnp.asarray(tau_profile), 0.0)
+    covering = bal_covering_fraction(params)
+    transmission = 1.0 - covering * (1.0 - jnp.exp(-tau_profile))
+    return jnp.clip(transmission, 1.0e-6, 1.0)
+
+
 def _normalize_parameter_prior(value: Any) -> dist.Distribution:
     """Normalize a custom-component prior to a NumPyro distribution.
 

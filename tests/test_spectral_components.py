@@ -11,6 +11,8 @@ from jaxsedfit.spectroscopy import (
     make_custom_component,
     make_custom_line_component,
 )
+from jaxsedfit.spectral_components import _apply_bal_absorption
+from jaxsedfit.spectral_defaults import build_default_bal_components
 from jaxsedfit.spectroscopy import (
     NORMAL_LOGNORMAL_STANDARDIZATION,
     build_spectral_prior_config as build_default_prior_config,
@@ -19,6 +21,173 @@ from jaxsedfit.spectroscopy import (
 
 def _constant_custom_component(wave, params, metadata):
     return jnp.ones_like(wave) * params["amplitude"] * metadata.get("scale", 1.0)
+
+
+def _constant_bal_optical_depth(wave, params, metadata):
+    del metadata
+    return jnp.ones_like(wave) * params["tau_peak"]
+
+
+def _fixed_bal_component(name, tau_peak, covering):
+    return make_custom_component(
+        name,
+        {
+            "tau_peak": dist.Delta(float(tau_peak)),
+            "covering": dist.Delta(float(covering)),
+        },
+        _constant_bal_optical_depth,
+        metadata={"component_type": "bal_absorption"},
+    )
+
+
+def test_joint_bal_identity_partial_covering_and_negative_decrement():
+    wave_obs = np.linspace(1400.0, 1600.0, 9)
+    continuum = np.full_like(wave_obs, 7.0)
+    disk = np.full_like(wave_obs, 3.0)
+
+    identity = seed(evaluate_joint_spectral_components, jax.random.PRNGKey(100))(
+        wave_obs,
+        0.0,
+        continuum,
+        config=SpectralComponentConfig(
+            use_lines=False,
+            custom_components=(_fixed_bal_component("bal_zero", 0.0, 0.4),),
+        ),
+        bal_continuum_mjy=disk,
+    )
+    np.testing.assert_allclose(identity["bal_transmission"], 1.0)
+    np.testing.assert_allclose(identity["bal_decrement"], 0.0)
+    np.testing.assert_allclose(identity["total"], continuum)
+
+    absorbed = seed(evaluate_joint_spectral_components, jax.random.PRNGKey(101))(
+        wave_obs,
+        0.0,
+        continuum,
+        config=SpectralComponentConfig(
+            use_lines=False,
+            custom_components=(
+                _fixed_bal_component("bal_partial", np.log(2.0), 0.4),
+            ),
+        ),
+        bal_continuum_mjy=disk,
+    )
+    expected_transmission = 0.8
+    np.testing.assert_allclose(absorbed["bal_transmission"], expected_transmission)
+    np.testing.assert_allclose(absorbed["bal_decrement"], -0.6)
+    np.testing.assert_allclose(absorbed["custom"]["bal_partial"], -0.6)
+    np.testing.assert_allclose(absorbed["total"], 6.4)
+
+
+def test_joint_multiple_bal_transmissions_multiply():
+    wave_obs = np.linspace(1400.0, 1600.0, 9)
+    disk = np.full_like(wave_obs, 3.0)
+    cfg = SpectralComponentConfig(
+        use_lines=False,
+        custom_components=(
+            _fixed_bal_component("bal_a", np.log(2.0), 0.4),
+            _fixed_bal_component("bal_b", np.log(3.0), 0.5),
+        ),
+    )
+    result = seed(evaluate_joint_spectral_components, jax.random.PRNGKey(102))(
+        wave_obs,
+        0.0,
+        np.full_like(wave_obs, 7.0),
+        config=cfg,
+        bal_continuum_mjy=disk,
+    )
+
+    expected_transmission = 0.8 * (2.0 / 3.0)
+    np.testing.assert_allclose(result["bal_transmission"], expected_transmission)
+    np.testing.assert_allclose(result["bal_decrement"], 3.0 * (expected_transmission - 1.0))
+    np.testing.assert_allclose(
+        result["custom"]["bal_a"] + result["custom"]["bal_b"],
+        result["bal_decrement"],
+    )
+    np.testing.assert_allclose(result["total"], 7.0 + 3.0 * (expected_transmission - 1.0))
+
+
+def test_bal_absorption_leaves_host_torus_and_narrow_components_unchanged():
+    wave = jnp.arange(4.0)
+    bal = _fixed_bal_component("bal", np.log(2.0), 0.5)
+    additive = make_custom_component(
+        "additive", {"amplitude": dist.Delta(1.0)}, _constant_custom_component
+    )
+    broad = make_custom_line_component(
+        "custom_broad",
+        {"amplitude": dist.Delta(3.0)},
+        _constant_custom_component,
+        line_kind="broad",
+    )
+    narrow = make_custom_line_component(
+        "custom_narrow",
+        {"amplitude": dist.Delta(5.0)},
+        _constant_custom_component,
+        line_kind="narrow",
+    )
+    cfg = SpectralComponentConfig(
+        use_lines=False,
+        custom_components=(bal, additive),
+        custom_line_components=(broad, narrow),
+    )
+    state = {
+        f"custom:{bal.prefix}": {"tau_peak": np.log(2.0), "covering": 0.5},
+        f"custom:{additive.prefix}": {"amplitude": 1.0},
+        f"custom:{broad.prefix}": {"amplitude": 3.0},
+        f"custom:{narrow.prefix}": {"amplitude": 5.0},
+    }
+    raw_custom = {
+        bal.output_name: jnp.full_like(wave, np.log(2.0)),
+        additive.output_name: jnp.ones_like(wave),
+        broad.output_name: jnp.full_like(wave, 3.0),
+        narrow.output_name: jnp.full_like(wave, 5.0),
+    }
+    result = _apply_bal_absorption(
+        wave,
+        raw_custom,
+        state,
+        cfg,
+        line_broad=jnp.full_like(wave, 2.0),
+        line_narrow=jnp.full_like(wave, 4.0),
+        feii=jnp.full_like(wave, 6.0),
+        balmer=jnp.full_like(wave, 8.0),
+        bal_continuum_mjy=jnp.full_like(wave, 10.0),
+    )
+
+    np.testing.assert_allclose(result["bal_transmission"], 0.75)
+    np.testing.assert_allclose(result["line_broad"], (2.0 + 3.0) * 0.75)
+    np.testing.assert_allclose(result["line_narrow"], 4.0 + 5.0)
+    np.testing.assert_allclose(result["feii"], 6.0 * 0.75)
+    np.testing.assert_allclose(result["balmer"], 8.0 * 0.75)
+    np.testing.assert_allclose(result["custom"]["additive"], 0.75)
+    np.testing.assert_allclose(result["custom"]["custom_narrow"], 5.0)
+    # Host and torus are part of the external continuum but absent from the
+    # compact ``bal_continuum_mjy`` reference, so this decrement cannot touch them.
+    np.testing.assert_allclose(result["custom_continuum"], 0.75 - 2.5)
+
+
+def test_joint_default_bal_components_use_one_shared_physical_site_set():
+    components = build_default_bal_components(np.ones(3))
+    tr = trace(seed(evaluate_joint_spectral_components, jax.random.PRNGKey(103))).get_trace(
+        wave_obs=np.linspace(1100.0, 1650.0, 64),
+        redshift=0.0,
+        continuum_mjy=np.ones(64),
+        config=SpectralComponentConfig(use_lines=False, custom_components=components),
+    )
+
+    for name in (
+        "spectral_custom_bal_v_out",
+        "spectral_custom_bal_tau_peak",
+        "spectral_custom_bal_covering",
+        "spectral_custom_bal_fwhm_kms",
+    ):
+        assert name in tr
+        assert tr[name]["type"] == "sample"
+    for transition in ("nv", "siiv", "civ"):
+        assert f"spectral_custom_bal_{transition}_shape_power" in tr
+        assert f"spectral_custom_bal_{transition}_v_out" not in tr
+        assert f"spectral_custom_bal_{transition}_tau_peak" not in tr
+        assert f"spectral_custom_bal_{transition}_covering" not in tr
+        assert f"spectral_custom_bal_{transition}_fwhm_kms" not in tr
 
 
 def test_evaluate_joint_spectral_components_uses_external_continuum():

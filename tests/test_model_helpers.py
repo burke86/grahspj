@@ -57,6 +57,7 @@ from jaxsedfit.model import (
     _evaluate_spectral_components,
     _powerlaw_jax,
     _project_local_nebular_line_filters,
+    _project_spectral_custom_state_filters,
     _project_spectral_line_state_filters,
     _project_filters,
     _redshift_to_obs,
@@ -70,6 +71,7 @@ from jaxsedfit.model import (
     spectroscopic_likelihood_weight,
     spectroscopic_log_likelihood,
 )
+from jaxsedfit.spectroscopy import SpectralComponentConfig, make_custom_component
 from jaxsedfit.preload import _build_fixed_igm_jax, _build_igm_cache_jax, _surviving_fraction_for_imf, build_model_context
 from jaxsedfit.filters import load_filter_curve
 from jaxsedfit.preload import (
@@ -260,6 +262,53 @@ def test_spectral_line_state_filter_projection_conserves_flux():
     expected = conversion * 5000.0**2 * np.trapezoid(flambda[inside], dense_wave[inside]) / (wave[-1] - wave[0])
 
     assert projected == pytest.approx(expected, rel=2.0e-3)
+
+
+def _constant_bal_tau_for_filter_test(wave, params, metadata):
+    del metadata
+    return jnp.ones_like(wave) * params["tau_peak"]
+
+
+def test_bal_disk_decrement_is_integrated_on_native_filter_grid():
+    wave = np.linspace(1400.0, 1600.0, 301)
+    transmission = 1.0 - np.abs(wave - 1500.0) / 100.0
+    context = _local_projection_context(wave, transmission)
+    disk_fnu = 2.0 + 0.002 * (wave - 1400.0)
+    bal = make_custom_component(
+        "bal_native",
+        {
+            "tau_peak": dist.Delta(np.log(2.0)),
+            "covering": dist.Delta(0.4),
+        },
+        _constant_bal_tau_for_filter_test,
+        metadata={"component_type": "bal_absorption"},
+    )
+    cfg = SpectralComponentConfig(use_lines=False, custom_components=(bal,))
+    state = {
+        f"custom:{bal.prefix}": {
+            "tau_peak": np.log(2.0),
+            "covering": 0.4,
+        }
+    }
+
+    projected, broad, narrow = _project_spectral_custom_state_filters(
+        context,
+        state,
+        0.0,
+        cfg,
+        bal_continuum_mjy=jnp.asarray(disk_fnu[None, :]),
+    )
+
+    bal_decrement_fnu = disk_fnu * (0.8 - 1.0)
+    conversion = 1.0e-10 / 299792458.0 * 1.0e29
+    flambda = bal_decrement_fnu / (conversion * wave**2)
+    expected_flambda = np.trapezoid(flambda * transmission, wave) / np.trapezoid(
+        transmission, wave
+    )
+    expected = conversion * float(context.filter_effective_wavelength_jax[0]) ** 2 * expected_flambda
+    assert float(projected[0]) == pytest.approx(expected, rel=1.0e-10)
+    np.testing.assert_allclose(broad, 0.0)
+    np.testing.assert_allclose(narrow, 0.0)
 
 
 def _dense_nebular_line_filter_flux(context, *, line_wave, line_lumin, width_kms, luminosity_distance_m=1.0e20):
@@ -2527,6 +2576,7 @@ def test_plot_spectrum_adapts_joint_predictive(monkeypatch):
     assert "jaxsedfit_torus" in captured["custom_components"]
     assert "jaxsedfit_host_dust" in captured["custom_components"]
     assert "bal_civ" in captured["custom_components"]
+    assert np.nanmax(captured["custom_components"]["bal_civ"]) < 0.0
     assert "spectral_custom_bal_civ_model" in captured["extra_return_sites"]
     assert "jaxsedfit_sed_lines" not in captured["custom_components"]
     assert "jaxsedfit_nebular_lines" not in captured["custom_components"]
@@ -2552,6 +2602,9 @@ def test_plot_spectrum_adapts_joint_predictive(monkeypatch):
     assert "PL" in captured["pred_bands"]
     assert "jaxsedfit_torus" in captured["pred_bands"]
     assert "bal_civ" in captured["pred_bands"]
+    bal_lo, bal_hi = captured["pred_bands"]["bal_civ"]
+    assert np.nanmax(bal_lo) < 0.0
+    assert np.nanmax(bal_hi) < 0.0
     assert "broad_lines" in captured["pred_bands"]
     assert "narrow_lines" in captured["pred_bands"]
     assert captured["use_psf_phot"] is True

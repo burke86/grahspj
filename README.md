@@ -167,6 +167,21 @@ Use `make_custom_line_component(..., line_kind="broad" | "narrow")` for an
 additive line profile. Narrow custom lines receive the same host-aperture
 capture treatment as built-in narrow lines.
 
+Custom components with `metadata["component_type"] == "bal_absorption"`
+return optical depth and are treated as partial-covering multiplicative
+absorption, not additive flux. Their shared transmission attenuates the compact
+AGN disk, additive AGN custom continuum, Fe II, Balmer continuum, and broad
+emission lines consistently in the spectrum, native-filter photometry, and
+rendered SED. Host, torus, and narrow-line emission remain unattenuated. BAL
+diagnostic curves in spectrum plots are negative and show removed flux; the
+logarithmic SED plot shows BAL absorption through the attenuated AGN and total
+curves.
+
+> **BAL posterior compatibility warning:** posterior bundles produced before
+> the multiplicative joint-BAL correction encoded BAL optical depth as positive
+> additive flux and are scientifically invalid, even though they remain
+> loadable. They must be refitted. This includes all `aug31_def_bal` bundles.
+
 Spectroscopy is enabled by supplying one or more `SpectroscopyData` objects;
 there is no separate backend or enabled switch. Photometry is optional, so a
 spectrum-only fit can be configured directly:
