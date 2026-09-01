@@ -20,6 +20,18 @@ from .plotting import _STANDARDIZED_RESIDUAL_LABEL, _standardized_residuals
 
 _SDSS_PSF_BANDS = ("u", "g", "r", "i", "z")
 _SDSS_FILTER_CACHE = None
+_CUSTOM_COMPONENT_COLORS = (
+    "darkorange",
+    "crimson",
+    "slateblue",
+    "seagreen",
+    "saddlebrown",
+    "deeppink",
+)
+_NAMED_COMPONENT_COLORS = {
+    "broad_lines": "red",
+    "narrow_lines": "green",
+}
 
 
 def _get_sdss_filters():
@@ -71,6 +83,16 @@ def _plot_line_component_as_broad(label):
         or ('_br' in base)
         or base.endswith('w')
     )
+
+
+def _spectral_component_color(name, idx):
+    """Return a stable color for a spectral component curve and its band."""
+    component_name = str(name)
+    if component_name.startswith("bal_"):
+        return "red"
+    if component_name in _NAMED_COMPONENT_COLORS:
+        return _NAMED_COMPONENT_COLORS[component_name]
+    return _CUSTOM_COMPONENT_COLORS[idx % len(_CUSTOM_COMPONENT_COLORS)]
 
 
 def posterior_series(fitter, param_names=None, max_vector_elems=2):
@@ -752,14 +774,6 @@ def plot_fig(fitter, save_fig_path=None, broad_fwhm=1200, plot_legend=True, ylim
     fe_label = 'Fe II (PSF)' if use_psf_space else 'Fe II'
     bc_label = 'Balmer continuum (PSF)' if use_psf_space else 'Balmer continuum'
     line_label = 'total lines (PSF)' if use_psf_space else 'total lines'
-    custom_component_colors = [
-        'darkorange',
-        'crimson',
-        'slateblue',
-        'seagreen',
-        'saddlebrown',
-        'deeppink',
-    ]
     custom_components = list(getattr(fitter, 'custom_components', {}).items())
     custom_line_components = list(getattr(fitter, 'custom_line_components', {}).items())
 
@@ -772,20 +786,6 @@ def plot_fig(fitter, save_fig_path=None, broad_fwhm=1200, plot_legend=True, ylim
             name value.
         """
         return str(name).startswith('bal_')
-
-    def _custom_component_color(name, idx):
-        """Return the plotting color for one custom component.
-
-        Parameters
-        ----------
-        name : object
-            name value.
-        idx : object
-            idx value.
-        """
-        if _is_bal_component_name(name):
-            return 'red'
-        return custom_component_colors[idx % len(custom_component_colors)]
 
     def _show_component(arr):
         """Return True when a component has finite amplitude worth plotting.
@@ -855,7 +855,7 @@ def plot_fig(fitter, save_fig_path=None, broad_fwhm=1200, plot_legend=True, ylim
                 fitter.wave,
                 lo,
                 hi,
-                color=_custom_component_color(name, idx),
+                color=_spectral_component_color(name, idx),
                 alpha=sigma_alpha,
                 linewidth=0,
                 zorder=0,
@@ -920,7 +920,7 @@ def plot_fig(fitter, save_fig_path=None, broad_fwhm=1200, plot_legend=True, ylim
     custom_component_zorder = 4.8
     bal_legend_drawn = False
     for idx, (name, model) in enumerate(custom_components + custom_line_components):
-        color = _custom_component_color(name, idx)
+        color = _spectral_component_color(name, idx)
         is_bal_component = _is_bal_component_name(name)
         if is_bal_component:
             label = 'BAL'
