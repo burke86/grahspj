@@ -1912,6 +1912,65 @@ def test_spectral_engine_does_not_fix_narrow_width_without_explicit_override(mon
     assert captured["feature_amplitude_scale"] == pytest.approx(2.0)
 
 
+def test_spectral_engine_can_disable_only_bal_custom_components(monkeypatch):
+    from jaxsedfit import spectroscopy
+    captured = {}
+
+    def fake_evaluate_joint_spectral_components(wave_obs, redshift, continuum_mjy, *, config, **kwargs):
+        captured["config"] = config
+        zeros = np.zeros_like(np.asarray(wave_obs, dtype=float))
+        return {
+            "total": np.asarray(continuum_mjy, dtype=float),
+            "continuum": np.asarray(continuum_mjy, dtype=float),
+            "lines": zeros,
+            "line_broad": zeros,
+            "line_narrow": zeros,
+            "feii": zeros,
+            "balmer": zeros,
+        }
+
+    monkeypatch.setattr(
+        spectroscopy,
+        "evaluate_joint_spectral_components",
+        fake_evaluate_joint_spectral_components,
+    )
+    bal = make_custom_component(
+        "bal_civ",
+        {"tau_peak": dist.Delta(1.0)},
+        lambda wave, params, metadata: jnp.ones_like(wave) * params["tau_peak"],
+        metadata={"component_type": "bal_absorption"},
+    )
+    additive = make_custom_component(
+        "additive",
+        {"amplitude": dist.Delta(1.0)},
+        lambda wave, params, metadata: jnp.ones_like(wave) * params["amplitude"],
+    )
+    cfg = FitConfig(
+        observation=Observation(redshift=1.0e-4),
+        photometry=PhotometryData(filter_names=["f1"], fluxes=[1.0], errors=[0.1]),
+        agn=AGNConfig(
+            fit_lines=False,
+            custom_components=(bal, additive),
+        ),
+    )
+    wave = np.asarray([4995.0, 5000.0, 5005.0], dtype=float)
+
+    _evaluate_spectral_components(
+        wave,
+        0.0,
+        np.ones_like(wave),
+        cfg,
+        {"line": {"table": []}},
+        wave,
+        np.zeros_like(wave),
+        include_bal_components=False,
+    )
+
+    assert [component.name for component in captured["config"].custom_components] == [
+        "additive"
+    ]
+
+
 def test_fit_config_mapping_coerces_agn_template_config():
     cfg = fit_config_from_mapping(
         {

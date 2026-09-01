@@ -589,13 +589,14 @@ class JAXSEDFit:
         return grahsp_photometric_model(self.context, include_components=False)
 
     def _continuum_init_model(self):
-        """Return the MAP warm start with smooth continuum features but no lines."""
+        """Return the MAP warm start with smooth features but no lines or BAL."""
         return grahsp_photometric_model(
             self.context,
             include_components=False,
             include_sed_agn_features=True,
             include_spectral_features=True,
             include_spectral_lines=False,
+            include_spectral_bal=False,
         )
 
     @staticmethod
@@ -1331,6 +1332,7 @@ class JAXSEDFit:
                     include_sed_agn_features=True,
                     include_spectral_features=True,
                     include_spectral_lines=False,
+                    include_spectral_bal=False,
                 )
 
         svi_result, median = self._run_map_svi(
@@ -1361,6 +1363,7 @@ class JAXSEDFit:
                 include_sed_agn_features=True,
                 include_spectral_features=True,
                 include_spectral_lines=True,
+                include_spectral_bal=True,
             )
         self.samples = {k: np.asarray(v)[None, ...] for k, v in median.items()}
         self.predictive = None
@@ -1375,6 +1378,7 @@ class JAXSEDFit:
         include_sed_agn_features: bool,
         include_spectral_features: bool,
         include_spectral_lines: bool,
+        include_spectral_bal: bool,
     ):
         """Plot and retain one MAP solution using the standard SED figure.
 
@@ -1388,6 +1392,7 @@ class JAXSEDFit:
             include_sed_agn_features=include_sed_agn_features,
             include_spectral_features=include_spectral_features,
             include_spectral_lines=include_spectral_lines,
+            include_spectral_bal=include_spectral_bal,
         )
         return_sites = self._prediction_return_sites("plot")
         pred = Predictive(

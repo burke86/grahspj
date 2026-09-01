@@ -3316,6 +3316,7 @@ def _evaluate_spectral_components(
     feature_amplitude_scale=1.0,
     include_lines=True,
     bal_continuum_mjy=None,
+    include_bal_components=True,
 ):
     """Evaluate the built-in detailed spectral components.
 
@@ -3346,8 +3347,12 @@ def _evaluate_spectral_components(
         sampled line, Fe II, and Balmer amplitudes.
     bal_continuum_mjy : object, optional
         Compact AGN disk continuum subject to BAL absorption.
+    include_bal_components : bool, optional
+        Whether BAL absorption custom components are active. Other custom
+        continuum and line components are unaffected.
     """
     try:
+        from .spectral_custom_components import is_bal_absorption_component
         from .spectroscopy import (
             SpectralComponentConfig,
             evaluate_joint_spectral_components,
@@ -3358,6 +3363,17 @@ def _evaluate_spectral_components(
         ) from exc
 
     spectral_cfg = cfg.agn
+
+    def _active_components(components):
+        components = tuple(components or ())
+        if include_bal_components:
+            return components
+        return tuple(
+            component
+            for component in components
+            if not is_bal_absorption_component(component)
+        )
+
     component_cfg = SpectralComponentConfig(
         use_lines=bool(spectral_cfg.fit_lines and include_lines),
         tied_lines=bool(spectral_cfg.tied_lines),
@@ -3377,9 +3393,9 @@ def _evaluate_spectral_components(
         broadening_convolution=spectral_cfg.broadening_convolution,
         fixed_narrow_fwhm_kms=fixed_narrow_fwhm_kms,
         fixed_narrow_amp_scale=fixed_narrow_amp_scale,
-        custom_components=spectral_cfg.custom_components or (),
-        custom_line_components=spectral_cfg.custom_line_components or (),
-        components=getattr(spectral_cfg, "components", ()) or (),
+        custom_components=_active_components(spectral_cfg.custom_components),
+        custom_line_components=_active_components(spectral_cfg.custom_line_components),
+        components=_active_components(getattr(spectral_cfg, "components", ())),
     )
     result = evaluate_joint_spectral_components(
         wave_obs,
@@ -3680,6 +3696,7 @@ def evaluate_photometric_state(
     return_state: bool = True,
     force_component_fluxes: bool = False,
     include_spectral_lines: bool = True,
+    include_spectral_bal: bool = True,
 ):
     """Evaluate one jaxsedfit photometric model state inside a NumPyro trace.
 
@@ -3697,6 +3714,9 @@ def evaluate_photometric_state(
         Whether detailed broad and narrow emission lines are active. Smooth
         spectral features such as Fe II and Balmer continuum remain controlled
         by ``include_spectral_features``.
+    include_spectral_bal : bool
+        Whether BAL absorption custom components are active. Ordinary custom
+        components remain controlled by ``include_spectral_features``.
     add_likelihood : object
         add_likelihood value.
     return_state : object
@@ -4762,6 +4782,7 @@ def evaluate_photometric_state(
                 feature_amplitude_scale=feature_amplitude_scale,
                 include_lines=include_spectral_lines,
                 bal_continuum_mjy=spec_disk_model_fluxes,
+                include_bal_components=include_spectral_bal,
             )
             spectral_cfg = cfg.agn
             if host_capture_enabled and bool(
@@ -5522,6 +5543,7 @@ def grahsp_photometric_model(
     include_spectral_features: bool = True,
     include_spectral_lines: bool = True,
     force_component_fluxes: bool = False,
+    include_spectral_bal: bool = True,
 ):
     """NumPyro model for one jaxsedfit photometric fit or predictive expansion.
 
@@ -5540,6 +5562,8 @@ def grahsp_photometric_model(
     force_component_fluxes : object
         Compute component band fluxes even when the likelihood does not need
         them. Used by lightweight posterior prediction products.
+    include_spectral_bal : object
+        include_spectral_bal value.
     """
     return evaluate_photometric_state(
         context,
@@ -5547,6 +5571,7 @@ def grahsp_photometric_model(
         include_sed_agn_features=include_sed_agn_features,
         include_spectral_features=include_spectral_features,
         include_spectral_lines=include_spectral_lines,
+        include_spectral_bal=include_spectral_bal,
         force_component_fluxes=force_component_fluxes,
         add_likelihood=True,
         return_state=False,
@@ -5559,6 +5584,7 @@ def sed_numpyro_model(
     include_sed_agn_features: bool = True,
     include_spectral_features: bool = True,
     include_spectral_lines: bool = True,
+    include_spectral_bal: bool = True,
 ):
     """NumPyro SED model for one configured ``jaxsedfit`` target.
 
@@ -5578,6 +5604,8 @@ def sed_numpyro_model(
         include_spectral_features value.
     include_spectral_lines : object
         include_spectral_lines value.
+    include_spectral_bal : object
+        include_spectral_bal value.
     """
     return grahsp_photometric_model(
         context,
@@ -5585,6 +5613,7 @@ def sed_numpyro_model(
         include_sed_agn_features=include_sed_agn_features,
         include_spectral_features=include_spectral_features,
         include_spectral_lines=include_spectral_lines,
+        include_spectral_bal=include_spectral_bal,
     )
 
 
@@ -5597,6 +5626,7 @@ def evaluate_sed_model(
     return_state: bool = True,
     force_component_fluxes: bool = False,
     include_spectral_lines: bool = True,
+    include_spectral_bal: bool = True,
 ):
     """Evaluate the SED model state for a configured target.
 
@@ -5616,6 +5646,8 @@ def evaluate_sed_model(
         include_spectral_features value.
     include_spectral_lines : object
         include_spectral_lines value.
+    include_spectral_bal : object
+        include_spectral_bal value.
     add_likelihood : object
         add_likelihood value.
     return_state : object
@@ -5629,6 +5661,7 @@ def evaluate_sed_model(
         include_sed_agn_features=include_sed_agn_features,
         include_spectral_features=include_spectral_features,
         include_spectral_lines=include_spectral_lines,
+        include_spectral_bal=include_spectral_bal,
         add_likelihood=add_likelihood,
         return_state=return_state,
         force_component_fluxes=force_component_fluxes,
