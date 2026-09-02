@@ -28,6 +28,9 @@ from .spectral_reparameterization import (
 from .spectral_custom_components import (
     CustomComponentSpec,
     CustomLineComponentSpec,
+    bal_component_transmission,
+    custom_component_param_site,
+    is_bal_absorption_component,
     normalize_custom_components,
     normalize_custom_line_components,
     split_spectral_components,
@@ -131,6 +134,127 @@ def _render_custom_components(wave_obs, wave_rest, state, cfg):
             dtype=jnp.float64,
         )
     return models
+
+
+def _apply_bal_absorption(
+    wave,
+    raw_custom,
+    state,
+    cfg,
+    *,
+    line_broad,
+    line_narrow,
+    feii,
+    balmer,
+    bal_continuum_mjy=None,
+):
+    """Apply partial-covering BAL transmission to compact AGN components.
+
+    BAL component evaluators return optical depth, not flux.  This helper is
+    the single conversion point from those positive optical-depth profiles to
+    multiplicative transmission and negative diagnostic flux decrements.
+    Host, torus, and narrow-line light are intentionally absent from the BAL
+    reference and therefore remain unattenuated.
+    """
+    zero = jnp.zeros_like(wave)
+    one = jnp.ones_like(wave)
+    bal_components = tuple(
+        component
+        for component in cfg.custom_components
+        if is_bal_absorption_component(component)
+    )
+    additive_components = tuple(
+        component
+        for component in cfg.custom_components
+        if not is_bal_absorption_component(component)
+    )
+
+    additive_continuum = sum(
+        (raw_custom[component.output_name] for component in additive_components),
+        zero,
+    )
+    custom_line_broad = sum(
+        (
+            raw_custom[component.output_name]
+            for component in cfg.custom_line_components
+            if component.line_kind == "broad"
+        ),
+        zero,
+    )
+    custom_line_narrow = sum(
+        (
+            raw_custom[component.output_name]
+            for component in cfg.custom_line_components
+            if component.line_kind == "narrow"
+        ),
+        zero,
+    )
+    line_broad_unattenuated = line_broad + custom_line_broad
+    line_narrow_unattenuated = line_narrow + custom_line_narrow
+
+    transmission = one
+    component_transmissions = {}
+    for component in bal_components:
+        params = state.get(f"custom:{component.prefix}", {})
+        component_transmission = bal_component_transmission(
+            raw_custom[component.output_name],
+            params,
+        )
+        component_transmissions[component.output_name] = component_transmission
+        transmission = transmission * component_transmission
+    transmission = jnp.clip(transmission, 1.0e-6, 1.0)
+
+    bal_continuum = (
+        zero
+        if bal_continuum_mjy is None
+        else jnp.asarray(bal_continuum_mjy, dtype=jnp.float64)
+    )
+    bal_reference = (
+        bal_continuum
+        + additive_continuum
+        + line_broad_unattenuated
+        + feii
+        + balmer
+    )
+    bal_decrement = bal_reference * (transmission - 1.0)
+
+    custom_models = {}
+    for component in additive_components:
+        custom_models[component.output_name] = (
+            raw_custom[component.output_name] * transmission
+        )
+    for component in cfg.custom_line_components:
+        component_model = raw_custom[component.output_name]
+        if component.line_kind == "broad":
+            component_model = component_model * transmission
+        custom_models[component.output_name] = component_model
+    running_transmission = one
+    for component in bal_components:
+        component_transmission = component_transmissions[component.output_name]
+        # Attribute only the additional decrement introduced at this stage.
+        # These transition diagnostics therefore sum exactly to the combined
+        # product decrement, even where BAL troughs overlap.
+        custom_models[component.output_name] = (
+            bal_reference
+            * running_transmission
+            * (component_transmission - 1.0)
+        )
+        running_transmission = running_transmission * component_transmission
+
+    return {
+        "line_broad": line_broad_unattenuated * transmission,
+        "line_narrow": line_narrow_unattenuated,
+        "feii": feii * transmission,
+        "balmer": balmer * transmission,
+        "custom_continuum": (
+            additive_continuum * transmission
+            + bal_continuum * (transmission - 1.0)
+        ),
+        "custom": custom_models,
+        "bal_transmission": transmission,
+        "bal_decrement": bal_decrement,
+        "bal_component_transmissions": component_transmissions,
+    }
 
 
 def _as_config(config: SpectralComponentConfig | None) -> SpectralComponentConfig:
@@ -400,6 +524,7 @@ def render_joint_feature_state(
     config: SpectralComponentConfig | None = None,
     feii_template_wave_rest=None,
     feii_template_flux=None,
+    bal_continuum_mjy=None,
 ):
     """Render an already sampled joint-feature state on any observed grid.
 
@@ -453,28 +578,30 @@ def render_joint_feature_state(
         )
         balmer = _flambda_shape_to_fnu_mjy_shape(wave_rest, balmer_flambda, cfg.balmer_fnu_pivot_rest)
 
-    custom = _render_custom_components(wave_obs, wave_rest, state, cfg)
-    custom_continuum = sum(
-        (custom[component.output_name] for component in cfg.custom_components),
-        jnp.zeros_like(wave_obs),
-    )
-    custom_line_broad = sum(
-        (custom[component.output_name] for component in cfg.custom_line_components if component.line_kind == "broad"),
-        jnp.zeros_like(wave_obs),
-    )
-    custom_line_narrow = sum(
-        (custom[component.output_name] for component in cfg.custom_line_components if component.line_kind == "narrow"),
-        jnp.zeros_like(wave_obs),
+    raw_custom = _render_custom_components(wave_obs, wave_rest, state, cfg)
+    absorbed = _apply_bal_absorption(
+        wave_obs,
+        raw_custom,
+        state,
+        cfg,
+        line_broad=line_broad,
+        line_narrow=line_narrow,
+        feii=feii,
+        balmer=balmer,
+        bal_continuum_mjy=bal_continuum_mjy,
     )
 
     return {
-        "lines": line_broad + line_narrow + custom_line_broad + custom_line_narrow,
-        "line_broad": line_broad + custom_line_broad,
-        "line_narrow": line_narrow + custom_line_narrow,
-        "feii": feii,
-        "balmer": balmer,
-        "custom_continuum": custom_continuum,
-        "custom": custom,
+        "lines": absorbed["line_broad"] + absorbed["line_narrow"],
+        "line_broad": absorbed["line_broad"],
+        "line_narrow": absorbed["line_narrow"],
+        "feii": absorbed["feii"],
+        "balmer": absorbed["balmer"],
+        "custom_continuum": absorbed["custom_continuum"],
+        "custom": absorbed["custom"],
+        "bal_transmission": absorbed["bal_transmission"],
+        "bal_decrement": absorbed["bal_decrement"],
+        "bal_component_transmissions": absorbed["bal_component_transmissions"],
     }
 
 
@@ -488,6 +615,7 @@ def evaluate_joint_spectral_components(
     feii_template_flux=None,
     site_prefix: str = "spectral",
     feature_amplitude_scale=1.0,
+    bal_continuum_mjy=None,
 ):
     """Evaluate shared spectral components around an external continuum.
 
@@ -505,6 +633,9 @@ def evaluate_joint_spectral_components(
         Fe II, and Balmer amplitudes are sampled in that observed coordinate
         system and divided by this value before being added to the intrinsic
         continuum. The default of one preserves standalone behavior.
+    bal_continuum_mjy
+        Compact AGN continuum subject to BAL absorption. If omitted, the full
+        supplied continuum is used for backward compatibility.
     feii_template_wave_rest, feii_template_flux
         Rest-frame Fe II template sampled as an f_lambda-shaped relative
         spectrum. The evaluated Fe II component is converted to f_nu shape
@@ -537,6 +668,11 @@ def evaluate_joint_spectral_components(
         calibration = _positive_multiplicative_calibration(tilt * jnp.log(wave_obs / pivot))
 
     continuum_model = calibration * continuum_mjy
+    bal_continuum_model = calibration * (
+        continuum_mjy
+        if bal_continuum_mjy is None
+        else jnp.asarray(bal_continuum_mjy, dtype=jnp.float64)
+    )
     line_model = jnp.zeros_like(wave_obs)
     line_broad_model = jnp.zeros_like(wave_obs)
     line_narrow_model = jnp.zeros_like(wave_obs)
@@ -618,38 +754,48 @@ def evaluate_joint_spectral_components(
         )
 
     feature_state = dict(line_diagnostics)
-    custom_models = {}
+    raw_custom_models = {}
+    sampled_custom_params = {}
     for component in (*cfg.custom_components, *cfg.custom_line_components):
-        params = {
-            name: numpyro.sample(f"{site_prefix}_{component.site_name(name)}", prior)
-            for name, prior in component.parameter_priors.items()
-        }
+        params = {}
+        for name, prior in component.parameter_priors.items():
+            parameter_site = custom_component_param_site(component, name)
+            full_site = f"{site_prefix}_{parameter_site}"
+            if full_site not in sampled_custom_params:
+                sampled_custom_params[full_site] = numpyro.sample(full_site, prior)
+            params[name] = sampled_custom_params[full_site]
         feature_state[f"custom:{component.prefix}"] = params
         model = jnp.asarray(
             component.evaluate(_custom_wave(wave_obs, wave_rest, component), params, component.metadata),
             dtype=jnp.float64,
         )
-        custom_models[component.output_name] = model
-        numpyro.deterministic(f"{site_prefix}_{component.deterministic_site_name}", model)
+        raw_custom_models[component.output_name] = model
 
-    custom_continuum_model = sum(
-        (custom_models[component.output_name] for component in cfg.custom_components),
-        jnp.zeros_like(wave_obs),
+    absorbed = _apply_bal_absorption(
+        wave_obs,
+        raw_custom_models,
+        feature_state,
+        cfg,
+        line_broad=line_broad_model,
+        line_narrow=line_narrow_model,
+        feii=feii_model,
+        balmer=balmer_model,
+        bal_continuum_mjy=bal_continuum_model,
     )
-    custom_line_broad_model = sum(
-        (custom_models[component.output_name] for component in cfg.custom_line_components if component.line_kind == "broad"),
-        jnp.zeros_like(wave_obs),
-    )
-    custom_line_narrow_model = sum(
-        (custom_models[component.output_name] for component in cfg.custom_line_components if component.line_kind == "narrow"),
-        jnp.zeros_like(wave_obs),
-    )
-    line_broad_model = line_broad_model + custom_line_broad_model
-    line_narrow_model = line_narrow_model + custom_line_narrow_model
-    line_model = line_model + custom_line_broad_model + custom_line_narrow_model
-
+    custom_models = absorbed["custom"]
+    custom_continuum_model = absorbed["custom_continuum"]
+    line_broad_model = absorbed["line_broad"]
+    line_narrow_model = absorbed["line_narrow"]
+    line_model = line_broad_model + line_narrow_model
+    feii_model = absorbed["feii"]
+    balmer_model = absorbed["balmer"]
     continuum_model = continuum_model + custom_continuum_model
     total = continuum_model + line_model + feii_model + balmer_model
+    for component in (*cfg.custom_components, *cfg.custom_line_components):
+        numpyro.deterministic(
+            f"{site_prefix}_{component.deterministic_site_name}",
+            custom_models[component.output_name],
+        )
     numpyro.deterministic(f"{site_prefix}_continuum_model", continuum_model)
     numpyro.deterministic(f"{site_prefix}_line_model", line_model)
     numpyro.deterministic(f"{site_prefix}_line_model_broad", line_broad_model)
@@ -658,6 +804,8 @@ def evaluate_joint_spectral_components(
         numpyro.deterministic(f"{site_prefix}_{name}", value)
     numpyro.deterministic(f"{site_prefix}_feii_model", feii_model)
     numpyro.deterministic(f"{site_prefix}_balmer_model", balmer_model)
+    numpyro.deterministic(f"{site_prefix}_bal_transmission", absorbed["bal_transmission"])
+    numpyro.deterministic(f"{site_prefix}_bal_decrement", absorbed["bal_decrement"])
     numpyro.deterministic(f"{site_prefix}_total_model", total)
     if cfg.use_feii and feii_template_wave_rest is not None and feii_template_flux is not None:
         feature_state.update(feii_norm=feii_norm, feii_fwhm=feii_fwhm, feii_shift=feii_shift)
@@ -673,5 +821,8 @@ def evaluate_joint_spectral_components(
         "balmer": balmer_model,
         "custom_continuum": custom_continuum_model,
         "custom": custom_models,
+        "bal_transmission": absorbed["bal_transmission"],
+        "bal_decrement": absorbed["bal_decrement"],
+        "bal_component_transmissions": absorbed["bal_component_transmissions"],
         "state": feature_state,
     }

@@ -57,6 +57,7 @@ from jaxsedfit.model import (
     _evaluate_spectral_components,
     _powerlaw_jax,
     _project_local_nebular_line_filters,
+    _project_spectral_custom_state_filters,
     _project_spectral_line_state_filters,
     _project_filters,
     _redshift_to_obs,
@@ -70,6 +71,7 @@ from jaxsedfit.model import (
     spectroscopic_likelihood_weight,
     spectroscopic_log_likelihood,
 )
+from jaxsedfit.spectroscopy import SpectralComponentConfig, make_custom_component
 from jaxsedfit.preload import _build_fixed_igm_jax, _build_igm_cache_jax, _surviving_fraction_for_imf, build_model_context
 from jaxsedfit.filters import load_filter_curve
 from jaxsedfit.preload import (
@@ -260,6 +262,53 @@ def test_spectral_line_state_filter_projection_conserves_flux():
     expected = conversion * 5000.0**2 * np.trapezoid(flambda[inside], dense_wave[inside]) / (wave[-1] - wave[0])
 
     assert projected == pytest.approx(expected, rel=2.0e-3)
+
+
+def _constant_bal_tau_for_filter_test(wave, params, metadata):
+    del metadata
+    return jnp.ones_like(wave) * params["tau_peak"]
+
+
+def test_bal_disk_decrement_is_integrated_on_native_filter_grid():
+    wave = np.linspace(1400.0, 1600.0, 301)
+    transmission = 1.0 - np.abs(wave - 1500.0) / 100.0
+    context = _local_projection_context(wave, transmission)
+    disk_fnu = 2.0 + 0.002 * (wave - 1400.0)
+    bal = make_custom_component(
+        "bal_native",
+        {
+            "tau_peak": dist.Delta(np.log(2.0)),
+            "covering": dist.Delta(0.4),
+        },
+        _constant_bal_tau_for_filter_test,
+        metadata={"component_type": "bal_absorption"},
+    )
+    cfg = SpectralComponentConfig(use_lines=False, custom_components=(bal,))
+    state = {
+        f"custom:{bal.prefix}": {
+            "tau_peak": np.log(2.0),
+            "covering": 0.4,
+        }
+    }
+
+    projected, broad, narrow = _project_spectral_custom_state_filters(
+        context,
+        state,
+        0.0,
+        cfg,
+        bal_continuum_mjy=jnp.asarray(disk_fnu[None, :]),
+    )
+
+    bal_decrement_fnu = disk_fnu * (0.8 - 1.0)
+    conversion = 1.0e-10 / 299792458.0 * 1.0e29
+    flambda = bal_decrement_fnu / (conversion * wave**2)
+    expected_flambda = np.trapezoid(flambda * transmission, wave) / np.trapezoid(
+        transmission, wave
+    )
+    expected = conversion * float(context.filter_effective_wavelength_jax[0]) ** 2 * expected_flambda
+    assert float(projected[0]) == pytest.approx(expected, rel=1.0e-10)
+    np.testing.assert_allclose(broad, 0.0)
+    np.testing.assert_allclose(narrow, 0.0)
 
 
 def _dense_nebular_line_filter_flux(context, *, line_wave, line_lumin, width_kms, luminosity_distance_m=1.0e20):
@@ -1863,6 +1912,65 @@ def test_spectral_engine_does_not_fix_narrow_width_without_explicit_override(mon
     assert captured["feature_amplitude_scale"] == pytest.approx(2.0)
 
 
+def test_spectral_engine_can_disable_only_bal_custom_components(monkeypatch):
+    from jaxsedfit import spectroscopy
+    captured = {}
+
+    def fake_evaluate_joint_spectral_components(wave_obs, redshift, continuum_mjy, *, config, **kwargs):
+        captured["config"] = config
+        zeros = np.zeros_like(np.asarray(wave_obs, dtype=float))
+        return {
+            "total": np.asarray(continuum_mjy, dtype=float),
+            "continuum": np.asarray(continuum_mjy, dtype=float),
+            "lines": zeros,
+            "line_broad": zeros,
+            "line_narrow": zeros,
+            "feii": zeros,
+            "balmer": zeros,
+        }
+
+    monkeypatch.setattr(
+        spectroscopy,
+        "evaluate_joint_spectral_components",
+        fake_evaluate_joint_spectral_components,
+    )
+    bal = make_custom_component(
+        "bal_civ",
+        {"tau_peak": dist.Delta(1.0)},
+        lambda wave, params, metadata: jnp.ones_like(wave) * params["tau_peak"],
+        metadata={"component_type": "bal_absorption"},
+    )
+    additive = make_custom_component(
+        "additive",
+        {"amplitude": dist.Delta(1.0)},
+        lambda wave, params, metadata: jnp.ones_like(wave) * params["amplitude"],
+    )
+    cfg = FitConfig(
+        observation=Observation(redshift=1.0e-4),
+        photometry=PhotometryData(filter_names=["f1"], fluxes=[1.0], errors=[0.1]),
+        agn=AGNConfig(
+            fit_lines=False,
+            custom_components=(bal, additive),
+        ),
+    )
+    wave = np.asarray([4995.0, 5000.0, 5005.0], dtype=float)
+
+    _evaluate_spectral_components(
+        wave,
+        0.0,
+        np.ones_like(wave),
+        cfg,
+        {"line": {"table": []}},
+        wave,
+        np.zeros_like(wave),
+        include_bal_components=False,
+    )
+
+    assert [component.name for component in captured["config"].custom_components] == [
+        "additive"
+    ]
+
+
 def test_fit_config_mapping_coerces_agn_template_config():
     cfg = fit_config_from_mapping(
         {
@@ -2461,6 +2569,14 @@ def test_plot_spectrum_adapts_joint_predictive(monkeypatch):
             filter_names=["W1", "r_sdss", "u_sdss", "g_sdss", "z_sdss", "i_sdss"],
             photometry_method=["catalog", "psf", "psf", "catalog", "psf", "psf"],
         ),
+        agn=SimpleNamespace(
+            custom_components=(
+                SimpleNamespace(
+                    output_name="bal_civ",
+                    deterministic_site_name="custom_bal_civ_model",
+                ),
+            ),
+        ),
     )
     fitter.context = SimpleNamespace(
         fluxes=np.asarray([1.0, 2.0, 4.0, 3.0, 5.0, -1.0]),
@@ -2472,28 +2588,35 @@ def test_plot_spectrum_adapts_joint_predictive(monkeypatch):
         spec_mask=np.asarray([True, True, True]),
         spec_spectrum_index=np.asarray([0, 0, 0]),
     )
-    fitter.predict = lambda posterior="latest": {
-        "obs_wave": np.asarray([[4000.0, 5000.0, 6000.0], [4000.0, 5000.0, 6000.0]]),
-        "pred_spectrum_fluxes": np.asarray([[1.1, 2.2, 3.3], [1.3, 2.4, 3.5]]),
-        "spec_host_model_fluxes": np.asarray([[0.2, 0.3, 0.4], [0.25, 0.35, 0.45]]),
-        "spec_disk_model_fluxes": np.asarray([[0.5, 0.6, 0.7], [0.55, 0.65, 0.75]]),
-        "spec_torus_model_fluxes": np.asarray([[0.05, 0.06, 0.07], [0.055, 0.065, 0.075]]),
-        "spectral_continuum_model": np.asarray([[1.0, 2.0, 3.0], [1.0, 2.0, 3.0]]),
-        "spectral_line_model": np.asarray([[0.1, 0.2, 0.3], [0.3, 0.4, 0.5]]),
-        "spectral_line_model_aperture": np.asarray([[1.0, 1.0, 1.0], [3.0, 3.0, 3.0]]),
-        "spectral_line_model_broad": np.asarray([[0.6, 0.7, 0.8], [0.8, 0.9, 1.0]]),
-        "spectral_line_model_narrow": np.asarray([[0.4, 0.3, 0.2], [0.6, 0.5, 0.4]]),
-        "spectral_line_model_narrow_aperture": np.asarray([[0.2, 0.15, 0.1], [0.3, 0.25, 0.2]]),
-        "spectrum_scale_fit": np.asarray([2.0, 2.0]),
-        "spectrum_host_capture_fraction": np.asarray([0.5, 0.5]),
-        "host_obs_sed": np.asarray([[1.0e-20, 2.0e-20, 3.0e-20], [1.0e-20, 2.0e-20, 3.0e-20]]),
-        "disk_obs_sed": np.asarray([[2.0e-20, 2.0e-20, 2.0e-20], [2.0e-20, 2.0e-20, 2.0e-20]]),
-        "torus_obs_sed": np.asarray([[0.5e-20, 0.5e-20, 0.5e-20], [0.5e-20, 0.5e-20, 0.5e-20]]),
-        "dust_obs_sed": np.asarray([[0.1e-20, 0.1e-20, 0.1e-20], [0.1e-20, 0.1e-20, 0.1e-20]]),
-        "line_obs_sed": np.zeros((2, 3)),
-        "feii_obs_sed": np.zeros((2, 3)),
-        "nebular_lines_obs_sed": np.asarray([[0.2e-20, 0.3e-20, 0.2e-20], [0.2e-20, 0.3e-20, 0.2e-20]]),
-    }
+    def _fake_predict(posterior="latest", *, extra_return_sites=()):
+        captured["extra_return_sites"] = tuple(extra_return_sites)
+        return {
+            "obs_wave": np.asarray([[4000.0, 5000.0, 6000.0], [4000.0, 5000.0, 6000.0]]),
+            "pred_spectrum_fluxes": np.asarray([[1.1, 2.2, 3.3], [1.3, 2.4, 3.5]]),
+            "spec_host_model_fluxes": np.asarray([[0.2, 0.3, 0.4], [0.25, 0.35, 0.45]]),
+            "spec_disk_model_fluxes": np.asarray([[0.5, 0.6, 0.7], [0.55, 0.65, 0.75]]),
+            "spec_torus_model_fluxes": np.asarray([[0.05, 0.06, 0.07], [0.055, 0.065, 0.075]]),
+            "spectral_continuum_model": np.asarray([[1.0, 2.0, 3.0], [1.0, 2.0, 3.0]]),
+            "spectral_line_model": np.asarray([[0.1, 0.2, 0.3], [0.3, 0.4, 0.5]]),
+            "spectral_line_model_aperture": np.asarray([[1.0, 1.0, 1.0], [3.0, 3.0, 3.0]]),
+            "spectral_line_model_broad": np.asarray([[0.6, 0.7, 0.8], [0.8, 0.9, 1.0]]),
+            "spectral_line_model_narrow": np.asarray([[0.4, 0.3, 0.2], [0.6, 0.5, 0.4]]),
+            "spectral_line_model_narrow_aperture": np.asarray([[0.2, 0.15, 0.1], [0.3, 0.25, 0.2]]),
+            "spectral_custom_bal_civ_model": np.asarray(
+                [[-0.1, -0.2, -0.1], [-0.2, -0.3, -0.2]]
+            ),
+            "spectrum_scale_fit": np.asarray([2.0, 2.0]),
+            "spectrum_host_capture_fraction": np.asarray([0.5, 0.5]),
+            "host_obs_sed": np.asarray([[1.0e-20, 2.0e-20, 3.0e-20], [1.0e-20, 2.0e-20, 3.0e-20]]),
+            "disk_obs_sed": np.asarray([[2.0e-20, 2.0e-20, 2.0e-20], [2.0e-20, 2.0e-20, 2.0e-20]]),
+            "torus_obs_sed": np.asarray([[0.5e-20, 0.5e-20, 0.5e-20], [0.5e-20, 0.5e-20, 0.5e-20]]),
+            "dust_obs_sed": np.asarray([[0.1e-20, 0.1e-20, 0.1e-20], [0.1e-20, 0.1e-20, 0.1e-20]]),
+            "line_obs_sed": np.zeros((2, 3)),
+            "feii_obs_sed": np.zeros((2, 3)),
+            "nebular_lines_obs_sed": np.asarray([[0.2e-20, 0.3e-20, 0.2e-20], [0.2e-20, 0.3e-20, 0.2e-20]]),
+        }
+
+    fitter.predict = _fake_predict
 
     fig = fitter.plot_spectrum(show_plot=False, plot_residual=False)
 
@@ -2511,6 +2634,9 @@ def test_plot_spectrum_adapts_joint_predictive(monkeypatch):
     )
     assert "jaxsedfit_torus" in captured["custom_components"]
     assert "jaxsedfit_host_dust" in captured["custom_components"]
+    assert "bal_civ" in captured["custom_components"]
+    assert np.nanmax(captured["custom_components"]["bal_civ"]) < 0.0
+    assert "spectral_custom_bal_civ_model" in captured["extra_return_sites"]
     assert "jaxsedfit_sed_lines" not in captured["custom_components"]
     assert "jaxsedfit_nebular_lines" not in captured["custom_components"]
     assert set(captured["custom_line_components"]) == {"broad_lines", "narrow_lines"}
@@ -2534,6 +2660,10 @@ def test_plot_spectrum_adapts_joint_predictive(monkeypatch):
     assert "host" in captured["pred_bands"]
     assert "PL" in captured["pred_bands"]
     assert "jaxsedfit_torus" in captured["pred_bands"]
+    assert "bal_civ" in captured["pred_bands"]
+    bal_lo, bal_hi = captured["pred_bands"]["bal_civ"]
+    assert np.nanmax(bal_lo) < 0.0
+    assert np.nanmax(bal_hi) < 0.0
     assert "broad_lines" in captured["pred_bands"]
     assert "narrow_lines" in captured["pred_bands"]
     assert captured["use_psf_phot"] is True

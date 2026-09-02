@@ -12,9 +12,11 @@ from jaxsedfit.config import (
     GalaxyConfig,
     Observation,
     PhotometryData,
+    serialize_config,
 )
 from jaxsedfit.core import JAXSEDFit
 from jaxsedfit.results import FitResult, PredictionResult
+from jaxsedfit.spectral_defaults import build_default_bal_components
 
 
 @pytest.fixture(autouse=True)
@@ -46,6 +48,50 @@ def _minimal_config() -> FitConfig:
             ]
         ),
         galaxy=GalaxyConfig(dsps_ssp_fn="fake.h5", n_wave=32, sfh_n_steps=8),
+    )
+
+
+def test_serialize_config_uses_custom_component_state_when_nested():
+    config = _minimal_config()
+    config.agn.custom_components = build_default_bal_components(
+        np.array([1.0, 2.0, 3.0])
+    )
+
+    serialized = serialize_config(config)
+    component = serialized["agn"]["custom_components"][0]
+
+    assert component["__custom_component__"] is True
+    assert component["name"] == "bal_nv"
+    assert component["evaluate_ref"] == (
+        "jaxsedfit.spectral_model:gaussian_bal_optical_depth_component"
+    )
+    assert "evaluate" not in component
+
+
+def test_bal_custom_components_roundtrip_in_posterior_bundle(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        "jaxsedfit.core.build_model_context",
+        lambda config: SimpleNamespace(mw_ebv=0.03),
+    )
+    config = _minimal_config()
+    config.agn.custom_components = build_default_bal_components(
+        np.array([1.0, 2.0, 3.0])
+    )
+    fitter = JAXSEDFit(config)
+    fitter.samples = {"log_stellar_mass": np.array([10.0, 10.2])}
+
+    saved_path = fitter.save(tmp_path)
+    loaded = JAXSEDFit.load(saved_path)
+
+    assert [
+        component.name for component in loaded.config.agn.custom_components
+    ] == ["bal_nv", "bal_siiv", "bal_civ"]
+    assert all(
+        callable(component.evaluate)
+        for component in loaded.config.agn.custom_components
+    )
+    assert loaded.config.agn.custom_components[0].evaluate.__name__ == (
+        "gaussian_bal_optical_depth_component"
     )
 
 

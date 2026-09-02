@@ -23,7 +23,9 @@ from .host import (
 from .spectral_custom_components import (
     CustomComponentSpec,
     CustomLineComponentSpec,
+    bal_component_transmission,
     custom_component_param_site,
+    is_bal_absorption_component,
     normalize_custom_components,
     normalize_custom_line_components,
 )
@@ -518,18 +520,7 @@ def _is_multiplicative_bal_component(comp):
     comp : object
         comp value.
     """
-    return str(getattr(comp, "metadata", {}).get("component_type", "")) == "bal_absorption"
-
-
-def _bal_covering_fraction(params):
-    """Return a bounded BAL covering fraction.
-
-    Parameters
-    ----------
-    params : object
-        params value.
-    """
-    return jnp.clip(jnp.asarray(params.get("covering", 1.0)), 0.0, 0.999)
+    return is_bal_absorption_component(comp)
 
 
 def _smc_like_reddening_jax(wave, ebv, uv_ref=2500.0, alpha=1.2):
@@ -4289,9 +4280,7 @@ def qso_fsps_joint_model(wave, flux, err, conti_priors, tied_line_meta, fsps_gri
                 for param_name in comp.parameter_priors
             }
             tau_profile = jnp.asarray(comp.evaluate(wave, bal_params, comp.metadata), dtype=jnp.float64)
-            covering = _bal_covering_fraction(bal_params)
-            component_transmission = 1.0 - covering * (1.0 - jnp.exp(-tau_profile))
-            component_transmission = jnp.clip(component_transmission, 1.0e-6, 1.0)
+            component_transmission = bal_component_transmission(tau_profile, bal_params)
             custom_models[comp.output_name] = bal_reference * (component_transmission - 1.0)
             bal_transmission = bal_transmission * component_transmission
 

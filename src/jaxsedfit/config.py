@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence as SequenceABC
-from dataclasses import asdict, dataclass, field, is_dataclass
+from dataclasses import dataclass, field, fields, is_dataclass
 from typing import Any, Mapping, Sequence
 
 import numpy as np
@@ -1220,7 +1220,10 @@ def serialize_config(value: Any) -> Any:
     ):
         return serialize_config(value.to_state())
     if is_dataclass(value):
-        return {k: serialize_config(v) for k, v in asdict(value).items()}
+        return {
+            item.name: serialize_config(getattr(value, item.name))
+            for item in fields(value)
+        }
     if isinstance(value, dict):
         return {k: serialize_config(v) for k, v in value.items()}
     if isinstance(value, (list, tuple)):

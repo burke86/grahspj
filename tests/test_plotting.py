@@ -3,6 +3,7 @@ import sys
 import types
 
 import matplotlib.pyplot as plt
+from matplotlib.backends.backend_agg import FigureCanvasAgg
 import numpy as np
 import pytest
 
@@ -12,9 +13,15 @@ from jaxsedfit.plotting import (
     _bridged_jaxsedfit_agn_lines,
     _grouped_trace_samples,
     _median_effective_variance,
+    _place_overlapping_band_annotations,
     plot_corner,
     plot_fit_sed,
     plot_trace,
+)
+from jaxsedfit.spectral_plotting import (
+    _TOTAL_LINES_COLOR,
+    _spectral_component_color,
+    _spectral_component_linewidth,
 )
 
 
@@ -51,6 +58,16 @@ def test_component_style_separates_feii_from_agn_lines():
 
     assert "feii_obs_sed" not in styles["AGN lines"]
     assert styles["Fe II"] == ("feii_obs_sed",)
+
+
+def test_spectral_line_colors_are_stable_and_semantic():
+    for index in range(12):
+        assert _spectral_component_color("broad_lines", index) == "#CC79A7"
+        assert _spectral_component_color("narrow_lines", index) == "#009E73"
+    assert _spectral_component_color("bal_civ", 2) == "#D55E00"
+    assert _TOTAL_LINES_COLOR == "#56B4E9"
+    assert _spectral_component_linewidth("bal_civ") == pytest.approx(1.8)
+    assert _spectral_component_linewidth("broad_lines") == pytest.approx(1.4)
 
 
 def test_plot_fit_sed_writes_output(tmp_path):
@@ -129,8 +146,61 @@ def test_plot_fit_sed_writes_output(tmp_path):
     assert np.array_equal(agn_line_curves[0].get_xdata(), wave)
     assert len([line for line in fig.axes[0].lines if line.get_label() == "Fe II"]) == 1
     assert len([line for line in fig.axes[0].lines if line.get_label() == "Balmer cont."]) == 1
+    assert [text.get_text() for text in fig.axes[0].texts[:3]] == ["f1", "f2", "f3"]
+    for annotation in fig.axes[0].texts[:3]:
+        assert annotation.get_zorder() == 20
+        assert annotation.get_bbox_patch().get_alpha() == pytest.approx(0.62)
+        assert annotation.get_rotation() == pytest.approx(90.0)
+        assert annotation.get_rotation_mode() == "default"
+    assert [annotation.get_position() for annotation in fig.axes[0].texts[:3]] == [
+        (0, 8),
+        (0, 8),
+        (0, 8),
+    ]
+    FigureCanvasAgg(fig)
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+    for annotation in fig.axes[0].texts[:3]:
+        point_y = fig.axes[0].transData.transform(annotation.xy)[1]
+        assert annotation.get_window_extent(renderer).y0 > point_y
     assert output.exists()
     assert output.stat().st_size > 0
+
+
+def test_colliding_band_annotations_follow_point_height():
+    fig, ax = plt.subplots()
+    annotations = [
+        ax.annotate(
+            label,
+            point,
+            xytext=(0, 8),
+            textcoords="offset points",
+            rotation=90,
+        )
+        for label, point in (
+            ("near_lower", (0.5000, 0.3)),
+            ("near_upper", (0.5001, 0.7)),
+            ("far", (0.8, 0.5)),
+        )
+    ]
+
+    _place_overlapping_band_annotations(fig, annotations)
+
+    assert [annotation.get_position() for annotation in annotations] == [
+        (0, -8),
+        (0, 8),
+        (0, 8),
+    ]
+    assert [annotation.get_verticalalignment() for annotation in annotations] == [
+        "top",
+        "bottom",
+        "bottom",
+    ]
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+    below_point_y = ax.transData.transform(annotations[0].xy)[1]
+    assert annotations[0].get_window_extent(renderer).y1 < below_point_y
+    plt.close(fig)
 
 
 def test_plot_fit_sed_can_disable_band_annotations(tmp_path):

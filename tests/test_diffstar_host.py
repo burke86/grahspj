@@ -927,9 +927,32 @@ def test_fit_map_plot_init_plots_both_staged_map_solutions(monkeypatch):
     assert calls[0][1]["include_sed_agn_features"] is True
     assert calls[0][1]["include_spectral_features"] is True
     assert calls[0][1]["include_spectral_lines"] is False
+    assert calls[0][1]["include_spectral_bal"] is False
     assert calls[1][1]["include_sed_agn_features"] is True
     assert calls[1][1]["include_spectral_features"] is True
     assert calls[1][1]["include_spectral_lines"] is True
+    assert calls[1][1]["include_spectral_bal"] is True
+
+
+def test_stage1_map_model_disables_bal_only(monkeypatch):
+    import jaxsedfit.core as core_module
+
+    fitter = JAXSEDFit.__new__(JAXSEDFit)
+    fitter.context = object()
+    captured = {}
+
+    def fake_model(context, **kwargs):
+        captured["context"] = context
+        captured.update(kwargs)
+        return "stage1"
+
+    monkeypatch.setattr(core_module, "grahsp_photometric_model", fake_model)
+
+    assert fitter._continuum_init_model() == "stage1"
+    assert captured["context"] is fitter.context
+    assert captured["include_spectral_features"] is True
+    assert captured["include_spectral_lines"] is False
+    assert captured["include_spectral_bal"] is False
 
 
 def test_joint_dense_mass_blocks_follow_active_sites():
